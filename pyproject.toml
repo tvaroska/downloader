@@ -1,6 +1,6 @@
 [project]
 name = "downloader"
-version = "0.1.0"
+version = "0.0.1"
 description = "REST API Downloader - High-performance web service for programmatic URL content downloading"
 readme = "README.md"
 requires-python = ">=3.10"
@@ -10,6 +10,8 @@ dependencies = [
     "httpx>=0.25.0",
     "pydantic>=2.0.0",
     "python-multipart>=0.0.6",
+    "beautifulsoup4>=4.13.5",
+    "lxml>=6.0.1",
 ]
 
 [project.optional-dependencies]
@@ -43,3 +45,14 @@ pythonpath = ["src"]
 [tool.mypy]
 python_version = "3.10"
 strict = true
+
+[dependency-groups]
+dev = [
+    "black>=25.1.0",
+    "flake8>=7.3.0",
+    "isort>=6.0.1",
+    "mypy>=1.17.1",
+    "pytest>=8.4.1",
+    "pytest-asyncio>=1.1.0",
+    "pytest-cov>=6.2.1",
+]
