@@ -8,12 +8,27 @@ ENV PYTHONUNBUFFERED=1 \
     PIP_DISABLE_PIP_VERSION_CHECK=1 \
     UV_CACHE_DIR=/tmp/uv-cache
 
-# Install system dependencies needed for lxml and other packages
+# Install system dependencies needed for lxml, Playwright and other packages
 RUN apt-get update && apt-get install -y \
     libxml2-dev \
     libxslt-dev \
     gcc \
     curl \
+    wget \
+    ca-certificates \
+    fonts-liberation \
+    libappindicator3-1 \
+    libasound2 \
+    libatk-bridge2.0-0 \
+    libdrm2 \
+    libgtk-3-0 \
+    libnspr4 \
+    libnss3 \
+    libxcomposite1 \
+    libxdamage1 \
+    libxrandr2 \
+    xdg-utils \
+    libgbm1 \
     && rm -rf /var/lib/apt/lists/*
 
 # Create non-root user for security
@@ -29,25 +44,31 @@ RUN pip install uv
 COPY pyproject.toml uv.lock README.md ./
 
 # Install dependencies only (without the package itself)
-RUN uv pip install --system fastapi uvicorn httpx pydantic beautifulsoup4 lxml
+RUN uv pip install --system fastapi uvicorn httpx pydantic beautifulsoup4 lxml playwright
 
 # Copy application code
 COPY src/ ./src/
 COPY run.py ./
 
-# Create cache directory and change ownership to non-root user
-RUN mkdir -p /tmp/uv-cache && \
-    chown -R appuser:appuser /app /tmp/uv-cache
+# Create cache directory, home directory, and change ownership to non-root user
+RUN mkdir -p /tmp/uv-cache /home/appuser && \
+    chown -R appuser:appuser /app /tmp/uv-cache /home/appuser
 
 # Switch to non-root user
 USER appuser
 
+# Set PLAYWRIGHT_BROWSERS_PATH to a location the user can write to
+ENV PLAYWRIGHT_BROWSERS_PATH=/app/.playwright
+
+# Install Playwright browsers as the non-root user
+RUN playwright install chromium
+
 # Expose port
-EXPOSE 8000
+EXPOSE 80
 
 # Health check
 HEALTHCHECK --interval=30s --timeout=10s --start-period=5s --retries=3 \
-    CMD curl -f http://localhost:8000/health || exit 1
+    CMD curl -f http://localhost:80/health || exit 1
 
 # Run the application (production mode without reload)
-CMD ["python", "-m", "uvicorn", "src.downloader.main:app", "--host", "0.0.0.0", "--port", "8000"]
+CMD ["python", "-m", "uvicorn", "src.downloader.main:app", "--host", "0.0.0.0", "--port", "80"]
