@@ -5,6 +5,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 from downloader.pdf_generator import (
     PlaywrightPDFGenerator, 
+    BrowserPool,
     PDFGeneratorError,
     generate_pdf_from_url,
     get_pdf_generator
@@ -31,16 +32,17 @@ class TestPlaywrightPDFGenerator:
         """Test initialization and starting of PDF generator."""
         mock, playwright_instance, browser = mock_playwright
         
-        generator = PlaywrightPDFGenerator()
-        assert generator._browser is None
-        assert generator._playwright is None
+        generator = PlaywrightPDFGenerator(pool_size=2)
+        assert generator.pool is None
+        assert generator.pool_size == 2
         
         await generator.start()
         
+        # Should start playwright and launch browsers
         mock.return_value.start.assert_called_once()
-        playwright_instance.chromium.launch.assert_called_once()
-        assert generator._browser == browser
-        assert generator._playwright == playwright_instance
+        # Should launch browsers equal to pool_size
+        assert playwright_instance.chromium.launch.call_count == 2
+        assert generator.pool is not None
 
     @pytest.mark.asyncio
     async def test_start_failure(self, mock_playwright):
@@ -50,7 +52,7 @@ class TestPlaywrightPDFGenerator:
         
         generator = PlaywrightPDFGenerator()
         
-        with pytest.raises(PDFGeneratorError, match="Browser initialization failed"):
+        with pytest.raises(PDFGeneratorError, match="PDF generator initialization failed"):
             await generator.start()
 
     @pytest.mark.asyncio
@@ -63,10 +65,10 @@ class TestPlaywrightPDFGenerator:
         
         await generator.close()
         
-        browser.close.assert_called_once()
+        # Should close all browsers in pool
+        assert browser.close.call_count == generator.pool_size
         playwright_instance.stop.assert_called_once()
-        assert generator._browser is None
-        assert generator._playwright is None
+        assert generator.pool is None
 
     @pytest.mark.asyncio
     async def test_context_manager(self, mock_playwright):
@@ -74,10 +76,10 @@ class TestPlaywrightPDFGenerator:
         mock, playwright_instance, browser = mock_playwright
         
         async with PlaywrightPDFGenerator() as generator:
-            assert generator._browser == browser
-            assert generator._playwright == playwright_instance
+            assert generator.pool is not None
         
-        browser.close.assert_called_once()
+        # Should close all browsers when exiting context
+        assert browser.close.call_count == generator.pool_size
         playwright_instance.stop.assert_called_once()
 
     @pytest.mark.asyncio
@@ -85,7 +87,7 @@ class TestPlaywrightPDFGenerator:
         """Test PDF generation without initialization."""
         generator = PlaywrightPDFGenerator()
         
-        with pytest.raises(PDFGeneratorError, match="Browser not initialized"):
+        with pytest.raises(PDFGeneratorError, match="Browser pool not initialized"):
             await generator.generate_pdf("https://example.com")
 
     @pytest.mark.asyncio

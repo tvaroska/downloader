@@ -1,5 +1,6 @@
 """API endpoints for the downloader service."""
 
+import asyncio
 import base64
 import logging
 import re
@@ -19,6 +20,9 @@ from .auth import get_api_key, security
 logger = logging.getLogger(__name__)
 
 router = APIRouter()
+
+# Concurrency control for PDF generation
+PDF_SEMAPHORE = asyncio.Semaphore(5)  # Max 5 concurrent PDF generations
 
 
 class ErrorResponse(BaseModel):
@@ -281,9 +285,23 @@ async def download_url(
             )
             
         elif format_type == "pdf":
-            # PDF response - generate PDF using Playwright
+            # PDF response - generate PDF using Playwright with concurrency control
             logger.info(f"Generating PDF for: {validated_url}")
-            pdf_content = await generate_pdf_from_url(validated_url)
+            
+            # Check if PDF service is available
+            if PDF_SEMAPHORE.locked():
+                logger.warning(f"PDF service at capacity, rejecting request for: {validated_url}")
+                raise HTTPException(
+                    status_code=503,
+                    detail=ErrorResponse(
+                        error="PDF service temporarily unavailable. Please try again later.",
+                        error_type="service_unavailable"
+                    ).model_dump(),
+                )
+            
+            # Generate PDF with concurrency control
+            async with PDF_SEMAPHORE:
+                pdf_content = await generate_pdf_from_url(validated_url)
             
             return Response(
                 content=pdf_content,
@@ -380,6 +398,10 @@ async def download_url(
             ).model_dump(),
         )
 
+    except HTTPException:
+        # Re-raise HTTPExceptions (like our 503 error) without modification
+        raise
+        
     except Exception as e:
         logger.exception(f"Unexpected error downloading {url}: {e}")
         raise HTTPException(

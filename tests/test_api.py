@@ -248,6 +248,38 @@ class TestDownloadEndpoint:
         assert data["error_type"] == "pdf_generation_error"
         assert "Browser failed to start" in data["error"]
 
+    @patch("src.downloader.api.get_client")
+    @patch("src.downloader.api.PDF_SEMAPHORE")
+    def test_download_pdf_service_unavailable(self, mock_semaphore, mock_get_client):
+        """Test PDF service unavailable when at capacity."""
+        # Mock HTTP client
+        mock_client = AsyncMock()
+        mock_client.download.return_value = (
+            b"<html><body>test content</body></html>",
+            {
+                "url": "https://example.com",
+                "status_code": 200,
+                "content_type": "text/html",
+                "size": 39,
+                "headers": {"content-type": "text/html"},
+            },
+        )
+        mock_get_client.return_value = mock_client
+        
+        # Mock semaphore to be locked (at capacity)
+        mock_semaphore.locked.return_value = True
+        
+        response = client.get(
+            "/https://example.com",
+            headers={"Accept": "application/pdf"}
+        )
+        
+        assert response.status_code == 503
+        data = response.json()["detail"]
+        assert data["success"] is False
+        assert "temporarily unavailable" in data["error"]
+        assert data["error_type"] == "service_unavailable"
+
 
 class TestAuthentication:
     """Test API key authentication."""

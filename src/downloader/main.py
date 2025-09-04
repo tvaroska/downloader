@@ -9,6 +9,7 @@ from . import __version__
 from .api import router
 from .http_client import close_client
 from .auth import get_auth_status
+from .pdf_generator import cleanup_pdf_generator
 
 # Configure logging
 logging.basicConfig(
@@ -24,6 +25,7 @@ async def lifespan(app: FastAPI):
     yield
     # Shutdown
     await close_client()
+    await cleanup_pdf_generator()
 
 
 # Create FastAPI app
