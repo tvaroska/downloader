@@ -12,6 +12,7 @@ dependencies = [
     "python-multipart>=0.0.6",
     "beautifulsoup4>=4.13.5",
     "lxml>=6.0.1",
+    "playwright>=1.40.0",
 ]
 
 [project.optional-dependencies]

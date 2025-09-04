@@ -6,12 +6,15 @@ import re
 import json
 from typing import Dict, Any, Optional
 
-from fastapi import APIRouter, HTTPException, Response, Path, Header, Request
+from fastapi import APIRouter, HTTPException, Response, Path, Header, Request, Depends
+from fastapi.security import HTTPAuthorizationCredentials
 from pydantic import BaseModel
 from bs4 import BeautifulSoup
 
 from .validation import validate_url, URLValidationError
 from .http_client import get_client, HTTPClientError, HTTPTimeoutError, DownloadError
+from .pdf_generator import generate_pdf_from_url, PDFGeneratorError
+from .auth import get_api_key, security
 
 logger = logging.getLogger(__name__)
 
@@ -34,7 +37,7 @@ def parse_accept_header(accept_header: Optional[str]) -> str:
         accept_header: The Accept header value
         
     Returns:
-        Format string: 'text', 'html', 'markdown', or 'raw'
+        Format string: 'text', 'html', 'markdown', 'pdf', 'json', or 'raw'
     """
     if not accept_header:
         return "text"
@@ -48,6 +51,8 @@ def parse_accept_header(accept_header: Optional[str]) -> str:
         return "html"
     elif "text/markdown" in accept_header or "text/x-markdown" in accept_header:
         return "markdown"
+    elif "application/pdf" in accept_header:
+        return "pdf"
     elif "application/json" in accept_header:
         return "json"
     else:
@@ -182,6 +187,7 @@ async def download_url(
     url: str = Path(..., description="The URL to download"),
     accept: Optional[str] = Header(None, description="Accept header for content negotiation"),
     request: Request = None,
+    api_key: Optional[str] = Depends(get_api_key),
 ) -> Response:
     """
     Download content from a single URL with content negotiation.
@@ -190,17 +196,23 @@ async def download_url(
         url: The URL to download from
         accept: Accept header for content negotiation
         request: FastAPI request object
+        api_key: API key for authentication (if DOWNLOADER_KEY env var is set)
 
     Returns:
         Response with content in requested format
 
     Raises:
-        HTTPException: For various error conditions
+        HTTPException: For various error conditions including authentication failures
+        
+    Authentication (if DOWNLOADER_KEY environment variable is set):
+    - Authorization: Bearer <api_key>
+    - X-API-Key: <api_key>
         
     Content Negotiation via Accept Header:
     - text/plain: Returns plain text (HTML tags stripped)
     - text/html: Returns original HTML content
     - text/markdown: Returns markdown conversion of HTML
+    - application/pdf: Returns PDF generated via Playwright with JavaScript rendering
     - application/json: Returns JSON with base64 content and metadata
     - */*: Returns raw bytes with original content-type
     """
@@ -265,6 +277,22 @@ async def download_url(
                     "X-Original-URL": metadata["url"],
                     "X-Original-Content-Type": metadata["content_type"],
                     "X-Content-Length": str(metadata["size"]),
+                },
+            )
+            
+        elif format_type == "pdf":
+            # PDF response - generate PDF using Playwright
+            logger.info(f"Generating PDF for: {validated_url}")
+            pdf_content = await generate_pdf_from_url(validated_url)
+            
+            return Response(
+                content=pdf_content,
+                media_type="application/pdf",
+                headers={
+                    "X-Original-URL": metadata["url"],
+                    "X-Original-Content-Type": metadata["content_type"],
+                    "Content-Length": str(len(pdf_content)),
+                    "Content-Disposition": "inline; filename=\"download.pdf\"",
                 },
             )
             
@@ -339,6 +367,16 @@ async def download_url(
             status_code=500,
             detail=ErrorResponse(
                 error=str(e), error_type="download_error"
+            ).model_dump(),
+        )
+
+    except PDFGeneratorError as e:
+        logger.error(f"PDF generation failed for {url}: {e}")
+        raise HTTPException(
+            status_code=500,
+            detail=ErrorResponse(
+                error=f"PDF generation failed: {e}", 
+                error_type="pdf_generation_error"
             ).model_dump(),
         )
 

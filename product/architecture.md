@@ -33,6 +33,8 @@ The REST API Downloader is designed as a scalable, high-performance microservice
 
 ### Download Engine
 - **HTTP Client**: httpx for async HTTP operations with connection pooling
+- **Content Negotiation**: Support for multiple response formats via Accept headers
+- **Content Processing**: Intelligent extraction for HTML, markdown conversion, PDF handling
 - **Retry Logic**: Exponential backoff with configurable retry attempts
 - **Content Streaming**: Efficient handling of large files without memory exhaustion
 - **Circuit Breaker**: Prevents cascade failures from problematic URLs
@@ -51,12 +53,13 @@ The REST API Downloader is designed as a scalable, high-performance microservice
 ## Data Flow
 
 ### Single URL Download Flow
-1. Client sends GET request with URL-encoded target URL
+1. Client sends GET request with URL-encoded target URL and optional Accept header
 2. API Gateway validates request and checks rate limits
 3. Service checks Redis cache for existing content
 4. If cache miss, initiates HTTP download with timeout controls
-5. Content is streamed back to client with original headers
-6. Successful downloads are cached in Redis (if enabled)
+5. Content is processed based on Accept header (text/plain, text/html, text/markdown, application/pdf, application/json)
+6. Processed content is streamed back to client with appropriate headers
+7. Successful downloads are cached in Redis (if enabled)
 
 ### Batch Download Flow
 1. Client sends POST request with JSON payload of URLs

@@ -1,6 +1,7 @@
 import pytest
 import base64
 import json
+import os
 from unittest.mock import AsyncMock, patch
 from fastapi.testclient import TestClient
 
@@ -181,3 +182,198 @@ class TestDownloadEndpoint:
         data = response.json()["detail"]
         assert data["success"] is False
         assert data["error_type"] == "http_error"
+
+    @patch("src.downloader.api.get_client")
+    @patch("src.downloader.api.generate_pdf_from_url")
+    def test_download_pdf_format(self, mock_generate_pdf, mock_get_client):
+        # Mock HTTP client
+        mock_client = AsyncMock()
+        mock_client.download.return_value = (
+            b"<html><body>test content</body></html>",
+            {
+                "url": "https://example.com",
+                "status_code": 200,
+                "content_type": "text/html",
+                "size": 39,
+                "headers": {"content-type": "text/html"},
+            },
+        )
+        mock_get_client.return_value = mock_client
+        
+        # Mock PDF generation
+        pdf_content = b"%PDF-1.4 fake pdf content"
+        mock_generate_pdf.return_value = pdf_content
+
+        response = client.get(
+            "/https://example.com",
+            headers={"Accept": "application/pdf"}
+        )
+        assert response.status_code == 200
+        assert response.headers["content-type"] == "application/pdf"
+        assert "Content-Disposition" in response.headers
+        assert "download.pdf" in response.headers["Content-Disposition"]
+        
+        assert response.content == pdf_content
+        mock_generate_pdf.assert_called_once_with("https://example.com")
+
+    @patch("src.downloader.api.get_client")
+    @patch("src.downloader.api.generate_pdf_from_url")
+    def test_download_pdf_generation_error(self, mock_generate_pdf, mock_get_client):
+        from src.downloader.pdf_generator import PDFGeneratorError
+        
+        # Mock HTTP client
+        mock_client = AsyncMock()
+        mock_client.download.return_value = (
+            b"<html><body>test content</body></html>",
+            {
+                "url": "https://example.com",
+                "status_code": 200,
+                "content_type": "text/html",
+                "size": 39,
+                "headers": {"content-type": "text/html"},
+            },
+        )
+        mock_get_client.return_value = mock_client
+        
+        # Mock PDF generation failure
+        mock_generate_pdf.side_effect = PDFGeneratorError("Browser failed to start")
+
+        response = client.get(
+            "/https://example.com",
+            headers={"Accept": "application/pdf"}
+        )
+        assert response.status_code == 500
+        data = response.json()["detail"]
+        assert data["success"] is False
+        assert data["error_type"] == "pdf_generation_error"
+        assert "Browser failed to start" in data["error"]
+
+
+class TestAuthentication:
+    """Test API key authentication."""
+    
+    def test_health_endpoint_shows_auth_disabled(self):
+        """Test health endpoint shows authentication is disabled."""
+        with patch.dict(os.environ, {}, clear=True):
+            response = client.get("/health")
+            assert response.status_code == 200
+            data = response.json()
+            assert data["status"] == "healthy"
+            assert data["auth_enabled"] is False
+            assert data["auth_methods"] is None
+    
+    def test_health_endpoint_shows_auth_enabled(self):
+        """Test health endpoint shows authentication is enabled."""
+        with patch.dict(os.environ, {"DOWNLOADER_KEY": "test-key"}, clear=True):
+            response = client.get("/health")
+            assert response.status_code == 200
+            data = response.json()
+            assert data["status"] == "healthy"
+            assert data["auth_enabled"] is True
+            assert isinstance(data["auth_methods"], list)
+    
+    @patch("src.downloader.api.get_client")
+    def test_download_no_auth_required(self, mock_get_client):
+        """Test download works when no authentication is required."""
+        with patch.dict(os.environ, {}, clear=True):
+            # Mock HTTP client
+            mock_client = AsyncMock()
+            mock_client.download.return_value = (
+                b"<html>test</html>",
+                {
+                    "url": "https://example.com",
+                    "status_code": 200,
+                    "content_type": "text/html",
+                    "size": 17,
+                    "headers": {"content-type": "text/html"},
+                },
+            )
+            mock_get_client.return_value = mock_client
+
+            response = client.get("/https://example.com")
+            assert response.status_code == 200
+    
+    @patch("src.downloader.api.get_client")
+    def test_download_auth_required_no_key(self, mock_get_client):
+        """Test download fails when auth required but no key provided."""
+        with patch.dict(os.environ, {"DOWNLOADER_KEY": "test-key"}, clear=True):
+            response = client.get("/https://example.com")
+            assert response.status_code == 401
+            data = response.json()["detail"]
+            assert data["success"] is False
+            assert data["error_type"] == "authentication_required"
+    
+    @patch("src.downloader.api.get_client")
+    def test_download_auth_bearer_token_valid(self, mock_get_client):
+        """Test download works with valid Bearer token."""
+        with patch.dict(os.environ, {"DOWNLOADER_KEY": "test-key"}, clear=True):
+            # Mock HTTP client
+            mock_client = AsyncMock()
+            mock_client.download.return_value = (
+                b"<html>test</html>",
+                {
+                    "url": "https://example.com",
+                    "status_code": 200,
+                    "content_type": "text/html",
+                    "size": 17,
+                    "headers": {"content-type": "text/html"},
+                },
+            )
+            mock_get_client.return_value = mock_client
+
+            response = client.get(
+                "/https://example.com",
+                headers={"Authorization": "Bearer test-key"}
+            )
+            assert response.status_code == 200
+    
+    @patch("src.downloader.api.get_client")
+    def test_download_auth_bearer_token_invalid(self, mock_get_client):
+        """Test download fails with invalid Bearer token."""
+        with patch.dict(os.environ, {"DOWNLOADER_KEY": "test-key"}, clear=True):
+            response = client.get(
+                "/https://example.com",
+                headers={"Authorization": "Bearer wrong-key"}
+            )
+            assert response.status_code == 401
+            data = response.json()["detail"]
+            assert data["success"] is False
+            assert data["error_type"] == "authentication_failed"
+    
+    @patch("src.downloader.api.get_client")
+    def test_download_auth_x_api_key_valid(self, mock_get_client):
+        """Test download works with valid X-API-Key header."""
+        with patch.dict(os.environ, {"DOWNLOADER_KEY": "test-key"}, clear=True):
+            # Mock HTTP client
+            mock_client = AsyncMock()
+            mock_client.download.return_value = (
+                b"<html>test</html>",
+                {
+                    "url": "https://example.com",
+                    "status_code": 200,
+                    "content_type": "text/html",
+                    "size": 17,
+                    "headers": {"content-type": "text/html"},
+                },
+            )
+            mock_get_client.return_value = mock_client
+
+            response = client.get(
+                "/https://example.com",
+                headers={"X-API-Key": "test-key"}
+            )
+            assert response.status_code == 200
+    
+    @patch("src.downloader.api.get_client")
+    def test_download_auth_x_api_key_invalid(self, mock_get_client):
+        """Test download fails with invalid X-API-Key header."""
+        with patch.dict(os.environ, {"DOWNLOADER_KEY": "test-key"}, clear=True):
+            response = client.get(
+                "/https://example.com",
+                headers={"X-API-Key": "wrong-key"}
+            )
+            assert response.status_code == 401
+            data = response.json()["detail"]
+            assert data["success"] is False
+            assert data["error_type"] == "authentication_failed"
+    

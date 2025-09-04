@@ -8,8 +8,9 @@ This roadmap outlines the complete implementation strategy for the REST API Down
 
 **Phase 1 COMPLETED with Enhanced Features:**
 - ✅ Core API infrastructure with direct URL endpoints
-- ✅ Content negotiation via Accept headers (text, HTML, markdown, JSON)
+- ✅ Content negotiation via Accept headers (text, HTML, markdown, PDF, JSON)
 - ✅ BeautifulSoup-powered intelligent article extraction
+- ✅ PDF content type support for document downloads
 - ✅ Production-ready Docker containerization
 - ✅ Comprehensive security (SSRF protection, input validation)
 - ✅ Full test suite (33 tests, 100% critical coverage)
@@ -52,8 +53,9 @@ This roadmap outlines the complete implementation strategy for the REST API Down
 
 #### Implementation Notes (Week 2 Completed + Enhanced)
 - **API Endpoints**: Direct URL access via `/{url}` with content negotiation via Accept headers
-- **Content Formats**: Support for text/plain, text/markdown, text/html, and application/json responses
+- **Content Formats**: Support for text/plain, text/markdown, text/html, application/pdf, and application/json responses
 - **Article Extraction**: BeautifulSoup-powered intelligent content extraction from HTML
+- **PDF Support**: Native PDF content type handling with proper headers and disposition
 - **Security**: SSRF protection blocking localhost and private IP ranges
 - **Error Handling**: Structured error responses with proper HTTP status codes (400, 408, 404, 502, 500)
 - **Architecture**: Clean modular design with async/await throughout

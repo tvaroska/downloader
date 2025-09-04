@@ -6,6 +6,8 @@ High-performance web service for programmatic URL content downloading with intel
 
 - **Direct URL Access**: Simple `/{url}` endpoint structure
 - **Content Negotiation**: Multiple response formats via Accept headers
+- **PDF Generation**: JavaScript-rendered PDFs using Playwright
+- **API Key Protection**: Optional authentication via environment variable
 - **Intelligent Extraction**: BeautifulSoup-powered article text extraction
 - **Security**: SSRF protection and URL validation
 - **Performance**: Async HTTP client with connection pooling
@@ -33,8 +35,54 @@ Accept: {format}
 | `text/plain` | Plain Text | Extracted article content, clean text only |
 | `text/markdown` | Markdown | Structured markdown with headings and links |
 | `text/html` | HTML | Original HTML content |
+| `application/pdf` | PDF | JavaScript-rendered PDF via Playwright |
 | `application/json` | JSON | Base64 content with metadata |
 | *No Accept header* | **Plain Text (Default)** | **Default format returns extracted article text** |
+
+## 🔐 Authentication
+
+API key authentication is **optional** and controlled by the `DOWNLOADER_KEY` environment variable.
+
+### Without Authentication (Default)
+If `DOWNLOADER_KEY` is not set, all endpoints are publicly accessible:
+
+```bash
+curl -H "Accept: text/plain" http://localhost:8000/https://example.com
+```
+
+### With Authentication
+Set the `DOWNLOADER_KEY` environment variable to enable API key protection:
+
+```bash
+# Start server with authentication
+DOWNLOADER_KEY=your-secret-key uv run python run.py
+```
+
+Once enabled, provide the API key using any of these methods:
+
+**1. Bearer Token (Recommended)**
+```bash
+curl -H "Authorization: Bearer your-secret-key" \
+     -H "Accept: text/plain" \
+     http://localhost:8000/https://example.com
+```
+
+**2. X-API-Key Header**
+```bash
+curl -H "X-API-Key: your-secret-key" \
+     -H "Accept: text/plain" \
+     http://localhost:8000/https://example.com
+```
+
+
+### Authentication Status
+Check if authentication is enabled via the health endpoint:
+
+```bash
+curl http://localhost:8000/health
+```
+
+Returns authentication status and supported methods when enabled.
 
 ## 🔥 Quick Start
 
@@ -44,8 +92,11 @@ Accept: {format}
 # Build the image
 docker build -t downloader .
 
-# Run the container
+# Run without authentication
 docker run -p 8000:8000 downloader
+
+# Or run with API key authentication
+docker run -e DOWNLOADER_KEY=your-secret-key -p 8000:8000 downloader
 
 # Test the API
 curl -H "Accept: text/plain" http://localhost:8000/https://example.com

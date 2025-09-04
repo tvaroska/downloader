@@ -1,0 +1,254 @@
+"""Tests for PDF generation functionality."""
+
+import pytest
+from unittest.mock import AsyncMock, MagicMock, patch
+
+from downloader.pdf_generator import (
+    PlaywrightPDFGenerator, 
+    PDFGeneratorError,
+    generate_pdf_from_url,
+    get_pdf_generator
+)
+
+
+class TestPlaywrightPDFGenerator:
+    """Test PlaywrightPDFGenerator class."""
+
+    @pytest.fixture
+    def mock_playwright(self):
+        """Mock playwright instance."""
+        with patch('downloader.pdf_generator.async_playwright') as mock:
+            playwright_instance = AsyncMock()
+            mock.return_value.start = AsyncMock(return_value=playwright_instance)
+            
+            browser = AsyncMock()
+            playwright_instance.chromium.launch = AsyncMock(return_value=browser)
+            
+            yield mock, playwright_instance, browser
+
+    @pytest.mark.asyncio
+    async def test_init_and_start(self, mock_playwright):
+        """Test initialization and starting of PDF generator."""
+        mock, playwright_instance, browser = mock_playwright
+        
+        generator = PlaywrightPDFGenerator()
+        assert generator._browser is None
+        assert generator._playwright is None
+        
+        await generator.start()
+        
+        mock.return_value.start.assert_called_once()
+        playwright_instance.chromium.launch.assert_called_once()
+        assert generator._browser == browser
+        assert generator._playwright == playwright_instance
+
+    @pytest.mark.asyncio
+    async def test_start_failure(self, mock_playwright):
+        """Test failure during start."""
+        mock, _, _ = mock_playwright
+        mock.return_value.start.side_effect = Exception("Browser start failed")
+        
+        generator = PlaywrightPDFGenerator()
+        
+        with pytest.raises(PDFGeneratorError, match="Browser initialization failed"):
+            await generator.start()
+
+    @pytest.mark.asyncio
+    async def test_close(self, mock_playwright):
+        """Test closing of PDF generator."""
+        mock, playwright_instance, browser = mock_playwright
+        
+        generator = PlaywrightPDFGenerator()
+        await generator.start()
+        
+        await generator.close()
+        
+        browser.close.assert_called_once()
+        playwright_instance.stop.assert_called_once()
+        assert generator._browser is None
+        assert generator._playwright is None
+
+    @pytest.mark.asyncio
+    async def test_context_manager(self, mock_playwright):
+        """Test using as context manager."""
+        mock, playwright_instance, browser = mock_playwright
+        
+        async with PlaywrightPDFGenerator() as generator:
+            assert generator._browser == browser
+            assert generator._playwright == playwright_instance
+        
+        browser.close.assert_called_once()
+        playwright_instance.stop.assert_called_once()
+
+    @pytest.mark.asyncio
+    async def test_generate_pdf_not_initialized(self):
+        """Test PDF generation without initialization."""
+        generator = PlaywrightPDFGenerator()
+        
+        with pytest.raises(PDFGeneratorError, match="Browser not initialized"):
+            await generator.generate_pdf("https://example.com")
+
+    @pytest.mark.asyncio
+    async def test_generate_pdf_success(self, mock_playwright):
+        """Test successful PDF generation."""
+        mock, playwright_instance, browser = mock_playwright
+        
+        # Mock page
+        page = AsyncMock()
+        browser.new_page = AsyncMock(return_value=page)
+        
+        # Mock response
+        response = MagicMock()
+        response.status = 200
+        response.status_text = "OK"
+        page.goto = AsyncMock(return_value=response)
+        
+        # Mock PDF content
+        pdf_content = b"PDF content"
+        page.pdf = AsyncMock(return_value=pdf_content)
+        
+        generator = PlaywrightPDFGenerator()
+        await generator.start()
+        
+        result = await generator.generate_pdf("https://example.com")
+        
+        assert result == pdf_content
+        browser.new_page.assert_called_once()
+        page.set_viewport_size.assert_called_once()
+        page.set_extra_http_headers.assert_called_once()
+        page.goto.assert_called_once()
+        page.wait_for_load_state.assert_called_once()
+        page.pdf.assert_called_once()
+        page.close.assert_called_once()
+
+    @pytest.mark.asyncio
+    async def test_generate_pdf_http_error(self, mock_playwright):
+        """Test PDF generation with HTTP error."""
+        mock, playwright_instance, browser = mock_playwright
+        
+        # Mock page
+        page = AsyncMock()
+        browser.new_page = AsyncMock(return_value=page)
+        
+        # Mock response with error
+        response = MagicMock()
+        response.status = 404
+        response.status_text = "Not Found"
+        page.goto = AsyncMock(return_value=response)
+        
+        generator = PlaywrightPDFGenerator()
+        await generator.start()
+        
+        with pytest.raises(PDFGeneratorError, match="HTTP 404"):
+            await generator.generate_pdf("https://example.com/notfound")
+        
+        page.close.assert_called_once()
+
+    @pytest.mark.asyncio
+    async def test_generate_pdf_no_response(self, mock_playwright):
+        """Test PDF generation with no response."""
+        mock, playwright_instance, browser = mock_playwright
+        
+        # Mock page
+        page = AsyncMock()
+        browser.new_page = AsyncMock(return_value=page)
+        page.goto = AsyncMock(return_value=None)
+        
+        generator = PlaywrightPDFGenerator()
+        await generator.start()
+        
+        with pytest.raises(PDFGeneratorError, match="Failed to load page"):
+            await generator.generate_pdf("https://example.com")
+        
+        page.close.assert_called_once()
+
+    @pytest.mark.asyncio
+    async def test_generate_pdf_custom_options(self, mock_playwright):
+        """Test PDF generation with custom options."""
+        mock, playwright_instance, browser = mock_playwright
+        
+        # Mock page
+        page = AsyncMock()
+        browser.new_page = AsyncMock(return_value=page)
+        
+        # Mock response
+        response = MagicMock()
+        response.status = 200
+        page.goto = AsyncMock(return_value=response)
+        
+        # Mock PDF content
+        pdf_content = b"PDF content"
+        page.pdf = AsyncMock(return_value=pdf_content)
+        
+        generator = PlaywrightPDFGenerator()
+        await generator.start()
+        
+        custom_options = {
+            'format': 'Letter',
+            'timeout': 60000,
+            'margin': {'top': '10px', 'bottom': '10px'}
+        }
+        
+        result = await generator.generate_pdf("https://example.com", custom_options)
+        
+        assert result == pdf_content
+        
+        # Check that custom options were used
+        page.goto.assert_called_once()
+        call_args = page.goto.call_args
+        assert call_args[1]['timeout'] == 60000
+        
+        page.pdf.assert_called_once()
+        pdf_call_args = page.pdf.call_args[1]
+        assert pdf_call_args['format'] == 'Letter'
+        assert pdf_call_args['margin']['top'] == '10px'
+
+
+class TestGlobalFunctions:
+    """Test global PDF generation functions."""
+
+    @pytest.mark.asyncio
+    async def test_generate_pdf_from_url(self):
+        """Test generate_pdf_from_url function."""
+        with patch('downloader.pdf_generator.get_pdf_generator') as mock_get_generator:
+            mock_generator = AsyncMock()
+            mock_generator.generate_pdf = AsyncMock(return_value=b"PDF content")
+            
+            # Mock async context manager
+            mock_context = AsyncMock()
+            mock_context.__aenter__ = AsyncMock(return_value=mock_generator)
+            mock_context.__aexit__ = AsyncMock(return_value=None)
+            mock_get_generator.return_value = mock_context
+            
+            result = await generate_pdf_from_url("https://example.com")
+            
+            assert result == b"PDF content"
+            mock_generator.generate_pdf.assert_called_once_with("https://example.com", None)
+
+    @pytest.mark.asyncio
+    async def test_get_pdf_generator_creates_new(self):
+        """Test that get_pdf_generator creates new instance when none exists."""
+        # Reset global state
+        import downloader.pdf_generator
+        downloader.pdf_generator._pdf_generator = None
+        
+        with patch('downloader.pdf_generator.PlaywrightPDFGenerator') as mock_class:
+            mock_instance = AsyncMock()
+            mock_class.return_value = mock_instance
+            
+            async with get_pdf_generator() as generator:
+                assert generator == mock_instance
+                mock_instance.start.assert_called_once()
+
+    @pytest.mark.asyncio 
+    async def test_get_pdf_generator_reuses_existing(self):
+        """Test that get_pdf_generator reuses existing instance."""
+        # Set up existing instance
+        import downloader.pdf_generator
+        existing_instance = AsyncMock()
+        downloader.pdf_generator._pdf_generator = existing_instance
+        
+        async with get_pdf_generator() as generator:
+            assert generator == existing_instance
+            # Should not call start again
+            existing_instance.start.assert_not_called()

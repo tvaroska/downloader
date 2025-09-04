@@ -8,6 +8,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from . import __version__
 from .api import router
 from .http_client import close_client
+from .auth import get_auth_status
 
 # Configure logging
 logging.basicConfig(
@@ -47,7 +48,12 @@ app.add_middleware(
 @app.get("/health")
 async def health_check():
     """Health check endpoint."""
-    return {"status": "healthy", "version": __version__}
+    health_info = {
+        "status": "healthy", 
+        "version": __version__
+    }
+    health_info.update(get_auth_status())
+    return health_info
 
 
 # Include API router (must be after specific routes like /health)

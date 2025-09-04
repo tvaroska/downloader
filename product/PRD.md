@@ -59,7 +59,8 @@ This service addresses the common need for reliable, scalable URL content downlo
 - **GET /version** - Service version information
 
 #### Content Handling
-- Support various content types (HTML, JSON, XML, images, documents)
+- Support various content types (HTML, JSON, XML, images, PDF documents)
+- Content negotiation via Accept headers (text/plain, text/html, text/markdown, application/pdf, application/json)
 - Handle large files efficiently (streaming when possible)
 - Implement configurable timeout limits
 - Support custom User-Agent headers
