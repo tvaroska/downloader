@@ -43,12 +43,12 @@ RUN pip install uv
 # Copy dependency files and README (required by pyproject.toml)
 COPY pyproject.toml uv.lock README.md ./
 
-# Install dependencies only (without the package itself)
-RUN uv pip install --system fastapi uvicorn httpx pydantic beautifulsoup4 lxml playwright
-
-# Copy application code
+# Copy application code (needed for uv sync to work)
 COPY src/ ./src/
 COPY run.py ./
+
+# Install dependencies using uv sync
+RUN uv sync --frozen
 
 # Create cache directory, home directory, and change ownership to non-root user
 RUN mkdir -p /tmp/uv-cache /home/appuser && \
@@ -61,7 +61,7 @@ USER appuser
 ENV PLAYWRIGHT_BROWSERS_PATH=/app/.playwright
 
 # Install Playwright browsers as the non-root user
-RUN playwright install chromium
+RUN uv run playwright install chromium
 
 # Expose port
 EXPOSE 80
@@ -70,5 +70,5 @@ EXPOSE 80
 HEALTHCHECK --interval=30s --timeout=10s --start-period=5s --retries=3 \
     CMD curl -f http://localhost:80/health || exit 1
 
-# Run the application (production mode without reload)
-CMD ["python", "-m", "uvicorn", "src.downloader.main:app", "--host", "0.0.0.0", "--port", "80"]
+# Run the application using uv run (production mode without reload)
+CMD ["uv", "run", "uvicorn", "src.downloader.main:app", "--host", "0.0.0.0", "--port", "80"]
