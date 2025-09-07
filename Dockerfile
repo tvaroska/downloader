@@ -1,4 +1,4 @@
-# Build dependencies and runtime in single stage (optimized)
+# Optimized production image
 FROM python:3.11-slim
 
 # Set environment variables
@@ -8,7 +8,7 @@ ENV PYTHONUNBUFFERED=1 \
     PIP_DISABLE_PIP_VERSION_CHECK=1 \
     PLAYWRIGHT_BROWSERS_PATH=/usr/local/share/playwright/browsers
 
-# Install dependencies + build tools, install Python packages + Playwright deps, then remove build tools
+# Install system dependencies and build tools
 RUN apt-get update && apt-get install -y --no-install-recommends \
     gcc \
     libxml2-dev \
@@ -17,17 +17,19 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     ca-certificates \
     libxml2 \
     libxslt1.1 \
-    && pip install --no-cache-dir \
-        fastapi>=0.104.0 \
-        uvicorn[standard]>=0.24.0 \
-        httpx>=0.25.0 \
-        pydantic>=2.0.0 \
-        python-multipart>=0.0.6 \
-        beautifulsoup4>=4.13.5 \
-        lxml>=6.0.1 \
-        playwright>=1.40.0 \
+    && rm -rf /var/lib/apt/lists/*
+
+WORKDIR /app
+
+# Copy project files for dependency installation
+COPY pyproject.toml README.md ./
+COPY src/ ./src/
+
+# Install Python dependencies from pyproject.toml (cleaner than hardcoded versions)
+RUN pip install --no-cache-dir -e . \
     && playwright install chromium \
     && playwright install-deps chromium \
+    && apt-get update \
     && apt-get remove -y gcc libxml2-dev libxslt-dev \
     && apt-get autoremove -y \
     && apt-get autoclean \
@@ -35,17 +37,14 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     && rm -rf /tmp/* \
     && rm -rf /root/.cache
 
+# Copy run script
+COPY run.py ./
+
 # Create non-root user and set up proper permissions for Playwright
 RUN groupadd -r appuser && useradd -r -g appuser appuser \
     && mkdir -p /home/appuser \
     && chown -R appuser:appuser /home/appuser \
     && chown -R appuser:appuser /usr/local/share/playwright
-
-WORKDIR /app
-
-# Copy application
-COPY src/ ./src/
-COPY run.py ./
 
 # Set ownership
 RUN chown -R appuser:appuser /app
