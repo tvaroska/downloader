@@ -115,6 +115,26 @@ async def convert_content_to_text_with_playwright_fallback(url: str) -> str:
                 # Wait for page to be fully loaded
                 await page.wait_for_load_state('networkidle', timeout=30000)
                 
+                # Try to close any signup boxes/modals
+                try:
+                    close_selectors = [
+                        '[aria-label="close"]',
+                        '[title="Close"]', 
+                        '[aria-label="Close"]',
+                        '[title="close"]'
+                    ]
+                    for selector in close_selectors:
+                        close_buttons = await page.query_selector_all(selector)
+                        for button in close_buttons:
+                            try:
+                                await button.click(timeout=1000)
+                                logger.debug(f"Closed modal/popup with selector: {selector}")
+                                await page.wait_for_timeout(500)  # Brief wait after closing
+                            except Exception:
+                                pass  # Ignore if click fails
+                except Exception:
+                    pass  # Ignore any errors during modal closing
+                
                 logger.debug(f"Extracting rendered HTML content for text: {url}")
                 # Get the rendered HTML content
                 html_content = await page.content()
@@ -258,6 +278,26 @@ async def convert_content_to_markdown_with_playwright_fallback(url: str) -> str:
                 logger.debug(f"Page loaded, waiting for network idle: {url}")
                 # Wait for page to be fully loaded
                 await page.wait_for_load_state('networkidle', timeout=30000)
+                
+                # Try to close any signup boxes/modals
+                try:
+                    close_selectors = [
+                        '[aria-label="close"]',
+                        '[title="Close"]', 
+                        '[aria-label="Close"]',
+                        '[title="close"]'
+                    ]
+                    for selector in close_selectors:
+                        close_buttons = await page.query_selector_all(selector)
+                        for button in close_buttons:
+                            try:
+                                await button.click(timeout=1000)
+                                logger.debug(f"Closed modal/popup with selector: {selector}")
+                                await page.wait_for_timeout(500)  # Brief wait after closing
+                            except Exception:
+                                pass  # Ignore if click fails
+                except Exception:
+                    pass  # Ignore any errors during modal closing
                 
                 logger.debug(f"Extracting rendered HTML content for markdown: {url}")
                 # Get the rendered HTML content
