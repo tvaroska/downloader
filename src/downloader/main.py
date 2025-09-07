@@ -9,7 +9,7 @@ from . import __version__
 from .api import router
 from .http_client import close_client
 from .auth import get_auth_status
-from .pdf_generator import cleanup_pdf_generator
+from .pdf_generator import cleanup_pdf_generator, get_pdf_generator
 
 # Configure logging
 logging.basicConfig(
@@ -21,8 +21,12 @@ logger = logging.getLogger(__name__)
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """Application lifespan events."""
-    # Startup
-    yield
+    # Startup - Initialize Playwright pool
+    logger.info("Initializing Playwright browser pool...")
+    async with get_pdf_generator() as generator:
+        logger.info("Playwright browser pool initialized successfully")
+        app.state.pdf_generator = generator
+        yield
     # Shutdown
     await close_client()
     await cleanup_pdf_generator()

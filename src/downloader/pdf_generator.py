@@ -44,31 +44,40 @@ class BrowserPool:
             
     async def _launch_browser(self) -> Browser:
         """Launch a single browser instance."""
-        # Force use of full chromium instead of headless shell
         import os
-        chromium_path = "/app/.playwright/chromium-1187/chrome-linux/chrome"
+        
+        # Check for common chromium paths
+        chromium_paths = [
+            "/home/boris/.cache/ms-playwright/chromium-1187/chrome-linux/chrome",
+            "/app/.playwright/chromium-1187/chrome-linux/chrome", 
+            "/usr/bin/chromium",
+            "/usr/bin/chromium-browser"
+        ]
+        
+        executable_path = None
+        for path in chromium_paths:
+            if os.path.exists(path):
+                executable_path = path
+                break
         
         return await self._playwright.chromium.launch(
             headless=True,
-            executable_path=chromium_path if os.path.exists(chromium_path) else None,
+            executable_path=executable_path,
             args=[
-                '--no-sandbox',  # Required for containers
-                '--disable-dev-shm-usage',  # Required for containers
-                '--disable-gpu',  # Not needed for PDF
-                # REMOVED: '--disable-web-security',  # Security risk - removed
+                '--no-sandbox',
+                '--disable-dev-shm-usage',
+                '--disable-gpu',
                 '--disable-features=VizDisplayCompositor',
                 '--disable-background-timer-throttling',
                 '--disable-backgrounding-occluded-windows',
                 '--disable-renderer-backgrounding',
                 '--disable-field-trial-config',
                 '--disable-ipc-flooding-protection',
-                '--virtual-time-budget=30000',  # Timeout protection
-                '--run-all-compositor-stages-before-draw',
                 '--disable-checker-imaging',
                 '--disable-extensions',
                 '--disable-plugins',
                 '--disable-default-apps',
-                '--disable-remote-fonts',  # Reduce resource usage
+                '--disable-remote-fonts',
             ]
         )
         
@@ -317,6 +326,11 @@ async def generate_pdf_from_url(url: str, options: Optional[Dict[str, Any]] = No
     """
     async with get_pdf_generator() as generator:
         return await generator.generate_pdf(url, options)
+
+
+def get_shared_pdf_generator() -> Optional[PlaywrightPDFGenerator]:
+    """Get the shared PDF generator instance if it exists."""
+    return _pdf_generator
 
 
 async def cleanup_pdf_generator():

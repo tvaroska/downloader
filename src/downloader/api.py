@@ -14,7 +14,7 @@ from bs4 import BeautifulSoup
 
 from .validation import validate_url, URLValidationError
 from .http_client import get_client, HTTPClientError, HTTPTimeoutError, DownloadError
-from .pdf_generator import generate_pdf_from_url, PDFGeneratorError, get_pdf_generator
+from .pdf_generator import generate_pdf_from_url, PDFGeneratorError, get_pdf_generator, get_shared_pdf_generator
 from .auth import get_api_key, security
 
 logger = logging.getLogger(__name__)
@@ -79,15 +79,15 @@ async def convert_content_to_text_with_playwright_fallback(url: str) -> str:
     """
     try:
         logger.info(f"🔄 Starting Playwright text fallback for {url}")
-        async with get_pdf_generator() as generator:
-            if not generator.pool:
-                raise Exception("PDF generator pool not initialized")
+        generator = get_shared_pdf_generator()
+        if not generator or not generator.pool:
+            raise Exception("PDF generator pool not initialized")
                 
-            browser = await generator.pool.get_browser()
-            context = None
-            page = None
+        browser = await generator.pool.get_browser()
+        context = None
+        page = None
             
-            try:
+        try:
                 # Create isolated context for this request
                 context = await browser.new_context(
                     user_agent='Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
@@ -148,12 +148,12 @@ async def convert_content_to_text_with_playwright_fallback(url: str) -> str:
                 
                 return text
                 
-            finally:
-                # Cleanup in reverse order
-                if context:
-                    await context.close()
-                if generator.pool:
-                    await generator.pool.release_browser(browser)
+        finally:
+            # Cleanup in reverse order
+            if context:
+                await context.close()
+            if generator.pool:
+                await generator.pool.release_browser(browser)
                     
     except Exception as e:
         logger.error(f"Playwright fallback failed for {url}: {e}")
@@ -223,15 +223,15 @@ async def convert_content_to_markdown_with_playwright_fallback(url: str) -> str:
     """
     try:
         logger.info(f"🔄 Starting Playwright markdown fallback for {url}")
-        async with get_pdf_generator() as generator:
-            if not generator.pool:
-                raise Exception("PDF generator pool not initialized")
+        generator = get_shared_pdf_generator()
+        if not generator or not generator.pool:
+            raise Exception("PDF generator pool not initialized")
                 
-            browser = await generator.pool.get_browser()
-            context = None
-            page = None
+        browser = await generator.pool.get_browser()
+        context = None
+        page = None
             
-            try:
+        try:
                 # Create isolated context for this request
                 context = await browser.new_context(
                     user_agent='Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
@@ -322,12 +322,12 @@ async def convert_content_to_markdown_with_playwright_fallback(url: str) -> str:
                 
                 return text
                 
-            finally:
-                # Cleanup in reverse order
-                if context:
-                    await context.close()
-                if generator.pool:
-                    await generator.pool.release_browser(browser)
+        finally:
+            # Cleanup in reverse order
+            if context:
+                await context.close()
+            if generator.pool:
+                await generator.pool.release_browser(browser)
                     
     except Exception as e:
         logger.error(f"Playwright markdown fallback failed for {url}: {e}")
