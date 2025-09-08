@@ -1,9 +1,9 @@
 import pytest
 
 from src.downloader.validation import (
-    validate_url,
-    sanitize_user_agent,
     URLValidationError,
+    sanitize_user_agent,
+    validate_url,
 )
 
 

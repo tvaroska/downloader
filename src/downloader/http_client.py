@@ -1,8 +1,7 @@
 """HTTP client implementation using httpx."""
 
-import asyncio
 import logging
-from typing import Dict, Any, Optional, Tuple
+from typing import Any
 
 import httpx
 
@@ -36,7 +35,7 @@ class HTTPClient:
         self,
         timeout: float = 30.0,
         max_redirects: int = 10,
-        user_agent: Optional[str] = None,
+        user_agent: str | None = None,
     ):
         """
         Initialize HTTP client.
@@ -63,7 +62,7 @@ class HTTPClient:
             },
         )
 
-    async def download(self, url: str) -> Tuple[bytes, Dict[str, Any]]:
+    async def download(self, url: str) -> tuple[bytes, dict[str, Any]]:
         """
         Download content from a URL.
 
@@ -137,7 +136,7 @@ class HTTPClient:
 
 
 # Global client instance for reuse
-_global_client: Optional[HTTPClient] = None
+_global_client: HTTPClient | None = None
 
 
 async def get_client() -> HTTPClient:

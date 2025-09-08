@@ -2,7 +2,6 @@
 
 import re
 from urllib.parse import urlparse
-from typing import Optional
 
 import httpx
 
@@ -92,7 +91,7 @@ def _is_private_address(hostname: str) -> bool:
     return False
 
 
-def sanitize_user_agent(user_agent: Optional[str] = None) -> str:
+def sanitize_user_agent(user_agent: str | None = None) -> str:
     """
     Sanitize or provide default User-Agent header.
 

@@ -1,8 +1,8 @@
-import pytest
 import base64
 import json
 import os
 from unittest.mock import AsyncMock, patch
+
 from fastapi.testclient import TestClient
 
 from src.downloader.main import app
@@ -17,19 +17,19 @@ class TestHealthEndpoint:
         data = response.json()
         assert data["status"] == "healthy"
         assert data["version"] == "0.0.1"
-        
+
         # Check service status
         assert "services" in data
         assert "batch_processing" in data["services"]
         assert "pdf_generation" in data["services"]
-        
+
         # Check batch processing service
         batch_service = data["services"]["batch_processing"]
         assert batch_service["available"] is True
         assert "max_concurrent_downloads" in batch_service
         assert "current_active_downloads" in batch_service
         assert "available_slots" in batch_service
-        
+
         # Check PDF generation service
         pdf_service = data["services"]["pdf_generation"]
         assert pdf_service["available"] is True
@@ -55,8 +55,7 @@ class TestDownloadEndpoint:
         mock_get_client.return_value = mock_client
 
         response = client.get(
-            "/https://example.com",
-            headers={"Accept": "application/json"}
+            "/https://example.com", headers={"Accept": "application/json"}
         )
         assert response.status_code == 200
         assert response.headers["content-type"] == "application/json"
@@ -85,13 +84,10 @@ class TestDownloadEndpoint:
         )
         mock_get_client.return_value = mock_client
 
-        response = client.get(
-            "/https://example.com",
-            headers={"Accept": "text/plain"}
-        )
+        response = client.get("/https://example.com", headers={"Accept": "text/plain"})
         assert response.status_code == 200
         assert response.headers["content-type"] == "text/plain; charset=utf-8"
-        
+
         # Should strip HTML tags
         assert "Hello World" in response.text
         assert "<h1>" not in response.text
@@ -112,12 +108,11 @@ class TestDownloadEndpoint:
         mock_get_client.return_value = mock_client
 
         response = client.get(
-            "/https://example.com",
-            headers={"Accept": "text/markdown"}
+            "/https://example.com", headers={"Accept": "text/markdown"}
         )
         assert response.status_code == 200
         assert response.headers["content-type"] == "text/markdown; charset=utf-8"
-        
+
         # Should convert HTML to markdown
         text = response.text
         assert "# Hello" in text
@@ -138,10 +133,7 @@ class TestDownloadEndpoint:
         )
         mock_get_client.return_value = mock_client
 
-        response = client.get(
-            "/https://example.com",
-            headers={"Accept": "text/html"}
-        )
+        response = client.get("/https://example.com", headers={"Accept": "text/html"})
         assert response.status_code == 200
         assert response.headers["content-type"].startswith("text/html")
         assert b"<html><h1>Hello</h1></html>" == response.content
@@ -218,20 +210,19 @@ class TestDownloadEndpoint:
             },
         )
         mock_get_client.return_value = mock_client
-        
+
         # Mock PDF generation
         pdf_content = b"%PDF-1.4 fake pdf content"
         mock_generate_pdf.return_value = pdf_content
 
         response = client.get(
-            "/https://example.com",
-            headers={"Accept": "application/pdf"}
+            "/https://example.com", headers={"Accept": "application/pdf"}
         )
         assert response.status_code == 200
         assert response.headers["content-type"] == "application/pdf"
         assert "Content-Disposition" in response.headers
         assert "download.pdf" in response.headers["Content-Disposition"]
-        
+
         assert response.content == pdf_content
         mock_generate_pdf.assert_called_once_with("https://example.com")
 
@@ -239,7 +230,7 @@ class TestDownloadEndpoint:
     @patch("src.downloader.api.generate_pdf_from_url")
     def test_download_pdf_generation_error(self, mock_generate_pdf, mock_get_client):
         from src.downloader.pdf_generator import PDFGeneratorError
-        
+
         # Mock HTTP client
         mock_client = AsyncMock()
         mock_client.download.return_value = (
@@ -253,13 +244,12 @@ class TestDownloadEndpoint:
             },
         )
         mock_get_client.return_value = mock_client
-        
+
         # Mock PDF generation failure
         mock_generate_pdf.side_effect = PDFGeneratorError("Browser failed to start")
 
         response = client.get(
-            "/https://example.com",
-            headers={"Accept": "application/pdf"}
+            "/https://example.com", headers={"Accept": "application/pdf"}
         )
         assert response.status_code == 500
         data = response.json()["detail"]
@@ -284,15 +274,14 @@ class TestDownloadEndpoint:
             },
         )
         mock_get_client.return_value = mock_client
-        
+
         # Mock semaphore to be locked (at capacity)
         mock_semaphore.locked.return_value = True
-        
+
         response = client.get(
-            "/https://example.com",
-            headers={"Accept": "application/pdf"}
+            "/https://example.com", headers={"Accept": "application/pdf"}
         )
-        
+
         assert response.status_code == 503
         data = response.json()["detail"]
         assert data["success"] is False
@@ -302,7 +291,7 @@ class TestDownloadEndpoint:
 
 class TestAuthentication:
     """Test API key authentication."""
-    
+
     def test_health_endpoint_shows_auth_disabled(self):
         """Test health endpoint shows authentication is disabled."""
         with patch.dict(os.environ, {}, clear=True):
@@ -312,7 +301,7 @@ class TestAuthentication:
             assert data["status"] == "healthy"
             assert data["auth_enabled"] is False
             assert data["auth_methods"] is None
-    
+
     def test_health_endpoint_shows_auth_enabled(self):
         """Test health endpoint shows authentication is enabled."""
         with patch.dict(os.environ, {"DOWNLOADER_KEY": "test-key"}, clear=True):
@@ -322,7 +311,7 @@ class TestAuthentication:
             assert data["status"] == "healthy"
             assert data["auth_enabled"] is True
             assert isinstance(data["auth_methods"], list)
-    
+
     @patch("src.downloader.api.get_client")
     def test_download_no_auth_required(self, mock_get_client):
         """Test download works when no authentication is required."""
@@ -343,7 +332,7 @@ class TestAuthentication:
 
             response = client.get("/https://example.com")
             assert response.status_code == 200
-    
+
     @patch("src.downloader.api.get_client")
     def test_download_auth_required_no_key(self, mock_get_client):
         """Test download fails when auth required but no key provided."""
@@ -353,7 +342,7 @@ class TestAuthentication:
             data = response.json()["detail"]
             assert data["success"] is False
             assert data["error_type"] == "authentication_required"
-    
+
     @patch("src.downloader.api.get_client")
     def test_download_auth_bearer_token_valid(self, mock_get_client):
         """Test download works with valid Bearer token."""
@@ -373,24 +362,22 @@ class TestAuthentication:
             mock_get_client.return_value = mock_client
 
             response = client.get(
-                "/https://example.com",
-                headers={"Authorization": "Bearer test-key"}
+                "/https://example.com", headers={"Authorization": "Bearer test-key"}
             )
             assert response.status_code == 200
-    
+
     @patch("src.downloader.api.get_client")
     def test_download_auth_bearer_token_invalid(self, mock_get_client):
         """Test download fails with invalid Bearer token."""
         with patch.dict(os.environ, {"DOWNLOADER_KEY": "test-key"}, clear=True):
             response = client.get(
-                "/https://example.com",
-                headers={"Authorization": "Bearer wrong-key"}
+                "/https://example.com", headers={"Authorization": "Bearer wrong-key"}
             )
             assert response.status_code == 401
             data = response.json()["detail"]
             assert data["success"] is False
             assert data["error_type"] == "authentication_failed"
-    
+
     @patch("src.downloader.api.get_client")
     def test_download_auth_x_api_key_valid(self, mock_get_client):
         """Test download works with valid X-API-Key header."""
@@ -410,18 +397,16 @@ class TestAuthentication:
             mock_get_client.return_value = mock_client
 
             response = client.get(
-                "/https://example.com",
-                headers={"X-API-Key": "test-key"}
+                "/https://example.com", headers={"X-API-Key": "test-key"}
             )
             assert response.status_code == 200
-    
+
     @patch("src.downloader.api.get_client")
     def test_download_auth_x_api_key_invalid(self, mock_get_client):
         """Test download fails with invalid X-API-Key header."""
         with patch.dict(os.environ, {"DOWNLOADER_KEY": "test-key"}, clear=True):
             response = client.get(
-                "/https://example.com",
-                headers={"X-API-Key": "wrong-key"}
+                "/https://example.com", headers={"X-API-Key": "wrong-key"}
             )
             assert response.status_code == 401
             data = response.json()["detail"]
@@ -431,7 +416,7 @@ class TestAuthentication:
 
 class TestBatchEndpoint:
     """Test batch processing endpoint."""
-    
+
     @patch("src.downloader.api.get_client")
     def test_batch_basic_success(self, mock_get_client):
         """Test basic batch processing with successful URLs."""
@@ -451,16 +436,16 @@ class TestBatchEndpoint:
         batch_request = {
             "urls": [
                 {"url": "https://example.com"},
-                {"url": "https://test.com", "format": "markdown"}
+                {"url": "https://test.com", "format": "markdown"},
             ],
             "default_format": "text",
             "concurrency_limit": 2,
-            "timeout_per_url": 30
+            "timeout_per_url": 30,
         }
 
         response = client.post("/batch", json=batch_request)
         assert response.status_code == 200
-        
+
         data = response.json()
         assert data["success"] is True
         assert data["total_requests"] == 2
@@ -469,7 +454,7 @@ class TestBatchEndpoint:
         assert data["success_rate"] == 100.0
         assert len(data["results"]) == 2
         assert data["batch_id"] is not None
-        
+
         # Check individual results
         for result in data["results"]:
             assert result["success"] is True
@@ -482,7 +467,7 @@ class TestBatchEndpoint:
     def test_batch_mixed_success_failure(self, mock_get_client):
         """Test batch processing with mix of successful and failed URLs."""
         from src.downloader.http_client import HTTPClientError
-        
+
         def mock_download_side_effect(url):
             if "fail.com" in url:
                 raise HTTPClientError("HTTP 404: Not Found")
@@ -496,7 +481,7 @@ class TestBatchEndpoint:
                     "headers": {"content-type": "text/html"},
                 },
             )
-        
+
         mock_client = AsyncMock()
         mock_client.download.side_effect = mock_download_side_effect
         mock_get_client.return_value = mock_client
@@ -505,21 +490,21 @@ class TestBatchEndpoint:
             "urls": [
                 {"url": "https://success.com"},
                 {"url": "https://fail.com"},
-                {"url": "https://success2.com"}
+                {"url": "https://success2.com"},
             ],
-            "default_format": "text"
+            "default_format": "text",
         }
 
         response = client.post("/batch", json=batch_request)
         assert response.status_code == 200
-        
+
         data = response.json()
         assert data["success"] is False  # False because not all requests succeeded
         assert data["total_requests"] == 3
         assert data["successful_requests"] == 2
         assert data["failed_requests"] == 1
         assert abs(data["success_rate"] - 66.67) < 0.1  # ~66.67%
-        
+
         # Check that we have one failure
         failed_results = [r for r in data["results"] if not r["success"]]
         assert len(failed_results) == 1
@@ -547,34 +532,34 @@ class TestBatchEndpoint:
                 {"url": "https://example.com", "format": "text"},
                 {"url": "https://example.com", "format": "markdown"},
                 {"url": "https://example.com", "format": "html"},
-                {"url": "https://example.com", "format": "json"}
+                {"url": "https://example.com", "format": "json"},
             ],
-            "default_format": "text"
+            "default_format": "text",
         }
 
         response = client.post("/batch", json=batch_request)
         assert response.status_code == 200
-        
+
         data = response.json()
         assert data["success"] is True
         assert len(data["results"]) == 4
-        
+
         # Check different formats
         formats = {r["format"]: r for r in data["results"]}
-        
+
         # Text format - should strip HTML tags
         text_result = formats["text"]
         assert "Title Content" in text_result["content"]
         assert "<h1>" not in text_result["content"]
-        
+
         # Markdown format - should convert to markdown
         markdown_result = formats["markdown"]
         assert "# Title" in markdown_result["content"]
-        
+
         # HTML format - should preserve HTML
         html_result = formats["html"]
         assert "<h1>Title</h1>" in html_result["content"]
-        
+
         # JSON format - should be JSON string
         json_result = formats["json"]
         json_content = json.loads(json_result["content"])
@@ -596,29 +581,27 @@ class TestBatchEndpoint:
             },
         )
         mock_get_client.return_value = mock_client
-        
+
         pdf_content = b"%PDF-1.4 fake pdf content"
         mock_generate_pdf.return_value = pdf_content
 
         batch_request = {
-            "urls": [
-                {"url": "https://example.com", "format": "pdf"}
-            ],
-            "default_format": "text"
+            "urls": [{"url": "https://example.com", "format": "pdf"}],
+            "default_format": "text",
         }
 
         response = client.post("/batch", json=batch_request)
         assert response.status_code == 200
-        
+
         data = response.json()
         assert data["success"] is True
-        
+
         result = data["results"][0]
         assert result["success"] is True
         assert result["format"] == "pdf"
         assert result["content_base64"] is not None
         assert result["content_type"] == "application/pdf"
-        
+
         # Verify PDF content
         decoded_pdf = base64.b64decode(result["content_base64"])
         assert decoded_pdf == pdf_content
@@ -628,20 +611,19 @@ class TestBatchEndpoint:
         # Empty URLs list
         response = client.post("/batch", json={"urls": []})
         assert response.status_code == 422  # Pydantic validation error
-        
+
         # Too many URLs - this will be caught by Pydantic validation
         urls = [{"url": f"https://example{i}.com"} for i in range(51)]
         response = client.post("/batch", json={"urls": urls})
         assert response.status_code == 422  # Pydantic validation error
-        
+
         # Invalid URL format
-        batch_request = {
-            "urls": [{"url": "not-a-url!"}],
-            "default_format": "text"
-        }
+        batch_request = {"urls": [{"url": "not-a-url!"}], "default_format": "text"}
         response = client.post("/batch", json=batch_request)
-        assert response.status_code == 200  # Batch endpoint returns 200 with individual errors
-        
+        assert (
+            response.status_code == 200
+        )  # Batch endpoint returns 200 with individual errors
+
         data = response.json()
         assert data["success"] is False
         assert data["failed_requests"] == 1
@@ -651,7 +633,7 @@ class TestBatchEndpoint:
     def test_batch_timeout_handling(self, mock_get_client):
         """Test batch processing with timeout scenarios."""
         from src.downloader.http_client import HTTPTimeoutError
-        
+
         mock_client = AsyncMock()
         mock_client.download.side_effect = HTTPTimeoutError("Request timed out")
         mock_get_client.return_value = mock_client
@@ -659,16 +641,16 @@ class TestBatchEndpoint:
         batch_request = {
             "urls": [{"url": "https://slow.com"}],
             "default_format": "text",
-            "timeout_per_url": 5
+            "timeout_per_url": 5,
         }
 
         response = client.post("/batch", json=batch_request)
         assert response.status_code == 200
-        
+
         data = response.json()
         assert data["success"] is False
         assert data["failed_requests"] == 1
-        
+
         result = data["results"][0]
         assert result["success"] is False
         assert result["error_type"] == "timeout_error"
@@ -677,11 +659,10 @@ class TestBatchEndpoint:
     def test_batch_concurrency_control(self, mock_get_client):
         """Test batch processing respects concurrency limits."""
         import asyncio
-        from unittest.mock import call
-        
+
         # Track when downloads start/finish
         download_times = []
-        
+
         async def mock_download(url):
             start_time = asyncio.get_event_loop().time()
             download_times.append(("start", start_time, url))
@@ -689,7 +670,7 @@ class TestBatchEndpoint:
             await asyncio.sleep(0.1)
             end_time = asyncio.get_event_loop().time()
             download_times.append(("end", end_time, url))
-            
+
             return (
                 b"<html>Content</html>",
                 {
@@ -700,23 +681,20 @@ class TestBatchEndpoint:
                     "headers": {"content-type": "text/html"},
                 },
             )
-        
+
         mock_client = AsyncMock()
         mock_client.download.side_effect = mock_download
         mock_get_client.return_value = mock_client
 
         batch_request = {
-            "urls": [
-                {"url": f"https://example{i}.com"} 
-                for i in range(5)
-            ],
+            "urls": [{"url": f"https://example{i}.com"} for i in range(5)],
             "default_format": "text",
-            "concurrency_limit": 2  # Limited concurrency
+            "concurrency_limit": 2,  # Limited concurrency
         }
 
         response = client.post("/batch", json=batch_request)
         assert response.status_code == 200
-        
+
         data = response.json()
         assert data["success"] is True
         assert data["total_requests"] == 5
@@ -730,7 +708,7 @@ class TestBatchEndpoint:
     def test_batch_large_content_handling(self, mock_get_client):
         """Test batch processing handles large content properly."""
         large_content = b"<html>" + b"x" * 10000 + b"</html>"
-        
+
         mock_client = AsyncMock()
         mock_client.download.return_value = (
             large_content,
@@ -746,15 +724,15 @@ class TestBatchEndpoint:
 
         batch_request = {
             "urls": [{"url": "https://large.com"}],
-            "default_format": "text"
+            "default_format": "text",
         }
 
         response = client.post("/batch", json=batch_request)
         assert response.status_code == 200
-        
+
         data = response.json()
         assert data["success"] is True
-        
+
         result = data["results"][0]
         assert result["success"] is True
         assert result["size"] > 1000  # Should report actual processed size
@@ -762,7 +740,7 @@ class TestBatchEndpoint:
 
 class TestBatchAuthentication:
     """Test batch endpoint authentication."""
-    
+
     @patch("src.downloader.api.get_client")
     def test_batch_no_auth_required(self, mock_get_client):
         """Test batch works when no authentication is required."""
@@ -782,7 +760,7 @@ class TestBatchAuthentication:
 
             batch_request = {
                 "urls": [{"url": "https://example.com"}],
-                "default_format": "text"
+                "default_format": "text",
             }
 
             response = client.post("/batch", json=batch_request)
@@ -793,7 +771,7 @@ class TestBatchAuthentication:
         with patch.dict(os.environ, {"DOWNLOADER_KEY": "test-key"}, clear=True):
             batch_request = {
                 "urls": [{"url": "https://example.com"}],
-                "default_format": "text"
+                "default_format": "text",
             }
 
             response = client.post("/batch", json=batch_request)
@@ -821,12 +799,12 @@ class TestBatchAuthentication:
 
             batch_request = {
                 "urls": [{"url": "https://example.com"}],
-                "default_format": "text"
+                "default_format": "text",
             }
 
             response = client.post(
-                "/batch", 
+                "/batch",
                 json=batch_request,
-                headers={"Authorization": "Bearer test-key"}
+                headers={"Authorization": "Bearer test-key"},
             )
             assert response.status_code == 200

@@ -2,13 +2,14 @@
 
 import logging
 from contextlib import asynccontextmanager
+
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
 from . import __version__
 from .api import router
-from .http_client import close_client
 from .auth import get_auth_status
+from .http_client import close_client
 from .pdf_generator import cleanup_pdf_generator, get_pdf_generator
 
 # Configure logging
@@ -51,37 +52,38 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+
 @app.get("/health")
 async def health_check():
     """Health check endpoint."""
     from .api import BATCH_SEMAPHORE, PDF_SEMAPHORE
-    
+
     # Get semaphore usage information
-    batch_max = getattr(BATCH_SEMAPHORE, '_value', 20)
-    batch_available = getattr(BATCH_SEMAPHORE, '_value', 20)
+    batch_max = getattr(BATCH_SEMAPHORE, "_value", 20)
+    batch_available = getattr(BATCH_SEMAPHORE, "_value", 20)
     batch_active = batch_max - batch_available
-    
-    pdf_max = getattr(PDF_SEMAPHORE, '_value', 5)
-    pdf_available = getattr(PDF_SEMAPHORE, '_value', 5)
+
+    pdf_max = getattr(PDF_SEMAPHORE, "_value", 5)
+    pdf_available = getattr(PDF_SEMAPHORE, "_value", 5)
     pdf_active = pdf_max - pdf_available
-    
+
     health_info = {
-        "status": "healthy", 
+        "status": "healthy",
         "version": __version__,
         "services": {
             "batch_processing": {
                 "available": True,
                 "max_concurrent_downloads": batch_max,
                 "current_active_downloads": batch_active,
-                "available_slots": batch_available
+                "available_slots": batch_available,
             },
             "pdf_generation": {
                 "available": True,
                 "max_concurrent_pdfs": pdf_max,
                 "current_active_pdfs": pdf_active,
-                "available_slots": pdf_available
-            }
-        }
+                "available_slots": pdf_available,
+            },
+        },
     }
     health_info.update(get_auth_status())
     return health_info

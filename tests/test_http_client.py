@@ -1,14 +1,14 @@
-import pytest
-from unittest.mock import AsyncMock, patch, MagicMock
+from unittest.mock import AsyncMock, MagicMock, patch
+
 import httpx
+import pytest
 
 from src.downloader.http_client import (
     HTTPClient,
     HTTPClientError,
     HTTPTimeoutError,
-    DownloadError,
-    get_client,
     close_client,
+    get_client,
 )
 
 
