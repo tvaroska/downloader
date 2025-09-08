@@ -9,7 +9,8 @@ from typing import Dict, Any, Optional
 
 from fastapi import APIRouter, HTTPException, Response, Path, Header, Request, Depends
 from fastapi.security import HTTPAuthorizationCredentials
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
+from typing import List, Union
 from bs4 import BeautifulSoup
 
 from .validation import validate_url, URLValidationError
@@ -21,8 +22,9 @@ logger = logging.getLogger(__name__)
 
 router = APIRouter()
 
-# Concurrency control for PDF generation
+# Concurrency control for PDF generation and batch processing
 PDF_SEMAPHORE = asyncio.Semaphore(5)  # Max 5 concurrent PDF generations
+BATCH_SEMAPHORE = asyncio.Semaphore(20)  # Max 20 concurrent batch downloads
 
 
 class ErrorResponse(BaseModel):
@@ -31,6 +33,53 @@ class ErrorResponse(BaseModel):
     success: bool = False
     error: str
     error_type: str
+
+
+# Batch processing models
+class BatchURLRequest(BaseModel):
+    """Individual URL request within a batch."""
+    
+    url: str = Field(..., description="URL to download")
+    format: Optional[str] = Field(None, description="Desired output format (text, html, markdown, pdf, json, raw)")
+    custom_headers: Optional[Dict[str, str]] = Field(None, description="Custom headers for this URL")
+
+
+class BatchRequest(BaseModel):
+    """Request model for batch processing."""
+    
+    urls: List[BatchURLRequest] = Field(..., min_length=1, max_length=50, description="List of URLs to process")
+    default_format: str = Field("text", description="Default format for URLs without explicit format")
+    concurrency_limit: Optional[int] = Field(10, ge=1, le=20, description="Maximum concurrent requests")
+    timeout_per_url: Optional[int] = Field(30, ge=5, le=120, description="Timeout per URL in seconds")
+
+
+class BatchURLResult(BaseModel):
+    """Result for a single URL in a batch."""
+    
+    url: str = Field(..., description="Original URL")
+    success: bool = Field(..., description="Whether processing succeeded")
+    format: str = Field(..., description="Output format used")
+    content: Optional[str] = Field(None, description="Processed content (text formats)")
+    content_base64: Optional[str] = Field(None, description="Base64 encoded content (binary formats)")
+    size: Optional[int] = Field(None, description="Content size in bytes")
+    content_type: Optional[str] = Field(None, description="Original content type")
+    duration: Optional[float] = Field(None, description="Processing time in seconds")
+    error: Optional[str] = Field(None, description="Error message if failed")
+    error_type: Optional[str] = Field(None, description="Error type classification")
+    status_code: Optional[int] = Field(None, description="HTTP status code")
+
+
+class BatchResponse(BaseModel):
+    """Response model for batch processing."""
+    
+    success: bool = Field(..., description="Overall batch success")
+    total_requests: int = Field(..., description="Total number of URLs processed")
+    successful_requests: int = Field(..., description="Number of successful requests")
+    failed_requests: int = Field(..., description="Number of failed requests")
+    success_rate: float = Field(..., description="Success rate as percentage")
+    total_duration: float = Field(..., description="Total processing time in seconds")
+    results: List[BatchURLResult] = Field(..., description="Individual URL results")
+    batch_id: Optional[str] = Field(None, description="Unique batch identifier")
 
 
 def parse_accept_header(accept_header: Optional[str]) -> str:
@@ -341,6 +390,395 @@ def convert_content_to_markdown(content: bytes, content_type: str) -> str:
         return text
     except Exception:
         return content.decode('utf-8', errors='replace')
+
+
+async def process_single_url_in_batch(
+    url_request: BatchURLRequest,
+    default_format: str,
+    timeout: int,
+    request_id: str
+) -> BatchURLResult:
+    """
+    Process a single URL within a batch request.
+    
+    Args:
+        url_request: URL request configuration
+        default_format: Default format if not specified
+        timeout: Timeout for this request
+        request_id: Unique identifier for logging
+        
+    Returns:
+        BatchURLResult with processing outcome
+    """
+    start_time = asyncio.get_event_loop().time()
+    format_to_use = url_request.format or default_format
+    
+    try:
+        # Validate URL
+        validated_url = validate_url(url_request.url)
+        logger.info(f"[{request_id}] Processing batch URL: {validated_url} (format: {format_to_use})")
+        
+        # Get HTTP client and download content with timeout
+        client = await get_client()
+        content, metadata = await asyncio.wait_for(
+            client.download(validated_url),
+            timeout=timeout
+        )
+        
+        # Process content based on format
+        if format_to_use == "text":
+            processed_content = convert_content_to_text(content, metadata["content_type"])
+            # Handle Playwright fallback for empty HTML content
+            if 'html' in metadata["content_type"].lower() and not processed_content.strip():
+                logger.info(f"[{request_id}] Triggering Playwright fallback for empty content")
+                try:
+                    processed_content = await convert_content_with_playwright_fallback(validated_url, "text")
+                except Exception as e:
+                    logger.warning(f"[{request_id}] Playwright fallback failed: {e}")
+            
+            duration = asyncio.get_event_loop().time() - start_time
+            return BatchURLResult(
+                url=url_request.url,
+                success=True,
+                format=format_to_use,
+                content=processed_content,
+                size=len(processed_content.encode('utf-8')),
+                content_type=metadata["content_type"],
+                duration=duration,
+                status_code=200
+            )
+            
+        elif format_to_use == "markdown":
+            processed_content = convert_content_to_markdown(content, metadata["content_type"])
+            # Handle Playwright fallback for empty HTML content
+            if 'html' in metadata["content_type"].lower() and not processed_content.strip():
+                logger.info(f"[{request_id}] Triggering Playwright markdown fallback for empty content")
+                try:
+                    processed_content = await convert_content_with_playwright_fallback(validated_url, "markdown")
+                except Exception as e:
+                    logger.warning(f"[{request_id}] Playwright markdown fallback failed: {e}")
+            
+            duration = asyncio.get_event_loop().time() - start_time
+            return BatchURLResult(
+                url=url_request.url,
+                success=True,
+                format=format_to_use,
+                content=processed_content,
+                size=len(processed_content.encode('utf-8')),
+                content_type=metadata["content_type"],
+                duration=duration,
+                status_code=200
+            )
+            
+        elif format_to_use == "html":
+            if 'html' in metadata["content_type"].lower():
+                processed_content = content.decode('utf-8', errors='ignore')
+            else:
+                processed_content = content.decode('utf-8', errors='ignore')
+            
+            duration = asyncio.get_event_loop().time() - start_time
+            return BatchURLResult(
+                url=url_request.url,
+                success=True,
+                format=format_to_use,
+                content=processed_content,
+                size=len(content),
+                content_type=metadata["content_type"],
+                duration=duration,
+                status_code=200
+            )
+            
+        elif format_to_use == "pdf":
+            # Use semaphore for PDF generation
+            async with PDF_SEMAPHORE:
+                pdf_content = await generate_pdf_from_url(validated_url)
+            
+            content_b64 = base64.b64encode(pdf_content).decode("utf-8")
+            duration = asyncio.get_event_loop().time() - start_time
+            return BatchURLResult(
+                url=url_request.url,
+                success=True,
+                format=format_to_use,
+                content_base64=content_b64,
+                size=len(pdf_content),
+                content_type="application/pdf",
+                duration=duration,
+                status_code=200
+            )
+            
+        elif format_to_use == "json":
+            content_b64 = base64.b64encode(content).decode("utf-8")
+            json_content = json.dumps({
+                "success": True,
+                "url": metadata["url"],
+                "size": metadata["size"],
+                "content_type": metadata["content_type"],
+                "content": content_b64,
+                "metadata": metadata,
+            })
+            
+            duration = asyncio.get_event_loop().time() - start_time
+            return BatchURLResult(
+                url=url_request.url,
+                success=True,
+                format=format_to_use,
+                content=json_content,
+                size=len(json_content),
+                content_type="application/json",
+                duration=duration,
+                status_code=200
+            )
+            
+        else:  # raw format
+            content_b64 = base64.b64encode(content).decode("utf-8")
+            duration = asyncio.get_event_loop().time() - start_time
+            return BatchURLResult(
+                url=url_request.url,
+                success=True,
+                format=format_to_use,
+                content_base64=content_b64,
+                size=len(content),
+                content_type=metadata.get("content_type", "application/octet-stream"),
+                duration=duration,
+                status_code=200
+            )
+    
+    except URLValidationError as e:
+        duration = asyncio.get_event_loop().time() - start_time
+        logger.warning(f"[{request_id}] URL validation failed: {e}")
+        return BatchURLResult(
+            url=url_request.url,
+            success=False,
+            format=format_to_use,
+            duration=duration,
+            error=str(e),
+            error_type="validation_error",
+            status_code=400
+        )
+        
+    except asyncio.TimeoutError:
+        duration = asyncio.get_event_loop().time() - start_time
+        logger.error(f"[{request_id}] Request timeout after {timeout}s")
+        return BatchURLResult(
+            url=url_request.url,
+            success=False,
+            format=format_to_use,
+            duration=duration,
+            error=f"Request timeout after {timeout} seconds",
+            error_type="timeout_error",
+            status_code=408
+        )
+        
+    except HTTPTimeoutError as e:
+        duration = asyncio.get_event_loop().time() - start_time
+        logger.error(f"[{request_id}] HTTP timeout: {e}")
+        return BatchURLResult(
+            url=url_request.url,
+            success=False,
+            format=format_to_use,
+            duration=duration,
+            error=str(e),
+            error_type="timeout_error",
+            status_code=408
+        )
+        
+    except HTTPClientError as e:
+        duration = asyncio.get_event_loop().time() - start_time
+        logger.error(f"[{request_id}] HTTP client error: {e}")
+        
+        # Extract status code from error message
+        status_code = 502  # Default to bad gateway
+        if "404" in str(e):
+            status_code = 404
+        elif "403" in str(e):
+            status_code = 403
+        elif "401" in str(e):
+            status_code = 401
+        elif "500" in str(e):
+            status_code = 502
+            
+        return BatchURLResult(
+            url=url_request.url,
+            success=False,
+            format=format_to_use,
+            duration=duration,
+            error=str(e),
+            error_type="http_error",
+            status_code=status_code
+        )
+        
+    except PDFGeneratorError as e:
+        duration = asyncio.get_event_loop().time() - start_time
+        logger.error(f"[{request_id}] PDF generation failed: {e}")
+        return BatchURLResult(
+            url=url_request.url,
+            success=False,
+            format=format_to_use,
+            duration=duration,
+            error=f"PDF generation failed: {e}",
+            error_type="pdf_generation_error",
+            status_code=500
+        )
+        
+    except Exception as e:
+        duration = asyncio.get_event_loop().time() - start_time
+        logger.exception(f"[{request_id}] Unexpected error: {e}")
+        return BatchURLResult(
+            url=url_request.url,
+            success=False,
+            format=format_to_use,
+            duration=duration,
+            error="Internal server error",
+            error_type="internal_error",
+            status_code=500
+        )
+
+
+@router.post("/batch")
+async def process_batch_urls(
+    batch_request: BatchRequest,
+    api_key: Optional[str] = Depends(get_api_key),
+) -> BatchResponse:
+    """
+    Process multiple URLs in batch with configurable concurrency and formats.
+
+    Args:
+        batch_request: Batch processing configuration
+        api_key: API key for authentication (if DOWNLOADER_KEY env var is set)
+
+    Returns:
+        BatchResponse with individual results and overall statistics
+
+    Raises:
+        HTTPException: For authentication failures or service unavailability
+        
+    Authentication (if DOWNLOADER_KEY environment variable is set):
+    - Authorization: Bearer <api_key>
+    - X-API-Key: <api_key>
+    
+    Request Body Format:
+    {
+        "urls": [
+            {"url": "https://example.com", "format": "text"},
+            {"url": "https://github.com", "format": "markdown"}
+        ],
+        "default_format": "text",
+        "concurrency_limit": 10,
+        "timeout_per_url": 30
+    }
+    
+    Response includes individual results for each URL plus batch statistics.
+    """
+    import uuid
+    from datetime import datetime
+    
+    batch_id = str(uuid.uuid4())[:8]
+    batch_start_time = asyncio.get_event_loop().time()
+    
+    logger.info(f"[BATCH-{batch_id}] Starting batch processing: {len(batch_request.urls)} URLs")
+    logger.info(f"[BATCH-{batch_id}] Concurrency limit: {batch_request.concurrency_limit}")
+    logger.info(f"[BATCH-{batch_id}] Default format: {batch_request.default_format}")
+    logger.info(f"[BATCH-{batch_id}] Timeout per URL: {batch_request.timeout_per_url}s")
+    
+    # Check if batch service is available
+    if len(batch_request.urls) > 50:
+        logger.warning(f"[BATCH-{batch_id}] Too many URLs requested: {len(batch_request.urls)}")
+        raise HTTPException(
+            status_code=400,
+            detail=ErrorResponse(
+                error="Too many URLs in batch request. Maximum is 50 URLs.",
+                error_type="validation_error"
+            ).model_dump(),
+        )
+    
+    try:
+        # Create semaphore for this batch's concurrency control
+        batch_semaphore = asyncio.Semaphore(batch_request.concurrency_limit)
+        
+        async def process_with_semaphore(url_request: BatchURLRequest, index: int) -> BatchURLResult:
+            """Process a single URL with concurrency control."""
+            async with batch_semaphore:
+                # Also use global batch semaphore to prevent overloading the service
+                async with BATCH_SEMAPHORE:
+                    request_id = f"BATCH-{batch_id}-{index+1:02d}"
+                    return await process_single_url_in_batch(
+                        url_request=url_request,
+                        default_format=batch_request.default_format,
+                        timeout=batch_request.timeout_per_url,
+                        request_id=request_id
+                    )
+        
+        # Create tasks for all URLs
+        tasks = [
+            process_with_semaphore(url_request, i) 
+            for i, url_request in enumerate(batch_request.urls)
+        ]
+        
+        logger.info(f"[BATCH-{batch_id}] Starting concurrent processing of {len(tasks)} URLs")
+        
+        # Execute all requests concurrently with overall timeout
+        overall_timeout = min(600, len(batch_request.urls) * batch_request.timeout_per_url + 30)  # Max 10 minutes
+        try:
+            results = await asyncio.wait_for(
+                asyncio.gather(*tasks, return_exceptions=False),
+                timeout=overall_timeout
+            )
+        except asyncio.TimeoutError:
+            logger.error(f"[BATCH-{batch_id}] Overall batch timeout after {overall_timeout}s")
+            raise HTTPException(
+                status_code=408,
+                detail=ErrorResponse(
+                    error=f"Batch processing timeout after {overall_timeout} seconds",
+                    error_type="batch_timeout_error"
+                ).model_dump(),
+            )
+        
+        batch_duration = asyncio.get_event_loop().time() - batch_start_time
+        
+        # Calculate statistics
+        successful_results = [r for r in results if r.success]
+        failed_results = [r for r in results if not r.success]
+        
+        success_rate = (len(successful_results) / len(results)) * 100 if results else 0
+        
+        logger.info(f"[BATCH-{batch_id}] Batch completed: {len(successful_results)}/{len(results)} successful ({success_rate:.1f}%) in {batch_duration:.2f}s")
+        
+        # Log error summary
+        if failed_results:
+            error_summary = {}
+            for result in failed_results:
+                error_type = result.error_type or "unknown"
+                error_summary[error_type] = error_summary.get(error_type, 0) + 1
+            logger.warning(f"[BATCH-{batch_id}] Error summary: {error_summary}")
+        
+        # Create response
+        batch_response = BatchResponse(
+            success=len(failed_results) == 0,  # True only if all requests succeeded
+            total_requests=len(results),
+            successful_requests=len(successful_results),
+            failed_requests=len(failed_results),
+            success_rate=success_rate,
+            total_duration=batch_duration,
+            results=results,
+            batch_id=batch_id
+        )
+        
+        return batch_response
+        
+    except HTTPException:
+        # Re-raise HTTPExceptions without modification
+        raise
+        
+    except Exception as e:
+        batch_duration = asyncio.get_event_loop().time() - batch_start_time
+        logger.exception(f"[BATCH-{batch_id}] Unexpected error during batch processing: {e}")
+        raise HTTPException(
+            status_code=500,
+            detail=ErrorResponse(
+                error="Internal server error during batch processing",
+                error_type="batch_internal_error"
+            ).model_dump(),
+        )
 
 
 @router.get("/{url:path}")

@@ -31,12 +31,10 @@ This directory contains practical examples demonstrating how to use the REST API
 ### Performance and Concurrency
 
 - **[concurrent_pdf_requests.py](concurrent_pdf_requests.py)** - Multiple concurrent PDF generation
-- **[load_testing.py](load_testing.py)** - Load testing scenarios
-- **[performance_comparison.py](performance_comparison.py)** - Performance comparison across formats
+- **[batch_processing.py](batch_processing.py)** - Batch processing multiple URLs efficiently
 
 ### Advanced Usage
 
-- **[batch_simulation.py](batch_simulation.py)** - Simulates batch processing (future feature)
 - **[error_handling.py](error_handling.py)** - Comprehensive error handling examples
 - **[monitoring_example.py](monitoring_example.py)** - Health monitoring and metrics
 
@@ -62,8 +60,9 @@ This directory contains practical examples demonstrating how to use the REST API
 ### Learning Path
 1. Start with `basic_usage.py` to understand API basics
 2. Explore `content_formats.py` for different response types
-3. Test performance with `concurrent_pdf_requests.py`
-4. Handle edge cases with `error_handling.py`
+3. Test batch processing with `batch_processing.py`
+4. Test performance with `concurrent_pdf_requests.py`
+5. Handle edge cases with `error_handling.py`
 
 ### Production Integration
 - Use `load_testing.py` to validate performance under load
@@ -97,6 +96,24 @@ with open("output.pdf", "wb") as f:
 json_response = httpx.get("http://localhost:8000/https://httpbin.org/json",
                          headers={"Accept": "application/json"})
 data = json_response.json()
+```
+
+### Batch Processing
+```python
+# Process multiple URLs efficiently
+batch_request = {
+    "urls": [
+        {"url": "https://example.com", "format": "text"},
+        {"url": "https://github.com", "format": "markdown"},
+        {"url": "https://docs.python.org", "format": "pdf"}
+    ],
+    "default_format": "text",
+    "concurrency_limit": 5,
+    "timeout_per_url": 30
+}
+
+response = httpx.post("http://localhost:8000/batch", json=batch_request)
+results = response.json()
 ```
 
 ## Configuration
