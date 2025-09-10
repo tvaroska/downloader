@@ -18,40 +18,29 @@ from downloader.auth import (
 class TestAuthFunctions:
     """Test authentication utility functions."""
 
-    def test_is_auth_enabled_no_key(self):
-        """Test auth disabled when no API key is set."""
-        with patch.dict(os.environ, {}, clear=True):
-            assert is_auth_enabled() is False
+    @pytest.mark.parametrize(
+        "key, expected",
+        [("", False), ("   ", False), (None, False), ("test-key-123", True)],
+    )
+    def test_is_auth_enabled(self, key, expected):
+        """Test is_auth_enabled with different keys."""
+        env = {"DOWNLOADER_KEY": key} if key is not None else {}
+        with patch.dict(os.environ, env, clear=True):
+            assert is_auth_enabled() is expected
 
-    def test_is_auth_enabled_empty_key(self):
-        """Test auth disabled when API key is empty."""
-        with patch.dict(os.environ, {"DOWNLOADER_KEY": ""}, clear=True):
-            assert is_auth_enabled() is False
-
-    def test_is_auth_enabled_whitespace_key(self):
-        """Test auth disabled when API key is only whitespace."""
-        with patch.dict(os.environ, {"DOWNLOADER_KEY": "   "}, clear=True):
-            assert is_auth_enabled() is False
-
-    def test_is_auth_enabled_valid_key(self):
-        """Test auth enabled when valid API key is set."""
-        with patch.dict(os.environ, {"DOWNLOADER_KEY": "test-key-123"}, clear=True):
-            assert is_auth_enabled() is True
-
-    def test_verify_api_key_no_env_key(self):
-        """Test API key verification when no environment key is set."""
-        with patch.dict(os.environ, {}, clear=True):
-            assert verify_api_key("any-key") is True
-
-    def test_verify_api_key_correct(self):
-        """Test API key verification with correct key."""
-        with patch.dict(os.environ, {"DOWNLOADER_KEY": "secret-key"}, clear=True):
-            assert verify_api_key("secret-key") is True
-
-    def test_verify_api_key_incorrect(self):
-        """Test API key verification with incorrect key."""
-        with patch.dict(os.environ, {"DOWNLOADER_KEY": "secret-key"}, clear=True):
-            assert verify_api_key("wrong-key") is False
+    @pytest.mark.parametrize(
+        "env_key, provided_key, expected",
+        [
+            (None, "any-key", True),
+            ("secret-key", "secret-key", True),
+            ("secret-key", "wrong-key", False),
+        ],
+    )
+    def test_verify_api_key(self, env_key, provided_key, expected):
+        """Test API key verification."""
+        env = {"DOWNLOADER_KEY": env_key} if env_key is not None else {}
+        with patch.dict(os.environ, env, clear=True):
+            assert verify_api_key(provided_key) is expected
 
     def test_get_auth_status_disabled(self):
         """Test auth status when authentication is disabled."""
@@ -88,67 +77,64 @@ class TestGetApiKey:
             assert result is None
 
     @pytest.mark.asyncio
-    async def test_bearer_token_valid(self, mock_request):
-        """Test valid Bearer token authentication."""
+    @pytest.mark.parametrize(
+        "auth_header, expected_result",
+        [
+            ({"Authorization": "Bearer test-key"}, "test-key"),
+            ({"x-api-key": "test-key"}, "test-key"),
+        ],
+    )
+    async def test_get_api_key_valid(self, mock_request, auth_header, expected_result):
+        """Test valid API key from different sources."""
         with patch.dict(os.environ, {"DOWNLOADER_KEY": "test-key"}, clear=True):
-            credentials = HTTPAuthorizationCredentials(
-                scheme="Bearer", credentials="test-key"
+            mock_request.headers = auth_header
+            credentials = (
+                HTTPAuthorizationCredentials(scheme="Bearer", credentials="test-key")
+                if "Authorization" in auth_header
+                else None
             )
             result = await get_api_key(mock_request, credentials)
-            assert result == "test-key"
+            assert result == expected_result
 
     @pytest.mark.asyncio
-    async def test_bearer_token_invalid(self, mock_request):
-        """Test invalid Bearer token authentication."""
+    @pytest.mark.parametrize(
+        "auth_header, credentials, error_detail",
+        [
+            (
+                {},
+                None,
+                "authentication_required",
+            ),
+            (
+                {"Authorization": "Bearer wrong-key"},
+                HTTPAuthorizationCredentials(scheme="Bearer", credentials="wrong-key"),
+                "authentication_failed",
+            ),
+            (
+                {"x-api-key": "wrong-key"},
+                None,
+                "authentication_failed",
+            ),
+        ],
+    )
+    async def test_get_api_key_invalid(self, mock_request, auth_header, credentials, error_detail):
+        """Test invalid or missing API key scenarios."""
         with patch.dict(os.environ, {"DOWNLOADER_KEY": "test-key"}, clear=True):
-            credentials = HTTPAuthorizationCredentials(
-                scheme="Bearer", credentials="wrong-key"
-            )
+            mock_request.headers = auth_header
             with pytest.raises(HTTPException) as exc_info:
                 await get_api_key(mock_request, credentials)
 
             assert exc_info.value.status_code == 401
-            assert "authentication_failed" in str(exc_info.value.detail)
-
-    @pytest.mark.asyncio
-    async def test_x_api_key_header_valid(self, mock_request):
-        """Test valid X-API-Key header authentication."""
-        with patch.dict(os.environ, {"DOWNLOADER_KEY": "test-key"}, clear=True):
-            mock_request.headers = {"x-api-key": "test-key"}
-            result = await get_api_key(mock_request, None)
-            assert result == "test-key"
-
-    @pytest.mark.asyncio
-    async def test_x_api_key_header_invalid(self, mock_request):
-        """Test invalid X-API-Key header authentication."""
-        with patch.dict(os.environ, {"DOWNLOADER_KEY": "test-key"}, clear=True):
-            mock_request.headers = {"x-api-key": "wrong-key"}
-            with pytest.raises(HTTPException) as exc_info:
-                await get_api_key(mock_request, None)
-
-            assert exc_info.value.status_code == 401
-            assert "authentication_failed" in str(exc_info.value.detail)
-
-    @pytest.mark.asyncio
-    async def test_no_api_key_provided(self, mock_request):
-        """Test when API key is required but not provided."""
-        with patch.dict(os.environ, {"DOWNLOADER_KEY": "test-key"}, clear=True):
-            with pytest.raises(HTTPException) as exc_info:
-                await get_api_key(mock_request, None)
-
-            assert exc_info.value.status_code == 401
-            assert "authentication_required" in str(exc_info.value.detail)
+            assert error_detail in str(exc_info.value.detail)
 
     @pytest.mark.asyncio
     async def test_bearer_token_priority(self, mock_request):
         """Test Bearer token takes priority over other methods."""
         with patch.dict(os.environ, {"DOWNLOADER_KEY": "test-key"}, clear=True):
-            # Set up multiple auth methods
             credentials = HTTPAuthorizationCredentials(
                 scheme="Bearer", credentials="test-key"
             )
             mock_request.headers = {"x-api-key": "wrong-key"}
 
-            # Bearer token should be used and succeed
             result = await get_api_key(mock_request, credentials)
             assert result == "test-key"

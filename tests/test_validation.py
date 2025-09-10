@@ -8,70 +8,37 @@ from src.downloader.validation import (
 
 
 class TestValidateUrl:
-    def test_valid_https_url(self):
-        url = "https://example.com"
-        result = validate_url(url)
-        assert result == url
+    @pytest.mark.parametrize(
+        "url, expected",
+        [
+            ("https://example.com", "https://example.com"),
+            ("http://example.com", "http://example.com"),
+            ("example.com", "http://example.com"),
+            ("https://example.com/path/to/resource", "https://example.com/path/to/resource"),
+            ("https://example.com/search?q=test", "https://example.com/search?q=test"),
+            ("  https://example.com  ", "https://example.com"),
+        ],
+    )
+    def test_validate_url_valid(self, url, expected):
+        """Test that valid URLs are handled correctly."""
+        assert validate_url(url) == expected
 
-    def test_valid_http_url(self):
-        url = "http://example.com"
-        result = validate_url(url)
-        assert result == url
-
-    def test_url_without_protocol(self):
-        url = "example.com"
-        result = validate_url(url)
-        assert result == "http://example.com"
-
-    def test_empty_url(self):
-        with pytest.raises(URLValidationError) as exc_info:
-            validate_url("")
-        assert "must be a non-empty string" in str(exc_info.value)
-
-    def test_none_url(self):
-        with pytest.raises(URLValidationError) as exc_info:
-            validate_url(None)
-        assert "must be a non-empty string" in str(exc_info.value)
-
-    def test_invalid_hostname(self):
-        with pytest.raises(URLValidationError) as exc_info:
-            validate_url("https://invalid_domain!")
-        assert "Invalid hostname format" in str(exc_info.value)
-
-    def test_no_hostname(self):
-        with pytest.raises(URLValidationError) as exc_info:
-            validate_url("https://")
-        assert "must have a valid hostname" in str(exc_info.value)
-
-    def test_invalid_scheme(self):
-        with pytest.raises(URLValidationError) as exc_info:
-            validate_url("ftp://example.com")
-        assert "must use http or https scheme" in str(exc_info.value)
-
-    def test_localhost_blocked(self):
-        with pytest.raises(URLValidationError) as exc_info:
-            validate_url("http://localhost")
-        assert "private addresses is not allowed" in str(exc_info.value)
-
-    def test_private_ip_blocked(self):
-        with pytest.raises(URLValidationError) as exc_info:
-            validate_url("http://192.168.1.1")
-        assert "private addresses is not allowed" in str(exc_info.value)
-
-    def test_url_with_path(self):
-        url = "https://example.com/path/to/resource"
-        result = validate_url(url)
-        assert result == url
-
-    def test_url_with_query_params(self):
-        url = "https://example.com/search?q=test"
-        result = validate_url(url)
-        assert result == url
-
-    def test_url_with_whitespace(self):
-        url = "  https://example.com  "
-        result = validate_url(url)
-        assert result == "https://example.com"
+    @pytest.mark.parametrize(
+        "url, error_message",
+        [
+            ("", "must be a non-empty string"),
+            (None, "must be a non-empty string"),
+            ("https://invalid_domain!", "Invalid hostname format"),
+            ("https://", "must have a valid hostname"),
+            ("ftp://example.com", "must use http or https scheme"),
+            ("http://localhost", "private addresses is not allowed"),
+            ("http://192.168.1.1", "private addresses is not allowed"),
+        ],
+    )
+    def test_validate_url_invalid(self, url, error_message):
+        """Test that invalid URLs raise a URLValidationError."""
+        with pytest.raises(URLValidationError, match=error_message):
+            validate_url(url)
 
 
 class TestSanitizeUserAgent:
