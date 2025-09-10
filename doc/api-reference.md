@@ -190,6 +190,196 @@ Example Domain This domain is for use in illustrative examples in documents. You
 - `X-Original-Content-Type: text/html`
 - `X-Content-Length: 1256`
 
+---
+
+## Background Batch Processing
+
+Process multiple URLs asynchronously with job tracking and result retrieval.
+
+### Submit Batch Job
+
+Submit a batch processing job for background execution.
+
+**Endpoint:** `POST /batch`
+
+**Request Body:**
+```json
+{
+  "urls": [
+    {
+      "url": "https://example.com",
+      "format": "text"
+    },
+    {
+      "url": "https://github.com/python/cpython",
+      "format": "markdown"
+    },
+    {
+      "url": "https://docs.python.org",
+      "format": "pdf"
+    }
+  ],
+  "default_format": "text",
+  "concurrency_limit": 10,
+  "timeout_per_url": 30
+}
+```
+
+**Response:**
+```json
+{
+  "job_id": "a1b2c3d4-e5f6-7890-abcd-ef1234567890",
+  "status": "pending",
+  "created_at": "2025-09-10T12:00:00Z",
+  "total_urls": 3,
+  "estimated_completion": "2025-09-10T12:01:00Z"
+}
+```
+
+**Status Codes:**
+- `200` - Job submitted successfully
+- `400` - Invalid request (too many URLs, validation errors)
+- `503` - Service unavailable (Redis not configured)
+
+---
+
+### Check Job Status
+
+Get the current status and progress of a batch processing job.
+
+**Endpoint:** `GET /jobs/{job_id}/status`
+
+**Parameters:**
+- `job_id` (path, required) - Job identifier returned from batch submission
+
+**Response:**
+```json
+{
+  "job_id": "a1b2c3d4-e5f6-7890-abcd-ef1234567890",
+  "status": "running",
+  "progress": 67,
+  "created_at": "2025-09-10T12:00:00Z",
+  "started_at": "2025-09-10T12:00:05Z",
+  "completed_at": null,
+  "total_urls": 3,
+  "processed_urls": 2,
+  "successful_urls": 2,
+  "failed_urls": 0,
+  "error_message": null,
+  "results_available": false,
+  "expires_at": "2025-09-11T12:00:00Z"
+}
+```
+
+**Job Status Values:**
+- `pending` - Job queued for processing
+- `running` - Job currently being processed
+- `completed` - Job finished successfully
+- `failed` - Job failed with errors
+- `cancelled` - Job was cancelled
+
+**Status Codes:**
+- `200` - Status retrieved successfully
+- `404` - Job not found or expired
+
+---
+
+### Download Job Results
+
+Download the results of a completed batch processing job.
+
+**Endpoint:** `GET /jobs/{job_id}/results`
+
+**Parameters:**
+- `job_id` (path, required) - Job identifier
+
+**Response:**
+```json
+{
+  "job_id": "a1b2c3d4-e5f6-7890-abcd-ef1234567890",
+  "status": "completed",
+  "total_duration": 45.2,
+  "results": [
+    {
+      "url": "https://example.com",
+      "success": true,
+      "format": "text",
+      "content": "Example Domain This domain is for use...",
+      "size": 1234,
+      "content_type": "text/html",
+      "duration": 1.2,
+      "status_code": 200
+    },
+    {
+      "url": "https://github.com/python/cpython",
+      "success": true,
+      "format": "markdown",
+      "content": "# CPython\n\nThe Python programming language...",
+      "size": 5678,
+      "content_type": "text/html",
+      "duration": 2.1,
+      "status_code": 200
+    },
+    {
+      "url": "https://docs.python.org",
+      "success": true,
+      "format": "pdf",
+      "content_base64": "JVBERi0xLjQKJcfsj6IKNSAwIG9iago8PAovVHlwZSAvQ2F0YWxvZwo...",
+      "size": 89012,
+      "content_type": "application/pdf",
+      "duration": 8.5,
+      "status_code": 200
+    }
+  ],
+  "summary": {
+    "total_requests": 3,
+    "successful_requests": 3,
+    "failed_requests": 0,
+    "success_rate": 100.0,
+    "total_duration": 45.2
+  },
+  "created_at": "2025-09-10T12:00:00Z",
+  "completed_at": "2025-09-10T12:00:45Z"
+}
+```
+
+**Response Headers:**
+- `Content-Type: application/json`
+- `Content-Disposition: attachment; filename="batch_results_[job_id].json"`
+- `X-Job-ID: [job_id]`
+- `X-Job-Status: completed`
+- `X-Total-Duration: 45.2`
+
+**Status Codes:**
+- `200` - Results downloaded successfully
+- `400` - Results not available (job still running, failed, etc.)
+- `404` - Job not found or results expired
+
+---
+
+### Cancel Job
+
+Cancel a running or pending batch processing job.
+
+**Endpoint:** `DELETE /jobs/{job_id}`
+
+**Parameters:**
+- `job_id` (path, required) - Job identifier
+
+**Response:**
+```json
+{
+  "success": true,
+  "message": "Job a1b2c3d4-e5f6-7890-abcd-ef1234567890 cancelled successfully"
+}
+```
+
+**Status Codes:**
+- `200` - Cancellation processed (check response body for actual result)
+- `404` - Job not found
+
+---
+
 ## Error Handling
 
 All errors return JSON responses with structured error information.

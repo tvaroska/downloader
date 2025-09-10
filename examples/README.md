@@ -31,7 +31,8 @@ This directory contains practical examples demonstrating how to use the REST API
 ### Performance and Concurrency
 
 - **[concurrent_pdf_requests.py](concurrent_pdf_requests.py)** - Multiple concurrent PDF generation
-- **[batch_processing.py](batch_processing.py)** - Batch processing multiple URLs efficiently
+- **[batch_processing.py](batch_processing.py)** - Legacy batch processing (synchronous)
+- **[batch_job_example.py](batch_job_example.py)** - **NEW:** Background job-based batch processing
 
 ### Advanced Usage
 
@@ -60,9 +61,10 @@ This directory contains practical examples demonstrating how to use the REST API
 ### Learning Path
 1. Start with `basic_usage.py` to understand API basics
 2. Explore `content_formats.py` for different response types
-3. Test batch processing with `batch_processing.py`
-4. Test performance with `concurrent_pdf_requests.py`
-5. Handle edge cases with `error_handling.py`
+3. Test legacy batch processing with `batch_processing.py`
+4. **Try the new background jobs with `batch_job_example.py`**
+5. Test performance with `concurrent_pdf_requests.py`
+6. Handle edge cases with `error_handling.py`
 
 ### Production Integration
 - Use `load_testing.py` to validate performance under load
@@ -98,9 +100,12 @@ json_response = httpx.get("http://localhost:8000/https://httpbin.org/json",
 data = json_response.json()
 ```
 
-### Batch Processing
+### Background Batch Processing (Recommended)
 ```python
-# Process multiple URLs efficiently
+import asyncio
+import httpx
+
+# Submit batch job
 batch_request = {
     "urls": [
         {"url": "https://example.com", "format": "text"},
@@ -112,8 +117,29 @@ batch_request = {
     "timeout_per_url": 30
 }
 
-response = httpx.post("http://localhost:8000/batch", json=batch_request)
-results = response.json()
+async with httpx.AsyncClient() as client:
+    # Submit job
+    response = await client.post("http://localhost:8000/batch", json=batch_request)
+    job = response.json()
+    job_id = job["job_id"]
+    
+    # Poll for completion
+    while True:
+        status_response = await client.get(f"http://localhost:8000/jobs/{job_id}/status")
+        status = status_response.json()
+        
+        if status["status"] == "completed":
+            break
+        elif status["status"] == "failed":
+            print(f"Job failed: {status['error_message']}")
+            break
+            
+        print(f"Progress: {status['progress']}%")
+        await asyncio.sleep(2)
+    
+    # Download results
+    results_response = await client.get(f"http://localhost:8000/jobs/{job_id}/results")
+    results = results_response.json()
 ```
 
 ## Configuration

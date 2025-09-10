@@ -4,7 +4,9 @@ import asyncio
 import base64
 import json
 import logging
+import os
 import re
+from datetime import datetime, timedelta, timezone
 
 from bs4 import BeautifulSoup
 from fastapi import APIRouter, Depends, Header, HTTPException, Path, Request, Response
@@ -12,6 +14,7 @@ from pydantic import BaseModel, Field
 
 from .auth import get_api_key
 from .http_client import DownloadError, HTTPClientError, HTTPTimeoutError, get_client
+from .job_manager import get_job_manager, JobStatus
 from .pdf_generator import (
     PDFGeneratorError,
     generate_pdf_from_url,
@@ -95,6 +98,35 @@ class BatchResponse(BaseModel):
     total_duration: float = Field(..., description="Total processing time in seconds")
     results: list[BatchURLResult] = Field(..., description="Individual URL results")
     batch_id: str | None = Field(None, description="Unique batch identifier")
+
+
+# New job-based models
+class JobSubmissionResponse(BaseModel):
+    """Response model for job submission."""
+    
+    job_id: str = Field(..., description="Unique job identifier")
+    status: str = Field(..., description="Initial job status")
+    created_at: str = Field(..., description="Job creation timestamp")
+    total_urls: int = Field(..., description="Total number of URLs to process")
+    estimated_completion: str | None = Field(None, description="Estimated completion time")
+    
+    
+class JobStatusResponse(BaseModel):
+    """Response model for job status check."""
+    
+    job_id: str = Field(..., description="Job identifier")
+    status: str = Field(..., description="Current job status")
+    progress: int = Field(..., description="Progress percentage (0-100)")
+    created_at: str = Field(..., description="Job creation timestamp")
+    started_at: str | None = Field(None, description="Job start timestamp")
+    completed_at: str | None = Field(None, description="Job completion timestamp")
+    total_urls: int = Field(..., description="Total number of URLs to process")
+    processed_urls: int = Field(..., description="Number of URLs processed")
+    successful_urls: int = Field(..., description="Number of successfully processed URLs")
+    failed_urls: int = Field(..., description="Number of failed URLs")
+    error_message: str | None = Field(None, description="Error message if job failed")
+    results_available: bool = Field(..., description="Whether results are available for download")
+    expires_at: str | None = Field(None, description="Job expiration timestamp")
 
 
 def parse_accept_header(accept_header: str | None) -> str:
@@ -473,6 +505,103 @@ def convert_content_to_markdown(content: bytes, content_type: str) -> str:
         return content.decode("utf-8", errors="replace")
 
 
+async def process_background_batch_job(
+    job_id: str, batch_request: BatchRequest
+) -> tuple[list[dict], dict]:
+    """
+    Process batch job in background.
+    
+    Args:
+        job_id: Job identifier for progress tracking
+        batch_request: Batch processing configuration
+        
+    Returns:
+        Tuple of (results_list, summary_dict)
+    """
+    job_manager = await get_job_manager()
+    start_time = asyncio.get_event_loop().time()
+    
+    logger.info(f"[JOB-{job_id}] Starting background batch processing: {len(batch_request.urls)} URLs")
+    
+    # Create semaphore for this batch's concurrency control
+    batch_semaphore = asyncio.Semaphore(batch_request.concurrency_limit)
+    
+    async def process_with_semaphore_and_progress(
+        url_request: BatchURLRequest, index: int
+    ) -> BatchURLResult:
+        """Process a single URL with concurrency control and progress updates."""
+        async with batch_semaphore:
+            # Also use global batch semaphore to prevent overloading the service
+            async with BATCH_SEMAPHORE:
+                request_id = f"JOB-{job_id}-{index + 1:02d}"
+                result = await process_single_url_in_batch(
+                    url_request=url_request,
+                    default_format=batch_request.default_format,
+                    timeout=batch_request.timeout_per_url,
+                    request_id=request_id,
+                )
+                
+                # Update progress
+                processed_count = index + 1
+                progress = int((processed_count / len(batch_request.urls)) * 100)
+                successful_count = sum(1 for i in range(processed_count) if i == index and result.success)
+                failed_count = sum(1 for i in range(processed_count) if i == index and not result.success)
+                
+                await job_manager.update_job_status(
+                    job_id,
+                    JobStatus.RUNNING,
+                    progress=progress,
+                    processed_urls=processed_count,
+                    successful_urls=successful_count,
+                    failed_urls=failed_count
+                )
+                
+                return result
+    
+    # Create tasks for all URLs
+    tasks = [
+        process_with_semaphore_and_progress(url_request, i)
+        for i, url_request in enumerate(batch_request.urls)
+    ]
+    
+    # Execute all requests concurrently
+    results = await asyncio.gather(*tasks, return_exceptions=False)
+    
+    batch_duration = asyncio.get_event_loop().time() - start_time
+    
+    # Calculate final statistics
+    successful_results = [r for r in results if r.success]
+    failed_results = [r for r in results if not r.success]
+    success_rate = (len(successful_results) / len(results)) * 100 if results else 0
+    
+    # Update final progress
+    await job_manager.update_job_status(
+        job_id,
+        JobStatus.RUNNING,  # Will be set to COMPLETED by job manager
+        progress=100,
+        processed_urls=len(results),
+        successful_urls=len(successful_results),
+        failed_urls=len(failed_results)
+    )
+    
+    logger.info(
+        f"[JOB-{job_id}] Batch completed: {len(successful_results)}/{len(results)} successful ({success_rate:.1f}%) in {batch_duration:.2f}s"
+    )
+    
+    # Convert results to dict format for storage
+    results_dict = [result.model_dump() for result in results]
+    
+    summary = {
+        "total_requests": len(results),
+        "successful_requests": len(successful_results),
+        "failed_requests": len(failed_results),
+        "success_rate": success_rate,
+        "total_duration": batch_duration,
+    }
+    
+    return results_dict, summary
+
+
 async def process_single_url_in_batch(
     url_request: BatchURLRequest, default_format: str, timeout: int, request_id: str
 ) -> BatchURLResult:
@@ -736,19 +865,19 @@ async def process_single_url_in_batch(
 
 
 @router.post("/batch")
-async def process_batch_urls(
+async def submit_batch_job(
     batch_request: BatchRequest,
     api_key: str | None = Depends(get_api_key),
-) -> BatchResponse:
+) -> JobSubmissionResponse:
     """
-    Process multiple URLs in batch with configurable concurrency and formats.
+    Submit a batch processing job for background execution.
 
     Args:
         batch_request: Batch processing configuration
         api_key: API key for authentication (if DOWNLOADER_KEY env var is set)
 
     Returns:
-        BatchResponse with individual results and overall statistics
+        JobSubmissionResponse with job ID and initial status
 
     Raises:
         HTTPException: For authentication failures or service unavailability
@@ -768,27 +897,22 @@ async def process_batch_urls(
         "timeout_per_url": 30
     }
 
-    Response includes individual results for each URL plus batch statistics.
+    Response includes job ID for status checking and result retrieval.
     """
-    import uuid
-
-    batch_id = str(uuid.uuid4())[:8]
-    batch_start_time = asyncio.get_event_loop().time()
-
-    logger.info(
-        f"[BATCH-{batch_id}] Starting batch processing: {len(batch_request.urls)} URLs"
-    )
-    logger.info(
-        f"[BATCH-{batch_id}] Concurrency limit: {batch_request.concurrency_limit}"
-    )
-    logger.info(f"[BATCH-{batch_id}] Default format: {batch_request.default_format}")
-    logger.info(f"[BATCH-{batch_id}] Timeout per URL: {batch_request.timeout_per_url}s")
-
-    # Check if batch service is available
-    if len(batch_request.urls) > 50:
-        logger.warning(
-            f"[BATCH-{batch_id}] Too many URLs requested: {len(batch_request.urls)}"
+    # Check if batch processing is available (requires Redis)
+    if not bool(os.getenv("REDIS_URI")):
+        logger.warning("Batch processing requested but Redis is not configured")
+        raise HTTPException(
+            status_code=503,
+            detail=ErrorResponse(
+                error="Batch processing is not available. Redis connection (REDIS_URI) is required.",
+                error_type="service_unavailable",
+            ).model_dump(),
         )
+
+    # Validate batch size
+    if len(batch_request.urls) > 50:
+        logger.warning(f"Too many URLs requested: {len(batch_request.urls)}")
         raise HTTPException(
             status_code=400,
             detail=ErrorResponse(
@@ -798,102 +922,251 @@ async def process_batch_urls(
         )
 
     try:
-        # Create semaphore for this batch's concurrency control
-        batch_semaphore = asyncio.Semaphore(batch_request.concurrency_limit)
-
-        async def process_with_semaphore(
-            url_request: BatchURLRequest, index: int
-        ) -> BatchURLResult:
-            """Process a single URL with concurrency control."""
-            async with batch_semaphore:
-                # Also use global batch semaphore to prevent overloading the service
-                async with BATCH_SEMAPHORE:
-                    request_id = f"BATCH-{batch_id}-{index + 1:02d}"
-                    return await process_single_url_in_batch(
-                        url_request=url_request,
-                        default_format=batch_request.default_format,
-                        timeout=batch_request.timeout_per_url,
-                        request_id=request_id,
-                    )
-
-        # Create tasks for all URLs
-        tasks = [
-            process_with_semaphore(url_request, i)
-            for i, url_request in enumerate(batch_request.urls)
-        ]
-
-        logger.info(
-            f"[BATCH-{batch_id}] Starting concurrent processing of {len(tasks)} URLs"
+        # Get job manager and create job
+        job_manager = await get_job_manager()
+        
+        # Convert batch request to dict for storage
+        request_data = batch_request.model_dump()
+        
+        # Create job
+        job_id = await job_manager.create_job(request_data)
+        
+        # Start background processing
+        await job_manager.start_background_job(
+            job_id, 
+            process_background_batch_job,
+            batch_request
         )
-
-        # Execute all requests concurrently with overall timeout
-        overall_timeout = min(
-            600, len(batch_request.urls) * batch_request.timeout_per_url + 30
-        )  # Max 10 minutes
-        try:
-            results = await asyncio.wait_for(
-                asyncio.gather(*tasks, return_exceptions=False), timeout=overall_timeout
-            )
-        except asyncio.TimeoutError:
-            logger.error(
-                f"[BATCH-{batch_id}] Overall batch timeout after {overall_timeout}s"
-            )
-            raise HTTPException(
-                status_code=408,
-                detail=ErrorResponse(
-                    error=f"Batch processing timeout after {overall_timeout} seconds",
-                    error_type="batch_timeout_error",
-                ).model_dump(),
-            )
-
-        batch_duration = asyncio.get_event_loop().time() - batch_start_time
-
-        # Calculate statistics
-        successful_results = [r for r in results if r.success]
-        failed_results = [r for r in results if not r.success]
-
-        success_rate = (len(successful_results) / len(results)) * 100 if results else 0
-
-        logger.info(
-            f"[BATCH-{batch_id}] Batch completed: {len(successful_results)}/{len(results)} successful ({success_rate:.1f}%) in {batch_duration:.2f}s"
+        
+        logger.info(f"[JOB-{job_id}] Submitted batch job with {len(batch_request.urls)} URLs")
+        
+        # Estimate completion time (rough estimate: 2 seconds per URL + overhead)
+        estimated_seconds = len(batch_request.urls) * 2
+        estimated_completion = None
+        if estimated_seconds < 300:  # Only provide estimate for jobs under 5 minutes
+            estimated_completion = (
+                datetime.now(timezone.utc) + timedelta(seconds=estimated_seconds)
+            ).isoformat()
+        
+        return JobSubmissionResponse(
+            job_id=job_id,
+            status="pending",
+            created_at=datetime.now(timezone.utc).isoformat(),
+            total_urls=len(batch_request.urls),
+            estimated_completion=estimated_completion,
         )
-
-        # Log error summary
-        if failed_results:
-            error_summary = {}
-            for result in failed_results:
-                error_type = result.error_type or "unknown"
-                error_summary[error_type] = error_summary.get(error_type, 0) + 1
-            logger.warning(f"[BATCH-{batch_id}] Error summary: {error_summary}")
-
-        # Create response
-        batch_response = BatchResponse(
-            success=len(failed_results) == 0,  # True only if all requests succeeded
-            total_requests=len(results),
-            successful_requests=len(successful_results),
-            failed_requests=len(failed_results),
-            success_rate=success_rate,
-            total_duration=batch_duration,
-            results=results,
-            batch_id=batch_id,
-        )
-
-        return batch_response
-
-    except HTTPException:
-        # Re-raise HTTPExceptions without modification
-        raise
 
     except Exception as e:
-        batch_duration = asyncio.get_event_loop().time() - batch_start_time
-        logger.exception(
-            f"[BATCH-{batch_id}] Unexpected error during batch processing: {e}"
-        )
+        logger.exception(f"Failed to submit batch job: {e}")
         raise HTTPException(
             status_code=500,
             detail=ErrorResponse(
-                error="Internal server error during batch processing",
-                error_type="batch_internal_error",
+                error="Failed to submit batch job",
+                error_type="job_submission_error",
+            ).model_dump(),
+        )
+
+
+@router.get("/jobs/{job_id}/status")
+async def get_job_status(
+    job_id: str = Path(..., description="Job identifier"),
+    api_key: str | None = Depends(get_api_key),
+) -> JobStatusResponse:
+    """
+    Get the status of a batch processing job.
+
+    Args:
+        job_id: Job identifier
+        api_key: API key for authentication (if DOWNLOADER_KEY env var is set)
+
+    Returns:
+        JobStatusResponse with current job status and progress
+
+    Raises:
+        HTTPException: For authentication failures or job not found
+    """
+    try:
+        job_manager = await get_job_manager()
+        job_info = await job_manager.get_job_info(job_id)
+        
+        if not job_info:
+            raise HTTPException(
+                status_code=404,
+                detail=ErrorResponse(
+                    error=f"Job {job_id} not found",
+                    error_type="job_not_found",
+                ).model_dump(),
+            )
+        
+        return JobStatusResponse(
+            job_id=job_info.job_id,
+            status=job_info.status.value,
+            progress=job_info.progress,
+            created_at=job_info.created_at.isoformat(),
+            started_at=job_info.started_at.isoformat() if job_info.started_at else None,
+            completed_at=job_info.completed_at.isoformat() if job_info.completed_at else None,
+            total_urls=job_info.total_urls,
+            processed_urls=job_info.processed_urls,
+            successful_urls=job_info.successful_urls,
+            failed_urls=job_info.failed_urls,
+            error_message=job_info.error_message,
+            results_available=job_info.results_available,
+            expires_at=job_info.expires_at.isoformat() if job_info.expires_at else None,
+        )
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.exception(f"Failed to get job status for {job_id}: {e}")
+        raise HTTPException(
+            status_code=500,
+            detail=ErrorResponse(
+                error="Failed to retrieve job status",
+                error_type="job_status_error",
+            ).model_dump(),
+        )
+
+
+@router.get("/jobs/{job_id}/results")
+async def get_job_results(
+    job_id: str = Path(..., description="Job identifier"),
+    api_key: str | None = Depends(get_api_key),
+) -> Response:
+    """
+    Download the results of a completed batch processing job.
+
+    Args:
+        job_id: Job identifier
+        api_key: API key for authentication (if DOWNLOADER_KEY env var is set)
+
+    Returns:
+        JSON response with job results
+
+    Raises:
+        HTTPException: For authentication failures, job not found, or results not available
+    """
+    try:
+        job_manager = await get_job_manager()
+        
+        # Check job status first
+        job_info = await job_manager.get_job_info(job_id)
+        if not job_info:
+            raise HTTPException(
+                status_code=404,
+                detail=ErrorResponse(
+                    error=f"Job {job_id} not found",
+                    error_type="job_not_found",
+                ).model_dump(),
+            )
+        
+        # Check if results are available
+        if not job_info.results_available:
+            if job_info.status == JobStatus.PENDING:
+                error_msg = f"Job {job_id} is still pending"
+            elif job_info.status == JobStatus.RUNNING:
+                error_msg = f"Job {job_id} is still running ({job_info.progress}% complete)"
+            elif job_info.status == JobStatus.FAILED:
+                error_msg = f"Job {job_id} failed: {job_info.error_message}"
+            elif job_info.status == JobStatus.CANCELLED:
+                error_msg = f"Job {job_id} was cancelled"
+            else:
+                error_msg = f"Results not available for job {job_id}"
+                
+            raise HTTPException(
+                status_code=400,
+                detail=ErrorResponse(
+                    error=error_msg,
+                    error_type="results_not_available",
+                ).model_dump(),
+            )
+        
+        # Get job results
+        job_results = await job_manager.get_job_results(job_id)
+        if not job_results:
+            raise HTTPException(
+                status_code=404,
+                detail=ErrorResponse(
+                    error=f"Results not found for job {job_id}",
+                    error_type="results_not_found",
+                ).model_dump(),
+            )
+        
+        logger.info(f"Downloaded results for job {job_id}")
+        
+        return Response(
+            content=job_results.model_dump_json(),
+            media_type="application/json",
+            headers={
+                "Content-Disposition": f'attachment; filename="batch_results_{job_id}.json"',
+                "X-Job-ID": job_id,
+                "X-Job-Status": job_results.status.value,
+                "X-Total-Duration": str(job_results.total_duration),
+            },
+        )
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.exception(f"Failed to get job results for {job_id}: {e}")
+        raise HTTPException(
+            status_code=500,
+            detail=ErrorResponse(
+                error="Failed to retrieve job results",
+                error_type="job_results_error",
+            ).model_dump(),
+        )
+
+
+@router.delete("/jobs/{job_id}")
+async def cancel_job(
+    job_id: str = Path(..., description="Job identifier"),
+    api_key: str | None = Depends(get_api_key),
+) -> dict:
+    """
+    Cancel a running batch processing job.
+
+    Args:
+        job_id: Job identifier
+        api_key: API key for authentication (if DOWNLOADER_KEY env var is set)
+
+    Returns:
+        Cancellation status
+
+    Raises:
+        HTTPException: For authentication failures or job not found
+    """
+    try:
+        job_manager = await get_job_manager()
+        
+        # Check if job exists
+        job_info = await job_manager.get_job_info(job_id)
+        if not job_info:
+            raise HTTPException(
+                status_code=404,
+                detail=ErrorResponse(
+                    error=f"Job {job_id} not found",
+                    error_type="job_not_found",
+                ).model_dump(),
+            )
+        
+        # Try to cancel the job
+        cancelled = await job_manager.cancel_job(job_id)
+        
+        if cancelled:
+            logger.info(f"Successfully cancelled job {job_id}")
+            return {"success": True, "message": f"Job {job_id} cancelled successfully"}
+        else:
+            return {"success": False, "message": f"Job {job_id} could not be cancelled (may already be completed)"}
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.exception(f"Failed to cancel job {job_id}: {e}")
+        raise HTTPException(
+            status_code=500,
+            detail=ErrorResponse(
+                error="Failed to cancel job",
+                error_type="job_cancellation_error",
             ).model_dump(),
         )
 

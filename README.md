@@ -5,6 +5,7 @@ High-performance web service for programmatic URL content downloading with intel
 ## 🚀 Features
 
 - **Direct URL Access**: Simple `/{url}` endpoint structure
+- **Background Batch Processing**: Asynchronous job-based processing with progress tracking
 - **Content Negotiation**: Multiple response formats via Accept headers
 - **PDF Generation**: JavaScript-rendered PDFs using Playwright
 - **API Key Protection**: Optional authentication via environment variable
@@ -38,6 +39,49 @@ Accept: {format}
 | `application/pdf` | PDF | JavaScript-rendered PDF via Playwright |
 | `application/json` | JSON | Base64 content with metadata |
 | *No Accept header* | **Plain Text (Default)** | **Default format returns extracted article text** |
+
+### Background Batch Processing
+
+Submit jobs for processing multiple URLs asynchronously with progress tracking.
+
+#### Submit Batch Job
+```http
+POST /batch
+Content-Type: application/json
+
+{
+  "urls": [
+    {"url": "https://example.com", "format": "text"},
+    {"url": "https://github.com", "format": "markdown"}
+  ],
+  "default_format": "text",
+  "concurrency_limit": 10,
+  "timeout_per_url": 30
+}
+```
+
+Returns job ID for tracking progress and retrieving results.
+
+#### Check Job Status
+```http
+GET /jobs/{job_id}/status
+```
+
+Returns current job status, progress percentage, and processing statistics.
+
+#### Download Results
+```http
+GET /jobs/{job_id}/results
+```
+
+Downloads complete job results as JSON when processing is finished.
+
+#### Cancel Job
+```http
+DELETE /jobs/{job_id}
+```
+
+Cancels a running or pending job.
 
 ## 🔐 Authentication
 
@@ -196,8 +240,8 @@ Environment variables:
 - Error handling with proper HTTP status codes
 
 **🚧 Roadmap:**
-- Batch processing capabilities
-- Redis caching layer
+- ✅ Background batch processing with job tracking
+- Redis caching layer for improved performance
 - Rate limiting implementation
 - Advanced authentication
-- Webhook notifications
+- Webhook notifications for job completion

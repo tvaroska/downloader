@@ -11,31 +11,51 @@ client = TestClient(app)
 
 
 class TestHealthEndpoint:
-    def test_health_check(self):
-        response = client.get("/health")
-        assert response.status_code == 200
-        data = response.json()
-        assert data["status"] == "healthy"
-        assert data["version"] == "0.0.1"
+    def test_health_check_without_redis(self):
+        # Test health check when REDIS_URI is not set
+        with patch.dict(os.environ, {}, clear=False):
+            if "REDIS_URI" in os.environ:
+                del os.environ["REDIS_URI"]
+            response = client.get("/health")
+            assert response.status_code == 200
+            data = response.json()
+            assert data["status"] == "healthy"
+            assert data["version"] == "0.0.1"
 
-        # Check service status
-        assert "services" in data
-        assert "batch_processing" in data["services"]
-        assert "pdf_generation" in data["services"]
+            # Check service status
+            assert "services" in data
+            assert "batch_processing" in data["services"]
+            assert "pdf_generation" in data["services"]
 
-        # Check batch processing service
-        batch_service = data["services"]["batch_processing"]
-        assert batch_service["available"] is True
-        assert "max_concurrent_downloads" in batch_service
-        assert "current_active_downloads" in batch_service
-        assert "available_slots" in batch_service
+            # Check batch processing service (should be unavailable without Redis)
+            batch_service = data["services"]["batch_processing"]
+            assert batch_service["available"] is False
+            assert batch_service["reason"] == "Redis connection (REDIS_URI) required"
+            assert "max_concurrent_downloads" not in batch_service
 
-        # Check PDF generation service
-        pdf_service = data["services"]["pdf_generation"]
-        assert pdf_service["available"] is True
-        assert "max_concurrent_pdfs" in pdf_service
-        assert "current_active_pdfs" in pdf_service
-        assert "available_slots" in pdf_service
+            # Check PDF generation service (should still be available)
+            pdf_service = data["services"]["pdf_generation"]
+            assert pdf_service["available"] is True
+            assert "max_concurrent_pdfs" in pdf_service
+            assert "current_active_pdfs" in pdf_service
+            assert "available_slots" in pdf_service
+
+    def test_health_check_with_redis(self):
+        # Test health check when REDIS_URI is set
+        with patch.dict(os.environ, {"REDIS_URI": "redis://localhost:6379"}):
+            response = client.get("/health")
+            assert response.status_code == 200
+            data = response.json()
+            assert data["status"] == "healthy"
+            assert data["version"] == "0.0.1"
+
+            # Check batch processing service (should be available with Redis)
+            batch_service = data["services"]["batch_processing"]
+            assert batch_service["available"] is True
+            assert "max_concurrent_downloads" in batch_service
+            assert "current_active_downloads" in batch_service
+            assert "available_slots" in batch_service
+            assert "reason" not in batch_service
 
 
 class TestDownloadEndpoint:
@@ -808,3 +828,57 @@ class TestBatchAuthentication:
                 headers={"Authorization": "Bearer test-key"},
             )
             assert response.status_code == 200
+
+
+class TestBatchRedisRequirement:
+    def test_batch_unavailable_without_redis(self):
+        """Test that batch endpoint returns 503 when REDIS_URI is not set."""
+        with patch.dict(os.environ, {}, clear=False):
+            if "REDIS_URI" in os.environ:
+                del os.environ["REDIS_URI"]
+            
+            batch_request = {
+                "urls": [{"url": "https://example.com"}],
+                "default_format": "text",
+            }
+
+            response = client.post("/batch", json=batch_request)
+            assert response.status_code == 503
+            
+            data = response.json()
+            assert "detail" in data
+            detail = data["detail"]
+            assert detail["success"] is False
+            assert detail["error_type"] == "service_unavailable"
+            assert "Redis connection (REDIS_URI) is required" in detail["error"]
+
+    @patch("src.downloader.api.get_client")
+    def test_batch_available_with_redis(self, mock_get_client):
+        """Test that batch endpoint works when REDIS_URI is set."""
+        with patch.dict(os.environ, {"REDIS_URI": "redis://localhost:6379"}):
+            mock_client = AsyncMock()
+            mock_client.download.return_value = (
+                b"<html>test content</html>",
+                {
+                    "url": "https://example.com",
+                    "status_code": 200,
+                    "content_type": "text/html",
+                    "size": 25,
+                    "headers": {"content-type": "text/html"},
+                },
+            )
+            mock_get_client.return_value = mock_client
+
+            batch_request = {
+                "urls": [{"url": "https://example.com"}],
+                "default_format": "text",
+            }
+
+            response = client.post("/batch", json=batch_request)
+            assert response.status_code == 200
+            
+            data = response.json()
+            assert data["success"] is True
+            assert data["total_requests"] == 1
+            assert data["successful_requests"] == 1
+            assert len(data["results"]) == 1
