@@ -117,7 +117,9 @@ class TestGetApiKey:
             ),
         ],
     )
-    async def test_get_api_key_invalid(self, mock_request, auth_header, credentials, error_detail):
+    async def test_get_api_key_invalid(
+        self, mock_request, auth_header, credentials, error_detail
+    ):
         """Test invalid or missing API key scenarios."""
         with patch.dict(os.environ, {"DOWNLOADER_KEY": "test-key"}, clear=True):
             mock_request.headers = auth_header

@@ -72,12 +72,12 @@ async def health_check():
 
     # Check if Redis is available for batch processing
     redis_available = bool(os.getenv("REDIS_URI"))
-    
+
     # Check job manager status
     job_manager_status = {
         "available": redis_available,
     }
-    
+
     if redis_available:
         try:
             from .job_manager import get_job_manager
@@ -92,11 +92,11 @@ async def health_check():
             job_manager_status["error"] = str(e)
     else:
         job_manager_status["reason"] = "Redis connection (REDIS_URI) required"
-    
+
     batch_info = {
         "available": redis_available,
     }
-    
+
     # Only include detailed batch processing metrics if Redis is available
     if redis_available:
         batch_info.update({

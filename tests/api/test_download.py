@@ -1,5 +1,4 @@
 import base64
-import os
 from unittest.mock import AsyncMock, patch
 
 import pytest
@@ -25,7 +24,9 @@ def mock_http_client():
             "headers": {"content-type": "text/html"},
         },
     )
-    with patch("src.downloader.api.get_client", return_value=mock_client) as mock_get_client:
+    with patch(
+        "src.downloader.api.get_client", return_value=mock_client
+    ) as mock_get_client:
         yield mock_get_client
 
 
@@ -251,7 +252,9 @@ class TestDownloadEndpoint:
             ({"X-API-Key": "wrong-key"}, 401, "authentication_failed"),
         ],
     )
-    def test_download_auth_failed(self, env_with_auth, headers, expected_status, expected_error_type):
+    def test_download_auth_failed(
+        self, env_with_auth, headers, expected_status, expected_error_type
+    ):
         """Test download fails with missing or invalid API key."""
         response = client.get("/https://example.com", headers=headers)
         assert response.status_code == expected_status

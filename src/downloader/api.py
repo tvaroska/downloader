@@ -14,7 +14,7 @@ from pydantic import BaseModel, Field
 
 from .auth import get_api_key
 from .http_client import DownloadError, HTTPClientError, HTTPTimeoutError, get_client
-from .job_manager import get_job_manager, JobStatus
+from .job_manager import JobStatus, get_job_manager
 from .pdf_generator import (
     PDFGeneratorError,
     generate_pdf_from_url,
@@ -103,17 +103,17 @@ class BatchResponse(BaseModel):
 # New job-based models
 class JobSubmissionResponse(BaseModel):
     """Response model for job submission."""
-    
+
     job_id: str = Field(..., description="Unique job identifier")
     status: str = Field(..., description="Initial job status")
     created_at: str = Field(..., description="Job creation timestamp")
     total_urls: int = Field(..., description="Total number of URLs to process")
     estimated_completion: str | None = Field(None, description="Estimated completion time")
-    
-    
+
+
 class JobStatusResponse(BaseModel):
     """Response model for job status check."""
-    
+
     job_id: str = Field(..., description="Job identifier")
     status: str = Field(..., description="Current job status")
     progress: int = Field(..., description="Progress percentage (0-100)")
@@ -520,12 +520,12 @@ async def process_background_batch_job(
     """
     job_manager = await get_job_manager()
     start_time = asyncio.get_event_loop().time()
-    
+
     logger.info(f"[JOB-{job_id}] Starting background batch processing: {len(batch_request.urls)} URLs")
-    
+
     # Create semaphore for this batch's concurrency control
     batch_semaphore = asyncio.Semaphore(batch_request.concurrency_limit)
-    
+
     async def process_with_semaphore_and_progress(
         url_request: BatchURLRequest, index: int
     ) -> BatchURLResult:
@@ -540,13 +540,13 @@ async def process_background_batch_job(
                     timeout=batch_request.timeout_per_url,
                     request_id=request_id,
                 )
-                
+
                 # Update progress
                 processed_count = index + 1
                 progress = int((processed_count / len(batch_request.urls)) * 100)
                 successful_count = sum(1 for i in range(processed_count) if i == index and result.success)
                 failed_count = sum(1 for i in range(processed_count) if i == index and not result.success)
-                
+
                 await job_manager.update_job_status(
                     job_id,
                     JobStatus.RUNNING,
@@ -555,25 +555,25 @@ async def process_background_batch_job(
                     successful_urls=successful_count,
                     failed_urls=failed_count
                 )
-                
+
                 return result
-    
+
     # Create tasks for all URLs
     tasks = [
         process_with_semaphore_and_progress(url_request, i)
         for i, url_request in enumerate(batch_request.urls)
     ]
-    
+
     # Execute all requests concurrently
     results = await asyncio.gather(*tasks, return_exceptions=False)
-    
+
     batch_duration = asyncio.get_event_loop().time() - start_time
-    
+
     # Calculate final statistics
     successful_results = [r for r in results if r.success]
     failed_results = [r for r in results if not r.success]
     success_rate = (len(successful_results) / len(results)) * 100 if results else 0
-    
+
     # Update final progress
     await job_manager.update_job_status(
         job_id,
@@ -583,14 +583,14 @@ async def process_background_batch_job(
         successful_urls=len(successful_results),
         failed_urls=len(failed_results)
     )
-    
+
     logger.info(
         f"[JOB-{job_id}] Batch completed: {len(successful_results)}/{len(results)} successful ({success_rate:.1f}%) in {batch_duration:.2f}s"
     )
-    
+
     # Convert results to dict format for storage
     results_dict = [result.model_dump() for result in results]
-    
+
     summary = {
         "total_requests": len(results),
         "successful_requests": len(successful_results),
@@ -598,7 +598,7 @@ async def process_background_batch_job(
         "success_rate": success_rate,
         "total_duration": batch_duration,
     }
-    
+
     return results_dict, summary
 
 
@@ -924,22 +924,22 @@ async def submit_batch_job(
     try:
         # Get job manager and create job
         job_manager = await get_job_manager()
-        
+
         # Convert batch request to dict for storage
         request_data = batch_request.model_dump()
-        
+
         # Create job
         job_id = await job_manager.create_job(request_data)
-        
+
         # Start background processing
         await job_manager.start_background_job(
-            job_id, 
+            job_id,
             process_background_batch_job,
             batch_request
         )
-        
+
         logger.info(f"[JOB-{job_id}] Submitted batch job with {len(batch_request.urls)} URLs")
-        
+
         # Estimate completion time (rough estimate: 2 seconds per URL + overhead)
         estimated_seconds = len(batch_request.urls) * 2
         estimated_completion = None
@@ -947,7 +947,7 @@ async def submit_batch_job(
             estimated_completion = (
                 datetime.now(timezone.utc) + timedelta(seconds=estimated_seconds)
             ).isoformat()
-        
+
         return JobSubmissionResponse(
             job_id=job_id,
             status="pending",
@@ -988,7 +988,7 @@ async def get_job_status(
     try:
         job_manager = await get_job_manager()
         job_info = await job_manager.get_job_info(job_id)
-        
+
         if not job_info:
             raise HTTPException(
                 status_code=404,
@@ -997,7 +997,7 @@ async def get_job_status(
                     error_type="job_not_found",
                 ).model_dump(),
             )
-        
+
         return JobStatusResponse(
             job_id=job_info.job_id,
             status=job_info.status.value,
@@ -1013,7 +1013,7 @@ async def get_job_status(
             results_available=job_info.results_available,
             expires_at=job_info.expires_at.isoformat() if job_info.expires_at else None,
         )
-        
+
     except HTTPException:
         raise
     except Exception as e:
@@ -1047,7 +1047,7 @@ async def get_job_results(
     """
     try:
         job_manager = await get_job_manager()
-        
+
         # Check job status first
         job_info = await job_manager.get_job_info(job_id)
         if not job_info:
@@ -1058,7 +1058,7 @@ async def get_job_results(
                     error_type="job_not_found",
                 ).model_dump(),
             )
-        
+
         # Check if results are available
         if not job_info.results_available:
             if job_info.status == JobStatus.PENDING:
@@ -1071,7 +1071,7 @@ async def get_job_results(
                 error_msg = f"Job {job_id} was cancelled"
             else:
                 error_msg = f"Results not available for job {job_id}"
-                
+
             raise HTTPException(
                 status_code=400,
                 detail=ErrorResponse(
@@ -1079,7 +1079,7 @@ async def get_job_results(
                     error_type="results_not_available",
                 ).model_dump(),
             )
-        
+
         # Get job results
         job_results = await job_manager.get_job_results(job_id)
         if not job_results:
@@ -1090,9 +1090,9 @@ async def get_job_results(
                     error_type="results_not_found",
                 ).model_dump(),
             )
-        
+
         logger.info(f"Downloaded results for job {job_id}")
-        
+
         return Response(
             content=job_results.model_dump_json(),
             media_type="application/json",
@@ -1103,7 +1103,7 @@ async def get_job_results(
                 "X-Total-Duration": str(job_results.total_duration),
             },
         )
-        
+
     except HTTPException:
         raise
     except Exception as e:
@@ -1137,7 +1137,7 @@ async def cancel_job(
     """
     try:
         job_manager = await get_job_manager()
-        
+
         # Check if job exists
         job_info = await job_manager.get_job_info(job_id)
         if not job_info:
@@ -1148,16 +1148,16 @@ async def cancel_job(
                     error_type="job_not_found",
                 ).model_dump(),
             )
-        
+
         # Try to cancel the job
         cancelled = await job_manager.cancel_job(job_id)
-        
+
         if cancelled:
             logger.info(f"Successfully cancelled job {job_id}")
             return {"success": True, "message": f"Job {job_id} cancelled successfully"}
         else:
             return {"success": False, "message": f"Job {job_id} could not be cancelled (may already be completed)"}
-        
+
     except HTTPException:
         raise
     except Exception as e:

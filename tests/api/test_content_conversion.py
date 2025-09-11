@@ -29,7 +29,10 @@ class TestContentConversion:
 
     def test_convert_content_to_text(self):
         """Test HTML to text conversion."""
-        html = b"<html><head><style>p {color: red;}</style></head><body><h1>Title</h1><p>Some text.</p></body></html>"
+        html = (
+            b"<html><head><style>p {color: red;}</style></head>"
+            b"<body><h1>Title</h1><p>Some text.</p></body></html>"
+        )
         text = convert_content_to_text(html, "text/html")
         assert "Title" in text
         assert "Some text" in text

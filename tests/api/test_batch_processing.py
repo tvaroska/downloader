@@ -3,7 +3,6 @@
 import asyncio
 from unittest.mock import AsyncMock, patch
 
-import pytest
 from fastapi.testclient import TestClient
 
 from src.downloader.main import app
@@ -16,7 +15,14 @@ class TestBatchProcessing:
 
     @patch("src.downloader.api.process_background_batch_job", new_callable=AsyncMock)
     @patch("src.downloader.api.get_client")
-    def test_batch_available_with_redis(self, mock_get_client, mock_process_job, env_with_redis, mock_job_manager, mock_http_client):
+    def test_batch_available_with_redis(
+        self,
+        mock_get_client,
+        mock_process_job,
+        env_with_redis,
+        mock_job_manager,
+        mock_http_client,
+    ):
         """Test that batch endpoint works when REDIS_URI is set."""
         mock_get_client.return_value = mock_http_client
 
@@ -35,7 +41,14 @@ class TestBatchProcessing:
 
     @patch("src.downloader.api.process_background_batch_job", new_callable=AsyncMock)
     @patch("src.downloader.api.get_client")
-    def test_batch_basic_success(self, mock_get_client, mock_process_job, env_with_redis, mock_job_manager, mock_http_client):
+    def test_batch_basic_success(
+        self,
+        mock_get_client,
+        mock_process_job,
+        env_with_redis,
+        mock_job_manager,
+        mock_http_client,
+    ):
         """Test basic batch processing with successful URLs."""
         mock_get_client.return_value = mock_http_client
 
@@ -58,7 +71,9 @@ class TestBatchProcessing:
 
     @patch("src.downloader.api.process_background_batch_job", new_callable=AsyncMock)
     @patch("src.downloader.api.get_client")
-    def test_batch_mixed_success_failure(self, mock_get_client, mock_process_job, env_with_redis, mock_job_manager):
+    def test_batch_mixed_success_failure(
+        self, mock_get_client, mock_process_job, env_with_redis, mock_job_manager
+    ):
         """Test batch processing with mix of successful and failed URLs."""
         from src.downloader.http_client import HTTPClientError
 
@@ -96,7 +111,15 @@ class TestBatchProcessing:
 
     @patch("src.downloader.api.process_background_batch_job", new_callable=AsyncMock)
     @patch("src.downloader.api.get_client")
-    def test_batch_different_formats(self, mock_get_client, mock_process_job, env_with_redis, mock_job_manager, sample_html_content, sample_metadata):
+    def test_batch_different_formats(
+        self,
+        mock_get_client,
+        mock_process_job,
+        env_with_redis,
+        mock_job_manager,
+        sample_html_content,
+        sample_metadata,
+    ):
         """Test batch processing with different output formats."""
         mock_client = AsyncMock()
         mock_client.download.return_value = (sample_html_content, sample_metadata)
@@ -120,7 +143,9 @@ class TestBatchProcessing:
     @patch("src.downloader.api.process_background_batch_job", new_callable=AsyncMock)
     @patch("src.downloader.api.get_client")
     @patch("src.downloader.api.generate_pdf_from_url")
-    def test_batch_pdf_format(self, mock_generate_pdf, mock_get_client, mock_process_job, env_with_redis, mock_job_manager, mock_http_client):
+    def test_batch_pdf_format(self, mock_generate_pdf, mock_get_client,
+                               mock_process_job, env_with_redis, mock_job_manager,
+                               mock_http_client):
         """Test batch processing with PDF format."""
         mock_get_client.return_value = mock_http_client
 
@@ -139,7 +164,8 @@ class TestBatchProcessing:
 
     @patch("src.downloader.api.process_background_batch_job", new_callable=AsyncMock)
     @patch("src.downloader.api.get_client")
-    def test_batch_timeout_handling(self, mock_get_client, mock_process_job, env_with_redis, mock_job_manager):
+    def test_batch_timeout_handling(self, mock_get_client, mock_process_job,
+                                     env_with_redis, mock_job_manager):
         """Test batch processing with timeout scenarios."""
         from src.downloader.http_client import HTTPTimeoutError
 
@@ -160,7 +186,8 @@ class TestBatchProcessing:
 
     @patch("src.downloader.api.process_background_batch_job", new_callable=AsyncMock)
     @patch("src.downloader.api.get_client")
-    def test_batch_concurrency_control(self, mock_get_client, mock_process_job, env_with_redis, mock_job_manager):
+    def test_batch_concurrency_control(self, mock_get_client, mock_process_job,
+                                        env_with_redis, mock_job_manager):
         """Test batch processing respects concurrency limits."""
         download_times = []
 
@@ -199,7 +226,8 @@ class TestBatchProcessing:
 
     @patch("src.downloader.api.process_background_batch_job", new_callable=AsyncMock)
     @patch("src.downloader.api.get_client")
-    def test_batch_large_content_handling(self, mock_get_client, mock_process_job, env_with_redis, mock_job_manager):
+    def test_batch_large_content_handling(self, mock_get_client, mock_process_job,
+                                           env_with_redis, mock_job_manager):
         """Test batch processing handles large content properly."""
         large_content = b"<html>" + b"x" * 10000 + b"</html>"
 

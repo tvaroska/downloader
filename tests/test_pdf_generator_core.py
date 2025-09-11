@@ -1,6 +1,5 @@
 """Tests for core PDF generation functionality."""
 
-from unittest.mock import AsyncMock
 
 import pytest
 

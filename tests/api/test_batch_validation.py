@@ -1,9 +1,9 @@
 """Tests for batch processing request validation."""
 
-import pytest
+
+from fastapi.testclient import TestClient
 
 from src.downloader.main import app
-from fastapi.testclient import TestClient
 
 client = TestClient(app)
 

@@ -13,7 +13,9 @@ class TestGlobalPDFFunctions:
     @pytest.mark.asyncio
     async def test_generate_pdf_from_url(self):
         """Test generate_pdf_from_url function."""
-        with patch("src.downloader.pdf_generator.get_pdf_generator") as mock_get_generator:
+        with patch(
+            "src.downloader.pdf_generator.get_pdf_generator"
+        ) as mock_get_generator:
             mock_generator = AsyncMock()
             mock_generator.generate_pdf = AsyncMock(return_value=b"PDF content")
 
