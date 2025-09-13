@@ -4,6 +4,7 @@ import asyncio
 import base64
 import json
 import logging
+import multiprocessing
 import os
 import re
 from datetime import datetime, timedelta, timezone
@@ -32,9 +33,59 @@ _fallback_bypass_cache: set[str] = set()
 _cache_cleanup_interval = 3600  # 1 hour
 _last_cache_cleanup = 0
 
-# Concurrency control for PDF generation and batch processing
-PDF_SEMAPHORE = asyncio.Semaphore(5)  # Max 5 concurrent PDF generations
-BATCH_SEMAPHORE = asyncio.Semaphore(20)  # Max 20 concurrent batch downloads
+# Intelligent concurrency control with CPU-based defaults (eliminate artificial bottlenecks)
+def _get_optimal_concurrency_limits():
+    """Calculate optimal concurrency limits based on system resources."""
+    cpu_count = multiprocessing.cpu_count()
+
+    # PDF generation is CPU/memory intensive, conservative scaling
+    default_pdf_limit = min(cpu_count * 2, 12)  # 2x CPU cores, max 12
+    pdf_concurrency = int(os.getenv('PDF_CONCURRENCY', default_pdf_limit))
+
+    # Batch processing is I/O bound, more aggressive scaling
+    default_batch_limit = min(cpu_count * 8, 50)  # 8x CPU cores, max 50
+    batch_concurrency = int(os.getenv('BATCH_CONCURRENCY', default_batch_limit))
+
+    logger.info(f"Concurrency limits: PDF={pdf_concurrency}, BATCH={batch_concurrency} (CPU cores: {cpu_count})")
+
+    return pdf_concurrency, batch_concurrency
+
+# Initialize dynamic semaphores based on system resources
+_pdf_concurrency, _batch_concurrency = _get_optimal_concurrency_limits()
+PDF_SEMAPHORE = asyncio.Semaphore(_pdf_concurrency)
+BATCH_SEMAPHORE = asyncio.Semaphore(_batch_concurrency)
+
+
+def get_concurrency_stats() -> dict[str, any]:
+    """Get current concurrency statistics for monitoring."""
+    return {
+        "pdf_concurrency": {
+            "limit": _pdf_concurrency,
+            "available": PDF_SEMAPHORE._value,
+            "in_use": _pdf_concurrency - PDF_SEMAPHORE._value,
+            "utilization_percent": round(((_pdf_concurrency - PDF_SEMAPHORE._value) / _pdf_concurrency) * 100, 1)
+        },
+        "batch_concurrency": {
+            "limit": _batch_concurrency,
+            "available": BATCH_SEMAPHORE._value,
+            "in_use": _batch_concurrency - BATCH_SEMAPHORE._value,
+            "utilization_percent": round(((_batch_concurrency - BATCH_SEMAPHORE._value) / _batch_concurrency) * 100, 1)
+        },
+        "system_info": {
+            "cpu_cores": multiprocessing.cpu_count(),
+            "pdf_scaling_factor": "2x CPU cores (max 12)",
+            "batch_scaling_factor": "8x CPU cores (max 50)"
+        }
+    }
+
+
+def _check_resource_pressure() -> bool:
+    """Check if system is under resource pressure and may benefit from limit adjustment."""
+    pdf_util = (_pdf_concurrency - PDF_SEMAPHORE._value) / _pdf_concurrency
+    batch_util = (_batch_concurrency - BATCH_SEMAPHORE._value) / _batch_concurrency
+
+    # High utilization indicates potential for more concurrency if resources allow
+    return pdf_util > 0.8 or batch_util > 0.8
 
 
 def _cleanup_fallback_caches():

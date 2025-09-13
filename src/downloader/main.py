@@ -58,17 +58,11 @@ app.add_middleware(
 
 @app.get("/health")
 async def health_check():
-    """Health check endpoint."""
-    from .api import BATCH_SEMAPHORE, PDF_SEMAPHORE
+    """Health check endpoint with optimized concurrency monitoring."""
+    from .api import get_concurrency_stats
 
-    # Get semaphore usage information
-    batch_max = getattr(BATCH_SEMAPHORE, "_value", 20)
-    batch_available = getattr(BATCH_SEMAPHORE, "_value", 20)
-    batch_active = batch_max - batch_available
-
-    pdf_max = getattr(PDF_SEMAPHORE, "_value", 5)
-    pdf_available = getattr(PDF_SEMAPHORE, "_value", 5)
-    pdf_active = pdf_max - pdf_available
+    # Get optimized concurrency statistics
+    concurrency_stats = get_concurrency_stats()
 
     # Check if Redis is available for batch processing
     redis_available = bool(os.getenv("REDIS_URI"))
@@ -95,29 +89,33 @@ async def health_check():
 
     batch_info = {
         "available": redis_available,
+        "concurrency_limit": concurrency_stats["batch_concurrency"]["limit"],
+        "current_active": concurrency_stats["batch_concurrency"]["in_use"],
+        "available_slots": concurrency_stats["batch_concurrency"]["available"],
+        "utilization_percent": concurrency_stats["batch_concurrency"]["utilization_percent"],
     }
 
-    # Only include detailed batch processing metrics if Redis is available
-    if redis_available:
-        batch_info.update({
-            "max_concurrent_downloads": batch_max,
-            "current_active_downloads": batch_active,
-            "available_slots": batch_available,
-        })
-    else:
+    if not redis_available:
         batch_info["reason"] = "Redis connection (REDIS_URI) required"
 
     health_info = {
         "status": "healthy",
         "version": __version__,
+        "concurrency_optimization": {
+            "enabled": True,
+            "cpu_cores": concurrency_stats["system_info"]["cpu_cores"],
+            "pdf_scaling": concurrency_stats["system_info"]["pdf_scaling_factor"],
+            "batch_scaling": concurrency_stats["system_info"]["batch_scaling_factor"],
+        },
         "services": {
             "job_manager": job_manager_status,
             "batch_processing": batch_info,
             "pdf_generation": {
                 "available": True,
-                "max_concurrent_pdfs": pdf_max,
-                "current_active_pdfs": pdf_active,
-                "available_slots": pdf_available,
+                "concurrency_limit": concurrency_stats["pdf_concurrency"]["limit"],
+                "current_active": concurrency_stats["pdf_concurrency"]["in_use"],
+                "available_slots": concurrency_stats["pdf_concurrency"]["available"],
+                "utilization_percent": concurrency_stats["pdf_concurrency"]["utilization_percent"],
             },
         },
     }
