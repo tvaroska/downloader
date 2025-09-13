@@ -13,7 +13,7 @@ test:
 
 # Run development server
 dev:
-    uv run python -m uvicorn src.downloader.main:app --host 0.0.0.0 --port 8000 --reload
+    REDIS_URI="redis://localhost:6379" uv run python -m uvicorn src.downloader.main:app --host 0.0.0.0 --port 8000 --reload
 
 # Build and push Docker image
 docker:

@@ -14,7 +14,7 @@ from fastapi import APIRouter, Depends, Header, HTTPException, Path, Request, Re
 from pydantic import BaseModel, Field
 
 from .auth import get_api_key
-from .http_client import DownloadError, HTTPClientError, HTTPTimeoutError, get_client
+from .http_client import DownloadError, HTTPClientError, HTTPTimeoutError, RequestPriority, get_client
 from .job_manager import JobStatus, get_job_manager
 from .pdf_generator import (
     PDFGeneratorError,
@@ -745,7 +745,7 @@ async def process_single_url_in_batch(
         # Get HTTP client and download content with timeout
         client = await get_client()
         content, metadata = await asyncio.wait_for(
-            client.download(validated_url), timeout=timeout
+            client.download(validated_url, RequestPriority.LOW), timeout=timeout
         )
 
         # Process content based on format
@@ -1329,7 +1329,7 @@ async def download_url(
 
         # Get HTTP client and download content
         client = await get_client()
-        content, metadata = await client.download(validated_url)
+        content, metadata = await client.download(validated_url, RequestPriority.HIGH)
 
         # Determine response format from Accept header
         format_type = parse_accept_header(accept)
