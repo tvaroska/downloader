@@ -656,10 +656,10 @@ async def process_background_batch_job(
     # Create semaphore for this batch's concurrency control
     batch_semaphore = asyncio.Semaphore(batch_request.concurrency_limit)
 
-    async def process_with_semaphore_and_progress(
+    async def process_with_semaphore(
         url_request: BatchURLRequest, index: int
     ) -> BatchURLResult:
-        """Process a single URL with concurrency control and progress updates."""
+        """Process a single URL with concurrency control."""
         async with batch_semaphore:
             # Also use global batch semaphore to prevent overloading the service
             async with BATCH_SEMAPHORE:
@@ -671,26 +671,11 @@ async def process_background_batch_job(
                     request_id=request_id,
                 )
 
-                # Update progress
-                processed_count = index + 1
-                progress = int((processed_count / len(batch_request.urls)) * 100)
-                successful_count = sum(1 for i in range(processed_count) if i == index and result.success)
-                failed_count = sum(1 for i in range(processed_count) if i == index and not result.success)
-
-                await job_manager.update_job_status(
-                    job_id,
-                    JobStatus.RUNNING,
-                    progress=progress,
-                    processed_urls=processed_count,
-                    successful_urls=successful_count,
-                    failed_urls=failed_count
-                )
-
                 return result
 
     # Create tasks for all URLs
     tasks = [
-        process_with_semaphore_and_progress(url_request, i)
+        process_with_semaphore(url_request, i)
         for i, url_request in enumerate(batch_request.urls)
     ]
 

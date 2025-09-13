@@ -90,7 +90,7 @@ class JobManager:
 
             # Test connection and log pool info
             await self.redis_client.ping()
-            logger.info(f"Connected to Redis with connection pool (max_connections=20) for job management")
+            logger.info("Connected to Redis with connection pool (max_connections=20) for job management")
 
         except Exception as e:
             logger.error(f"Failed to connect to Redis: {e}")
@@ -197,63 +197,72 @@ class JobManager:
         processed_urls: int | None = None,
         successful_urls: int | None = None,
         failed_urls: int | None = None,
-        error_message: str | None = None
+        error_message: str | None = None,
+        max_retries: int = 3
     ):
-        """Update job status using atomic Redis transaction for consistency."""
+        """Update job status using atomic Redis transaction with retry logic for consistency."""
         if not self.redis_client:
             raise RuntimeError("Redis client not connected")
 
         job_key = self._get_job_key(job_id)
 
-        # Use Redis transaction for atomic read-modify-write operation
-        async with self.redis_client.pipeline(transaction=True) as pipe:
+        for attempt in range(max_retries):
             try:
-                # Watch the job key for changes
-                await pipe.watch(job_key)
+                # Use Redis transaction for atomic read-modify-write operation
+                async with self.redis_client.pipeline(transaction=True) as pipe:
+                    # Watch the job key for changes
+                    await pipe.watch(job_key)
 
-                # Get current job info
-                job_data = await self.redis_client.get(job_key)
-                if not job_data:
-                    logger.warning(f"Attempted to update non-existent job {job_id}")
-                    return
+                    # Get current job info
+                    job_data = await self.redis_client.get(job_key)
+                    if not job_data:
+                        logger.warning(f"Attempted to update non-existent job {job_id}")
+                        return
 
-                # Parse and update job info
-                job_info = JobInfo.model_validate_json(job_data)
-                job_info.status = status
-                now = datetime.now(timezone.utc)
+                    # Parse and update job info
+                    job_info = JobInfo.model_validate_json(job_data)
+                    job_info.status = status
+                    now = datetime.now(timezone.utc)
 
-                if status == JobStatus.RUNNING and job_info.started_at is None:
-                    job_info.started_at = now
-                elif status in [JobStatus.COMPLETED, JobStatus.FAILED, JobStatus.CANCELLED]:
-                    job_info.completed_at = now
-                    job_info.results_available = (status == JobStatus.COMPLETED)
+                    if status == JobStatus.RUNNING and job_info.started_at is None:
+                        job_info.started_at = now
+                    elif status in [JobStatus.COMPLETED, JobStatus.FAILED, JobStatus.CANCELLED]:
+                        job_info.completed_at = now
+                        job_info.results_available = (status == JobStatus.COMPLETED)
 
-                if progress is not None:
-                    job_info.progress = progress
-                if processed_urls is not None:
-                    job_info.processed_urls = processed_urls
-                if successful_urls is not None:
-                    job_info.successful_urls = successful_urls
-                if failed_urls is not None:
-                    job_info.failed_urls = failed_urls
-                if error_message is not None:
-                    job_info.error_message = error_message
+                    if progress is not None:
+                        job_info.progress = progress
+                    if processed_urls is not None:
+                        job_info.processed_urls = processed_urls
+                    if successful_urls is not None:
+                        job_info.successful_urls = successful_urls
+                    if failed_urls is not None:
+                        job_info.failed_urls = failed_urls
+                    if error_message is not None:
+                        job_info.error_message = error_message
 
-                # Execute atomic update
-                pipe.multi()
-                await pipe.setex(
-                    job_key,
-                    self.job_ttl,
-                    job_info.model_dump_json()
-                )
-                await pipe.execute()
+                    # Execute atomic update
+                    pipe.multi()
+                    await pipe.setex(
+                        job_key,
+                        self.job_ttl,
+                        job_info.model_dump_json()
+                    )
+                    await pipe.execute()
 
-                logger.debug(f"Updated job {job_id} status to {status} (atomic operation)")
+                    logger.debug(f"Updated job {job_id} status to {status} (atomic operation)")
+                    return  # Success, exit retry loop
 
             except redis.WatchError:
-                logger.warning(f"Job {job_id} was modified during update, retrying...")
-                # Could implement retry logic here if needed
-                raise
+                if attempt < max_retries - 1:
+                    # Small exponential backoff to reduce collision probability
+                    wait_time = 0.01 * (2 ** attempt)  # 10ms, 20ms, 40ms
+                    logger.debug(f"Job {job_id} was modified during update, retrying in {wait_time:.3f}s (attempt {attempt + 1}/{max_retries})")
+                    await asyncio.sleep(wait_time)
+                    continue
+                else:
+                    logger.error(f"Job {job_id} failed to update after {max_retries} attempts due to concurrent modifications")
+                    raise
             except Exception as e:
                 logger.error(f"Failed to update job {job_id}: {e}")
                 raise
