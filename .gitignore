@@ -1,6 +1,9 @@
 basic_outputs/*
 format_comparison/*
 pdf_outputs/*
+examples/basic_outputs/*
+examples/format_comparison/*
+examples/pdf_outputs/*
 
 # Byte-compiled / optimized / DLL files
 __pycache__/
