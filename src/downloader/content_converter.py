@@ -5,7 +5,7 @@ import logging
 import re
 from typing import Literal
 
-from bs4 import BeautifulSoup
+from bs4 import BeautifulSoup, Tag
 
 from .pdf_generator import get_shared_pdf_generator
 
@@ -31,7 +31,7 @@ def _cleanup_fallback_caches():
         logger.debug("Cleaned up fallback optimization caches")
 
 
-def should_use_playwright_fallback(url: str, content: str, content_type: str) -> bool:
+def should_use_playwright_fallback(url: str, content: bytes, content_type: str) -> bool:
     """
     Smart content detection to avoid unnecessary Playwright fallbacks.
 
@@ -255,7 +255,7 @@ def _convert_html_to_format(
         return _convert_to_text(main_content)
 
 
-def _convert_to_markdown(main_content) -> str:
+def _convert_to_markdown(main_content: BeautifulSoup | Tag) -> str:
     """Convert soup element to markdown format."""
     markdown_parts = []
 
@@ -297,7 +297,7 @@ def _convert_to_markdown(main_content) -> str:
     return text.strip()
 
 
-def _convert_to_text(main_content) -> str:
+def _convert_to_text(main_content: BeautifulSoup | Tag) -> str:
     """Convert soup element to plain text format."""
     # Extract text with proper spacing
     text = main_content.get_text(separator=" ", strip=True)
