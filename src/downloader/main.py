@@ -89,10 +89,10 @@ async def health_check():
 
     batch_info = {
         "available": redis_available,
-        "concurrency_limit": concurrency_stats["batch_concurrency"]["limit"],
-        "current_active": concurrency_stats["batch_concurrency"]["in_use"],
-        "available_slots": concurrency_stats["batch_concurrency"]["available"],
-        "utilization_percent": concurrency_stats["batch_concurrency"]["utilization_percent"],
+        "concurrency_limit": concurrency_stats.batch_concurrency.limit,
+        "current_active": concurrency_stats.batch_concurrency.in_use,
+        "available_slots": concurrency_stats.batch_concurrency.available,
+        "utilization_percent": concurrency_stats.batch_concurrency.utilization_percent,
     }
 
     if not redis_available:
@@ -103,19 +103,19 @@ async def health_check():
         "version": __version__,
         "concurrency_optimization": {
             "enabled": True,
-            "cpu_cores": concurrency_stats["system_info"]["cpu_cores"],
-            "pdf_scaling": concurrency_stats["system_info"]["pdf_scaling_factor"],
-            "batch_scaling": concurrency_stats["system_info"]["batch_scaling_factor"],
+            "cpu_cores": concurrency_stats.system_info.cpu_cores,
+            "pdf_scaling": concurrency_stats.system_info.pdf_scaling_factor,
+            "batch_scaling": concurrency_stats.system_info.batch_scaling_factor,
         },
         "services": {
             "job_manager": job_manager_status,
             "batch_processing": batch_info,
             "pdf_generation": {
                 "available": True,
-                "concurrency_limit": concurrency_stats["pdf_concurrency"]["limit"],
-                "current_active": concurrency_stats["pdf_concurrency"]["in_use"],
-                "available_slots": concurrency_stats["pdf_concurrency"]["available"],
-                "utilization_percent": concurrency_stats["pdf_concurrency"]["utilization_percent"],
+                "concurrency_limit": concurrency_stats.pdf_concurrency.limit,
+                "current_active": concurrency_stats.pdf_concurrency.in_use,
+                "available_slots": concurrency_stats.pdf_concurrency.available,
+                "utilization_percent": concurrency_stats.pdf_concurrency.utilization_percent,
             },
         },
     }
