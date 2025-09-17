@@ -37,6 +37,31 @@ logger = logging.getLogger(__name__)
 router = APIRouter()
 
 
+class ConcurrencyInfo(BaseModel):
+    """Model for concurrency information of a specific service."""
+
+    limit: int = Field(..., description="Maximum concurrent operations allowed")
+    available: int = Field(..., description="Currently available slots")
+    in_use: int = Field(..., description="Currently used slots")
+    utilization_percent: float = Field(..., description="Utilization percentage (0-100)")
+
+
+class SystemInfo(BaseModel):
+    """Model for system information."""
+
+    cpu_cores: int = Field(..., description="Number of CPU cores")
+    pdf_scaling_factor: str = Field(..., description="PDF concurrency scaling factor")
+    batch_scaling_factor: str = Field(..., description="Batch concurrency scaling factor")
+
+
+class ConcurrencyStats(BaseModel):
+    """Model for overall concurrency statistics."""
+
+    pdf_concurrency: ConcurrencyInfo = Field(..., description="PDF generation concurrency stats")
+    batch_concurrency: ConcurrencyInfo = Field(..., description="Batch processing concurrency stats")
+    system_info: SystemInfo = Field(..., description="System information")
+
+
 # Intelligent concurrency control with CPU-based defaults (eliminate artificial bottlenecks)
 def _get_optimal_concurrency_limits():
     """Calculate optimal concurrency limits based on system resources."""
@@ -60,27 +85,33 @@ PDF_SEMAPHORE = asyncio.Semaphore(_pdf_concurrency)
 BATCH_SEMAPHORE = asyncio.Semaphore(_batch_concurrency)
 
 
-def get_concurrency_stats() -> dict[str, any]:
+def get_concurrency_stats() -> ConcurrencyStats:
     """Get current concurrency statistics for monitoring."""
-    return {
-        "pdf_concurrency": {
-            "limit": _pdf_concurrency,
-            "available": PDF_SEMAPHORE._value,
-            "in_use": _pdf_concurrency - PDF_SEMAPHORE._value,
-            "utilization_percent": round(((_pdf_concurrency - PDF_SEMAPHORE._value) / _pdf_concurrency) * 100, 1)
-        },
-        "batch_concurrency": {
-            "limit": _batch_concurrency,
-            "available": BATCH_SEMAPHORE._value,
-            "in_use": _batch_concurrency - BATCH_SEMAPHORE._value,
-            "utilization_percent": round(((_batch_concurrency - BATCH_SEMAPHORE._value) / _batch_concurrency) * 100, 1)
-        },
-        "system_info": {
-            "cpu_cores": multiprocessing.cpu_count(),
-            "pdf_scaling_factor": "2x CPU cores (max 12)",
-            "batch_scaling_factor": "8x CPU cores (max 50)"
-        }
-    }
+    pdf_info = ConcurrencyInfo(
+        limit=_pdf_concurrency,
+        available=PDF_SEMAPHORE._value,
+        in_use=_pdf_concurrency - PDF_SEMAPHORE._value,
+        utilization_percent=round(((_pdf_concurrency - PDF_SEMAPHORE._value) / _pdf_concurrency) * 100, 1)
+    )
+
+    batch_info = ConcurrencyInfo(
+        limit=_batch_concurrency,
+        available=BATCH_SEMAPHORE._value,
+        in_use=_batch_concurrency - BATCH_SEMAPHORE._value,
+        utilization_percent=round(((_batch_concurrency - BATCH_SEMAPHORE._value) / _batch_concurrency) * 100, 1)
+    )
+
+    system_info = SystemInfo(
+        cpu_cores=multiprocessing.cpu_count(),
+        pdf_scaling_factor="2x CPU cores (max 12)",
+        batch_scaling_factor="8x CPU cores (max 50)"
+    )
+
+    return ConcurrencyStats(
+        pdf_concurrency=pdf_info,
+        batch_concurrency=batch_info,
+        system_info=system_info
+    )
 
 
 def _check_resource_pressure() -> bool:
@@ -224,10 +255,188 @@ def parse_accept_header(accept_header: str | None) -> str:
         return "raw"
 
 
+async def _playwright_fallback_for_content(
+    url: str, processed_content: str, original_content: bytes, content_type: str, output_format: str, request_id: str = ""
+) -> str:
+    """
+    Apply Playwright fallback for HTML content when initial conversion returns empty results.
+
+    Args:
+        url: The URL being processed
+        processed_content: Initially processed content (text or markdown)
+        original_content: Original content bytes
+        content_type: Content type of the original content
+        output_format: Target format ('text' or 'markdown')
+        request_id: Optional request identifier for logging
+
+    Returns:
+        Converted content using Playwright fallback or original processed content
+    """
+    if not processed_content.strip() and should_use_playwright_fallback(url, original_content, content_type):
+        logger.info(f"[{request_id}] Triggering optimized Playwright {output_format} fallback for empty content")
+        try:
+            fallback_start_time = asyncio.get_event_loop().time()
+            fallback_content = await convert_content_with_playwright_fallback(url, output_format)
+            fallback_duration = asyncio.get_event_loop().time() - fallback_start_time
+            logger.info(
+                f"✅ Playwright {output_format} fallback successful for {url}: {len(fallback_content)} characters extracted in {fallback_duration:.2f}s"
+            )
+            return fallback_content
+        except Exception as e:
+            logger.error(f"❌ Playwright {output_format} fallback failed for {url}: {str(e)}")
+            logger.info(f"Falling back to original empty {output_format} for {url}")
+
+    return processed_content
 
 
+async def _handle_json_response(content: bytes, metadata: dict) -> Response:
+    """Handle JSON format response with base64 content and metadata."""
+    content_b64 = base64.b64encode(content).decode("utf-8")
+
+    json_response = {
+        "success": True,
+        "url": metadata["url"],
+        "size": metadata["size"],
+        "content_type": metadata["content_type"],
+        "content": content_b64,
+        "metadata": metadata,
+    }
+
+    return Response(
+        content=json.dumps(json_response),
+        media_type="application/json",
+        headers={
+            "X-Original-URL": metadata["url"],
+            "X-Content-Length": str(metadata["size"]),
+        },
+    )
 
 
+async def _handle_text_response(validated_url: str, content: bytes, metadata: dict) -> Response:
+    """Handle plain text format response with Playwright fallback."""
+    text_content = convert_content_to_text(content, metadata["content_type"])
+
+    # Log BS4 extraction results for HTML content
+    if "html" in metadata["content_type"].lower():
+        logger.info(
+            f"BS4 text extraction for {validated_url}: {len(text_content)} characters extracted"
+        )
+
+        # Apply Playwright fallback if needed
+        text_content = await _playwright_fallback_for_content(
+            validated_url, text_content, content, metadata["content_type"], "text"
+        )
+
+        if text_content.strip():
+            logger.debug(f"Successfully extracted content for {validated_url}, no fallback needed")
+    else:
+        logger.debug(f"Non-HTML content for {validated_url}, skipping fallback logic")
+
+    return Response(
+        content=text_content,
+        media_type="text/plain; charset=utf-8",
+        headers={
+            "X-Original-URL": metadata["url"],
+            "X-Original-Content-Type": metadata["content_type"],
+            "X-Content-Length": str(metadata["size"]),
+        },
+    )
+
+
+async def _handle_markdown_response(validated_url: str, content: bytes, metadata: dict) -> Response:
+    """Handle markdown format response with Playwright fallback."""
+    markdown_content = convert_content_to_markdown(content, metadata["content_type"])
+
+    # Log BS4 extraction results for HTML content
+    if "html" in metadata["content_type"].lower():
+        logger.info(
+            f"BS4 markdown extraction for {validated_url}: {len(markdown_content)} characters extracted"
+        )
+
+        # Apply Playwright fallback if needed
+        markdown_content = await _playwright_fallback_for_content(
+            validated_url, markdown_content, content, metadata["content_type"], "markdown"
+        )
+
+        if markdown_content.strip():
+            logger.debug(f"Successfully extracted markdown for {validated_url}, no fallback needed")
+    else:
+        logger.debug(f"Non-HTML content for {validated_url}, skipping markdown fallback logic")
+
+    return Response(
+        content=markdown_content,
+        media_type="text/markdown; charset=utf-8",
+        headers={
+            "X-Original-URL": metadata["url"],
+            "X-Original-Content-Type": metadata["content_type"],
+            "X-Content-Length": str(metadata["size"]),
+        },
+    )
+
+
+async def _handle_pdf_response(validated_url: str, metadata: dict) -> Response:
+    """Handle PDF format response with concurrency control."""
+    logger.info(f"Generating PDF for: {validated_url}")
+
+    # Check if PDF service is available
+    if PDF_SEMAPHORE.locked():
+        logger.warning(
+            f"PDF service at capacity, rejecting request for: {validated_url}"
+        )
+        raise HTTPException(
+            status_code=503,
+            detail=ErrorResponse(
+                error="PDF service temporarily unavailable. Please try again later.",
+                error_type="service_unavailable",
+            ).model_dump(),
+        )
+
+    # Generate PDF with concurrency control
+    async with PDF_SEMAPHORE:
+        pdf_content = await generate_pdf_from_url(validated_url)
+
+    return Response(
+        content=pdf_content,
+        media_type="application/pdf",
+        headers={
+            "X-Original-URL": metadata["url"],
+            "X-Original-Content-Type": metadata["content_type"],
+            "Content-Length": str(len(pdf_content)),
+            "Content-Disposition": 'inline; filename="download.pdf"',
+        },
+    )
+
+
+async def _handle_html_response(content: bytes, metadata: dict) -> Response:
+    """Handle HTML format response."""
+    if "html" in metadata["content_type"].lower():
+        html_content = content
+        response_content_type = metadata["content_type"]
+    else:
+        html_content = content.decode("utf-8", errors="ignore")
+        response_content_type = "text/html; charset=utf-8"
+
+    return Response(
+        content=html_content,
+        media_type=response_content_type,
+        headers={
+            "X-Original-URL": metadata["url"],
+            "X-Original-Content-Type": metadata["content_type"],
+            "X-Content-Length": str(metadata["size"]),
+        },
+    )
+
+
+async def _handle_raw_response(content: bytes, metadata: dict) -> Response:
+    """Handle raw format response (default)."""
+    return Response(
+        content=content,
+        media_type=metadata.get("content_type", "application/octet-stream"),
+        headers={
+            "X-Original-URL": metadata["url"],
+            "Content-Length": str(metadata["size"]),
+        },
+    )
 
 
 async def process_background_batch_job(
@@ -348,20 +557,10 @@ async def process_single_url_in_batch(
             processed_content = convert_content_to_text(
                 content, metadata["content_type"]
             )
-            # Smart Playwright fallback for empty HTML content with caching
-            if (
-                not processed_content.strip()
-                and should_use_playwright_fallback(validated_url, content, metadata["content_type"])
-            ):
-                logger.info(
-                    f"[{request_id}] Triggering optimized Playwright fallback for empty content"
-                )
-                try:
-                    processed_content = await convert_content_with_playwright_fallback(
-                        validated_url, "text"
-                    )
-                except Exception as e:
-                    logger.warning(f"[{request_id}] Playwright fallback failed: {e}")
+            # Apply Playwright fallback if needed
+            processed_content = await _playwright_fallback_for_content(
+                validated_url, processed_content, content, metadata["content_type"], "text", request_id
+            )
 
             duration = asyncio.get_event_loop().time() - start_time
             return BatchURLResult(
@@ -379,22 +578,10 @@ async def process_single_url_in_batch(
             processed_content = convert_content_to_markdown(
                 content, metadata["content_type"]
             )
-            # Smart Playwright markdown fallback for empty HTML content with caching
-            if (
-                not processed_content.strip()
-                and should_use_playwright_fallback(validated_url, content, metadata["content_type"])
-            ):
-                logger.info(
-                    f"[{request_id}] Triggering optimized Playwright markdown fallback for empty content"
-                )
-                try:
-                    processed_content = await convert_content_with_playwright_fallback(
-                        validated_url, "markdown"
-                    )
-                except Exception as e:
-                    logger.warning(
-                        f"[{request_id}] Playwright markdown fallback failed: {e}"
-                    )
+            # Apply Playwright fallback if needed
+            processed_content = await _playwright_fallback_for_content(
+                validated_url, processed_content, content, metadata["content_type"], "markdown", request_id
+            )
 
             duration = asyncio.get_event_loop().time() - start_time
             return BatchURLResult(
@@ -931,207 +1118,19 @@ async def download_url(
 
         logger.info(f"Requested format: {format_type} (Accept: {accept})")
 
+        # Process content based on format
         if format_type == "json":
-            # JSON response with base64 content and metadata
-            content_b64 = base64.b64encode(content).decode("utf-8")
-
-            json_response = {
-                "success": True,
-                "url": metadata["url"],
-                "size": metadata["size"],
-                "content_type": metadata["content_type"],
-                "content": content_b64,
-                "metadata": metadata,
-            }
-
-            return Response(
-                content=json.dumps(json_response),
-                media_type="application/json",
-                headers={
-                    "X-Original-URL": metadata["url"],
-                    "X-Content-Length": str(metadata["size"]),
-                },
-            )
-
+            return await _handle_json_response(content, metadata)
         elif format_type == "text":
-            # Plain text response
-            text_content = convert_content_to_text(content, metadata["content_type"])
-
-            # Log BS4 extraction results for HTML content
-            if "html" in metadata["content_type"].lower():
-                logger.info(
-                    f"BS4 text extraction for {validated_url}: {len(text_content)} characters extracted"
-                )
-
-                # Smart fallback detection with caching (50-70% efficiency improvement)
-                if not text_content.strip() and should_use_playwright_fallback(
-                    validated_url, content, metadata["content_type"]
-                ):
-                    logger.warning(
-                        f"BS4 returned empty text for HTML content at {validated_url} (content size: {len(content)} bytes)"
-                    )
-                    logger.info(f"Triggering optimized Playwright fallback for {validated_url}")
-                    try:
-                        fallback_start_time = asyncio.get_event_loop().time()
-                        text_content = await convert_content_with_playwright_fallback(
-                            validated_url, "text"
-                        )
-                        fallback_duration = (
-                            asyncio.get_event_loop().time() - fallback_start_time
-                        )
-                        logger.info(
-                            f"✅ Playwright fallback successful for {validated_url}: {len(text_content)} characters extracted in {fallback_duration:.2f}s"
-                        )
-                    except Exception as e:
-                        logger.error(
-                            f"❌ Playwright fallback failed for {validated_url}: {str(e)}"
-                        )
-                        logger.info(
-                            f"Falling back to original empty text for {validated_url}"
-                        )
-                        # Keep the original empty text if Playwright fails
-                else:
-                    logger.debug(
-                        f"BS4 successfully extracted content for {validated_url}, no fallback needed"
-                    )
-            else:
-                logger.debug(
-                    f"Non-HTML content for {validated_url}, skipping fallback logic"
-                )
-
-            return Response(
-                content=text_content,
-                media_type="text/plain; charset=utf-8",
-                headers={
-                    "X-Original-URL": metadata["url"],
-                    "X-Original-Content-Type": metadata["content_type"],
-                    "X-Content-Length": str(metadata["size"]),
-                },
-            )
-
+            return await _handle_text_response(validated_url, content, metadata)
         elif format_type == "markdown":
-            # Markdown response
-            markdown_content = convert_content_to_markdown(
-                content, metadata["content_type"]
-            )
-
-            # Log BS4 extraction results for HTML content
-            if "html" in metadata["content_type"].lower():
-                logger.info(
-                    f"BS4 markdown extraction for {validated_url}: {len(markdown_content)} characters extracted"
-                )
-
-                # Smart markdown fallback detection with caching (50-70% efficiency improvement)
-                if not markdown_content.strip() and should_use_playwright_fallback(
-                    validated_url, content, metadata["content_type"]
-                ):
-                    logger.warning(
-                        f"BS4 returned empty markdown for HTML content at {validated_url} (content size: {len(content)} bytes)"
-                    )
-                    logger.info(
-                        f"Triggering optimized Playwright markdown fallback for {validated_url}"
-                    )
-                    try:
-                        fallback_start_time = asyncio.get_event_loop().time()
-                        markdown_content = (
-                            await convert_content_with_playwright_fallback(
-                                validated_url, "markdown"
-                            )
-                        )
-                        fallback_duration = (
-                            asyncio.get_event_loop().time() - fallback_start_time
-                        )
-                        logger.info(
-                            f"✅ Playwright markdown fallback successful for {validated_url}: {len(markdown_content)} characters extracted in {fallback_duration:.2f}s"
-                        )
-                    except Exception as e:
-                        logger.error(
-                            f"❌ Playwright markdown fallback failed for {validated_url}: {str(e)}"
-                        )
-                        logger.info(
-                            f"Falling back to original empty markdown for {validated_url}"
-                        )
-                        # Keep the original empty markdown if Playwright fails
-                else:
-                    logger.debug(
-                        f"BS4 successfully extracted markdown for {validated_url}, no fallback needed"
-                    )
-            else:
-                logger.debug(
-                    f"Non-HTML content for {validated_url}, skipping markdown fallback logic"
-                )
-
-            return Response(
-                content=markdown_content,
-                media_type="text/markdown; charset=utf-8",
-                headers={
-                    "X-Original-URL": metadata["url"],
-                    "X-Original-Content-Type": metadata["content_type"],
-                    "X-Content-Length": str(metadata["size"]),
-                },
-            )
-
+            return await _handle_markdown_response(validated_url, content, metadata)
         elif format_type == "pdf":
-            # PDF response - generate PDF using Playwright with concurrency control
-            logger.info(f"Generating PDF for: {validated_url}")
-
-            # Check if PDF service is available
-            if PDF_SEMAPHORE.locked():
-                logger.warning(
-                    f"PDF service at capacity, rejecting request for: {validated_url}"
-                )
-                raise HTTPException(
-                    status_code=503,
-                    detail=ErrorResponse(
-                        error="PDF service temporarily unavailable. Please try again later.",
-                        error_type="service_unavailable",
-                    ).model_dump(),
-                )
-
-            # Generate PDF with concurrency control
-            async with PDF_SEMAPHORE:
-                pdf_content = await generate_pdf_from_url(validated_url)
-
-            return Response(
-                content=pdf_content,
-                media_type="application/pdf",
-                headers={
-                    "X-Original-URL": metadata["url"],
-                    "X-Original-Content-Type": metadata["content_type"],
-                    "Content-Length": str(len(pdf_content)),
-                    "Content-Disposition": 'inline; filename="download.pdf"',
-                },
-            )
-
+            return await _handle_pdf_response(validated_url, metadata)
         elif format_type == "html":
-            # HTML response (if original was HTML, return as-is; otherwise decode)
-            if "html" in metadata["content_type"].lower():
-                html_content = content
-                response_content_type = metadata["content_type"]
-            else:
-                html_content = content.decode("utf-8", errors="ignore")
-                response_content_type = "text/html; charset=utf-8"
-
-            return Response(
-                content=html_content,
-                media_type=response_content_type,
-                headers={
-                    "X-Original-URL": metadata["url"],
-                    "X-Original-Content-Type": metadata["content_type"],
-                    "X-Content-Length": str(metadata["size"]),
-                },
-            )
-
+            return await _handle_html_response(content, metadata)
         else:
-            # Raw response (default)
-            return Response(
-                content=content,
-                media_type=metadata.get("content_type", "application/octet-stream"),
-                headers={
-                    "X-Original-URL": metadata["url"],
-                    "Content-Length": str(metadata["size"]),
-                },
-            )
+            return await _handle_raw_response(content, metadata)
 
     except URLValidationError as e:
         logger.warning(f"URL validation failed for {url}: {e}")
