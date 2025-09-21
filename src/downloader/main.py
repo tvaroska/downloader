@@ -13,6 +13,7 @@ from .auth import get_auth_status
 from .http_client import close_client
 from .job_manager import cleanup_job_manager
 from .pdf_generator import cleanup_pdf_generator, get_pdf_generator
+from .middleware import MetricsMiddleware, get_system_metrics_collector
 
 # Configure logging
 logging.basicConfig(
@@ -24,16 +25,28 @@ logger = logging.getLogger(__name__)
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """Application lifespan events."""
-    # Startup - Initialize Playwright pool
+    # Startup - Initialize Playwright pool and metrics collection
     logger.info("Initializing Playwright browser pool...")
     async with get_pdf_generator() as generator:
         logger.info("Playwright browser pool initialized successfully")
         app.state.pdf_generator = generator
+
+        # Start system metrics collection
+        logger.info("Starting system metrics collection...")
+        system_metrics = get_system_metrics_collector()
+        await system_metrics.start()
+        logger.info("System metrics collection started")
+
         yield
+
     # Shutdown
+    logger.info("Shutting down services...")
+    system_metrics = get_system_metrics_collector()
+    await system_metrics.stop()
     await close_client()
     await cleanup_pdf_generator()
     await cleanup_job_manager()
+    logger.info("All services shut down successfully")
 
 
 # Create FastAPI app
@@ -46,7 +59,9 @@ app = FastAPI(
     lifespan=lifespan,
 )
 
-# Add CORS middleware
+# Add middleware in order: Metrics first, then CORS
+app.add_middleware(MetricsMiddleware)
+
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
