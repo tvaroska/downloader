@@ -1,18 +1,13 @@
 """Authentication middleware and utilities."""
 
 import logging
-import os
 
 from fastapi import Depends, HTTPException, Request, status
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 
+from .config import Settings, get_settings
+
 logger = logging.getLogger(__name__)
-
-
-# Get API key from environment variable - read dynamically
-def get_api_key_from_env() -> str | None:
-    """Get API key from environment variable."""
-    return os.getenv("DOWNLOADER_KEY")
 
 
 # Security scheme for API key authentication
@@ -25,32 +20,39 @@ class APIKeyError(Exception):
     pass
 
 
-def is_auth_enabled() -> bool:
+def is_auth_enabled(settings: Settings | None = None) -> bool:
     """
     Check if API key authentication is enabled.
 
+    Args:
+        settings: Optional settings instance (will load from get_settings() if not provided)
+
     Returns:
-        True if DOWNLOADER_KEY environment variable is set
+        True if API key is configured in settings
     """
-    api_key = get_api_key_from_env()
-    return api_key is not None and api_key.strip() != ""
+    if settings is None:
+        settings = get_settings()
+    return settings.auth.api_key is not None and settings.auth.api_key.strip() != ""
 
 
-def verify_api_key(api_key: str) -> bool:
+def verify_api_key(api_key: str, settings: Settings | None = None) -> bool:
     """
     Verify if the provided API key is valid.
 
     Args:
         api_key: The API key to verify
+        settings: Optional settings instance (will load from get_settings() if not provided)
 
     Returns:
         True if the API key is valid, False otherwise
     """
-    env_api_key = get_api_key_from_env()
-    if not env_api_key:
+    if settings is None:
+        settings = get_settings()
+
+    if not settings.auth.api_key:
         return True  # No authentication required if no key is set
 
-    return api_key == env_api_key
+    return api_key == settings.auth.api_key
 
 
 async def get_api_key(
@@ -74,8 +76,10 @@ async def get_api_key(
     Raises:
         HTTPException: If authentication is required but missing/invalid
     """
+    settings = get_settings()
+
     # Skip authentication if not enabled
-    if not is_auth_enabled():
+    if not is_auth_enabled(settings):
         return None
 
     api_key = None
@@ -103,7 +107,7 @@ async def get_api_key(
             headers={"WWW-Authenticate": "Bearer"},
         )
 
-    if not verify_api_key(api_key):
+    if not verify_api_key(api_key, settings):
         logger.warning("Invalid API key provided")
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
@@ -119,16 +123,22 @@ async def get_api_key(
     return api_key
 
 
-def get_auth_status() -> dict:
+def get_auth_status(settings: Settings | None = None) -> dict:
     """
     Get current authentication status information.
+
+    Args:
+        settings: Optional settings instance (will load from get_settings() if not provided)
 
     Returns:
         Dictionary with authentication status information
     """
+    if settings is None:
+        settings = get_settings()
+
     return {
-        "auth_enabled": is_auth_enabled(),
+        "auth_enabled": is_auth_enabled(settings),
         "auth_methods": ["Authorization: Bearer <api_key>", "X-API-Key: <api_key>"]
-        if is_auth_enabled()
+        if is_auth_enabled(settings)
         else None,
     }

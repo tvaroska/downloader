@@ -1,9 +1,7 @@
 """Main FastAPI application module."""
 
 import asyncio
-import logging
 import multiprocessing
-import os
 from contextlib import asynccontextmanager
 
 from fastapi import FastAPI, Request
@@ -12,41 +10,44 @@ from fastapi.middleware.cors import CORSMiddleware
 from . import __version__
 from .api import router
 from .auth import get_auth_status
+from .config import Settings, get_settings
 from .http_client import HTTPClient
 from .job_manager import JobManager
+from .logging_config import get_logger, setup_logging
 from .middleware import MetricsMiddleware, get_system_metrics_collector
 from .pdf_generator import PlaywrightPDFGenerator
 
-# Configure logging
-logging.basicConfig(
-    level=logging.INFO, format="%(asctime)s - %(name)s - %(levelname)s - %(message)s"
-)
-logger = logging.getLogger(__name__)
-
-
-def _get_optimal_concurrency_limits() -> tuple[int, int]:
-    """Calculate optimal concurrency limits based on system resources."""
-    cpu_count = multiprocessing.cpu_count()
-
-    # PDF generation is CPU/memory intensive, conservative scaling
-    default_pdf_limit = min(cpu_count * 2, 12)
-    pdf_concurrency = int(os.getenv('PDF_CONCURRENCY', default_pdf_limit))
-
-    # Batch processing is I/O bound, more aggressive scaling
-    default_batch_limit = min(cpu_count * 8, 50)
-    batch_concurrency = int(os.getenv('BATCH_CONCURRENCY', default_batch_limit))
-
-    logger.info(f"Concurrency limits: PDF={pdf_concurrency}, BATCH={batch_concurrency} (CPU cores: {cpu_count})")
-
-    return pdf_concurrency, batch_concurrency
+# Load settings and configure logging
+settings = get_settings()
+setup_logging(settings.logging)
+logger = get_logger(__name__)
 
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """Application lifespan events - initialize and cleanup resources."""
+    # Store settings in app state
+    app.state.settings = settings
+
+    # Log configuration validation messages
+    logger.info(f"Starting {settings.app_name} v{settings.app_version}")
+    logger.info(f"Environment: {settings.environment}")
+    for message in settings.validate_settings():
+        if "WARNING" in message:
+            logger.warning(message.replace("WARNING: ", ""))
+        elif "ERROR" in message:
+            logger.error(message.replace("ERROR: ", ""))
+        else:
+            logger.info(message.replace("INFO: ", ""))
+
     # Initialize HTTP client
     logger.info("Initializing HTTP client...")
-    http_client = HTTPClient()
+    http_client = HTTPClient(
+        timeout=settings.http.request_timeout,
+        max_redirects=settings.http.max_redirects,
+        max_concurrent=settings.http.max_concurrent_api,
+        max_concurrent_batch=settings.http.max_concurrent_batch,
+    )
     app.state.http_client = http_client
     logger.info("HTTP client initialized")
 
@@ -58,15 +59,14 @@ async def lifespan(app: FastAPI):
     logger.info("PDF generator initialized successfully")
 
     # Initialize semaphores for concurrency control
-    pdf_concurrency, batch_concurrency = _get_optimal_concurrency_limits()
-    app.state.pdf_semaphore = asyncio.Semaphore(pdf_concurrency)
-    app.state.batch_semaphore = asyncio.Semaphore(batch_concurrency)
-    logger.info("Concurrency semaphores initialized")
+    app.state.pdf_semaphore = asyncio.Semaphore(settings.pdf.concurrency)
+    app.state.batch_semaphore = asyncio.Semaphore(settings.batch.concurrency)
+    logger.info(f"Concurrency semaphores initialized (PDF={settings.pdf.concurrency}, BATCH={settings.batch.concurrency})")
 
     # Initialize job manager if Redis is configured
-    if os.getenv("REDIS_URI"):
+    if settings.redis.redis_uri:
         logger.info("Initializing job manager with Redis...")
-        job_manager = JobManager(os.getenv("REDIS_URI"))
+        job_manager = JobManager(settings.redis.redis_uri)
         await job_manager.connect()
         app.state.job_manager = job_manager
         logger.info("Job manager initialized")
@@ -116,7 +116,7 @@ app.add_middleware(MetricsMiddleware)
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
+    allow_origins=settings.cors.allowed_origins,
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -125,14 +125,15 @@ app.add_middleware(
 
 @app.get("/health")
 async def health_check(request: Request):
-    """Health check endpoint with optimized concurrency monitoring."""
-    import multiprocessing
-
-    # Get semaphores from app state
+    """Health check endpoint with configuration-aware monitoring."""
+    # Get settings and semaphores from app state
+    app_settings = request.app.state.settings
     pdf_semaphore = request.app.state.pdf_semaphore
     batch_semaphore = request.app.state.batch_semaphore
-    pdf_concurrency = pdf_semaphore._value + (12 - pdf_semaphore._value)  # Reconstruct limit
-    batch_concurrency = batch_semaphore._value + (50 - batch_semaphore._value)  # Reconstruct limit
+
+    # Get concurrency limits from config
+    pdf_limit = app_settings.pdf.concurrency
+    batch_limit = app_settings.batch.concurrency
 
     # Check if Redis is available for batch processing
     job_manager = getattr(request.app.state, 'job_manager', None)
@@ -154,47 +155,50 @@ async def health_check(request: Request):
             job_manager_status["status"] = "error"
             job_manager_status["error"] = str(e)
     else:
-        job_manager_status["reason"] = "Redis connection (REDIS_URI) required"
+        job_manager_status["reason"] = "Redis connection required"
 
-    batch_in_use = 50 - batch_semaphore._value
-    batch_util = (batch_in_use / 50) * 100 if 50 > 0 else 0
+    # Calculate batch processing metrics
+    batch_in_use = batch_limit - batch_semaphore._value
+    batch_util = (batch_in_use / batch_limit) * 100 if batch_limit > 0 else 0
 
     batch_info = {
         "available": redis_available,
-        "concurrency_limit": 50,
+        "concurrency_limit": batch_limit,
         "current_active": batch_in_use,
         "available_slots": batch_semaphore._value,
         "utilization_percent": round(batch_util, 1),
     }
 
     if not redis_available:
-        batch_info["reason"] = "Redis connection (REDIS_URI) required"
+        batch_info["reason"] = "Redis connection required"
 
-    pdf_in_use = 12 - pdf_semaphore._value
-    pdf_util = (pdf_in_use / 12) * 100 if 12 > 0 else 0
+    # Calculate PDF generation metrics
+    pdf_in_use = pdf_limit - pdf_semaphore._value
+    pdf_util = (pdf_in_use / pdf_limit) * 100 if pdf_limit > 0 else 0
 
     health_info = {
         "status": "healthy",
         "version": __version__,
-        "concurrency_optimization": {
-            "enabled": True,
+        "environment": app_settings.environment,
+        "configuration": {
+            "pdf_concurrency": pdf_limit,
+            "batch_concurrency": batch_limit,
+            "max_download_size_mb": app_settings.content.max_download_size / 1024 / 1024,
             "cpu_cores": multiprocessing.cpu_count(),
-            "pdf_scaling": "2x CPU cores (max 12)",
-            "batch_scaling": "8x CPU cores (max 50)",
         },
         "services": {
             "job_manager": job_manager_status,
             "batch_processing": batch_info,
             "pdf_generation": {
                 "available": True,
-                "concurrency_limit": 12,
+                "concurrency_limit": pdf_limit,
                 "current_active": pdf_in_use,
                 "available_slots": pdf_semaphore._value,
                 "utilization_percent": round(pdf_util, 1),
             },
         },
     }
-    health_info.update(get_auth_status())
+    health_info.update(get_auth_status(app_settings))
     return health_info
 
 

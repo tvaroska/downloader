@@ -11,6 +11,7 @@ from typing import Annotated
 
 from fastapi import Depends, Request
 
+from .config import Settings, get_settings
 from .http_client import HTTPClient
 from .job_manager import JobManager
 from .pdf_generator import PlaywrightPDFGenerator
@@ -113,7 +114,22 @@ def get_batch_semaphore(request: Request) -> asyncio.Semaphore:
     return request.app.state.batch_semaphore
 
 
+# Settings Dependency
+def get_settings_dependency() -> Settings:
+    """
+    Get application settings.
+
+    Returns the global settings instance configured from environment variables.
+    This is a simple dependency that doesn't require request context.
+
+    Returns:
+        Settings instance
+    """
+    return get_settings()
+
+
 # Type aliases for cleaner route signatures
+SettingsDep = Annotated[Settings, Depends(get_settings_dependency)]
 HTTPClientDep = Annotated[HTTPClient, Depends(get_http_client)]
 JobManagerDep = Annotated[JobManager | None, Depends(get_job_manager_dependency)]
 PDFGeneratorDep = Annotated[PlaywrightPDFGenerator, Depends(get_pdf_generator_dependency)]
