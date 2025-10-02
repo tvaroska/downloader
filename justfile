@@ -1,11 +1,15 @@
+# List available commands
+default:
+    @just --list
+
 # Install dependencies
 install:
     uv sync --upgrade
-    pre-commit install
+    uv run pre-commit install
 
 # Format and lint code
 fmt:
-    ruff check --fix
+    uv run ruff check --fix
 
 # Run tests
 test:
