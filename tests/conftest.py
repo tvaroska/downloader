@@ -42,8 +42,11 @@ def mock_job_manager():
 
 @pytest.fixture
 def api_client():
-    """Fixture to provide FastAPI test client."""
-    return TestClient(app)
+    """Fixture to provide FastAPI test client with lifespan events."""
+    # TestClient with raise_server_exceptions=False to get cleaner test output
+    # Context manager ensures lifespan events are triggered
+    with TestClient(app) as client:
+        yield client
 
 
 @pytest.fixture
