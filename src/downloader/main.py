@@ -74,7 +74,7 @@ app.add_middleware(
 @app.get("/health")
 async def health_check():
     """Health check endpoint with optimized concurrency monitoring."""
-    from .api import get_concurrency_stats
+    from .routes.metrics import get_concurrency_stats
 
     # Get optimized concurrency statistics
     concurrency_stats = get_concurrency_stats()
