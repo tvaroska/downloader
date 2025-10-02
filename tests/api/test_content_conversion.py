@@ -2,11 +2,11 @@
 
 import pytest
 
-from src.downloader.api import (
+from src.downloader.content_converter import (
     convert_content_to_markdown,
     convert_content_to_text,
-    parse_accept_header,
 )
+from src.downloader.services.content_processor import parse_accept_header
 
 
 class TestContentConversion:

@@ -127,7 +127,7 @@ class TestDownloadEndpoint:
         "error, expected_status, expected_error_type",
         [
             (HTTPTimeoutError("Request timed out"), 408, "timeout_error"),
-            (HTTPClientError("HTTP 404: Not Found"), 404, "http_error"),
+            (HTTPClientError("HTTP 404: Not Found", status_code=404), 404, "http_error"),
         ],
     )
     def test_download_client_errors(self, error, expected_status, expected_error_type):

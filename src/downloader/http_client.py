@@ -24,7 +24,9 @@ class DownloadError(Exception):
 class HTTPClientError(DownloadError):
     """HTTP client related errors."""
 
-    pass
+    def __init__(self, message: str, status_code: int | None = None):
+        super().__init__(message)
+        self.status_code = status_code
 
 
 class HTTPTimeoutError(DownloadError):
@@ -320,7 +322,8 @@ class HTTPClient:
             # Check for HTTP errors
             if response.status_code >= 400:
                 raise HTTPClientError(
-                    f"HTTP {response.status_code}: {response.reason_phrase}"
+                    f"HTTP {response.status_code}: {response.reason_phrase}",
+                    status_code=response.status_code
                 )
 
             content = response.content

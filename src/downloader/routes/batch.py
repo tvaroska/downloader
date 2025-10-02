@@ -228,16 +228,7 @@ async def process_single_url_in_batch(
     except HTTPClientError as e:
         duration = asyncio.get_event_loop().time() - start_time
         logger.error(f"[{request_id}] HTTP client error: {e}")
-
-        status_code = 502
-        if "404" in str(e):
-            status_code = 404
-        elif "403" in str(e):
-            status_code = 403
-        elif "401" in str(e):
-            status_code = 401
-        elif "500" in str(e):
-            status_code = 502
+        status_code = e.status_code if e.status_code else 502
 
         return BatchURLResult(
             url=url_request.url,

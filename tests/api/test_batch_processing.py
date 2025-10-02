@@ -79,7 +79,7 @@ class TestBatchProcessing:
 
         def mock_download_side_effect(url):
             if "fail.com" in url:
-                raise HTTPClientError("HTTP 404: Not Found")
+                raise HTTPClientError("HTTP 404: Not Found", status_code=404)
             return (
                 b"<html>Success</html>",
                 {

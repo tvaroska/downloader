@@ -100,16 +100,7 @@ async def download_url(
 
     except HTTPClientError as e:
         logger.error(f"HTTP client error for {url}: {e}")
-        if "404" in str(e):
-            status_code = 404
-        elif "403" in str(e):
-            status_code = 403
-        elif "401" in str(e):
-            status_code = 401
-        elif "500" in str(e):
-            status_code = 502
-        else:
-            status_code = 502
+        status_code = e.status_code if e.status_code else 502
 
         raise HTTPException(
             status_code=status_code,
