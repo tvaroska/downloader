@@ -2,15 +2,15 @@
 
 import logging
 
-from fastapi import APIRouter, Depends, Header, HTTPException, Path, Request, Response
+from fastapi import APIRouter, Depends, Header, HTTPException, Path, Response
 
 from ..auth import get_api_key
+from ..dependencies import HTTPClientDep, PDFSemaphoreDep
 from ..http_client import (
     DownloadError,
     HTTPClientError,
     HTTPTimeoutError,
     RequestPriority,
-    get_client,
 )
 from ..models.responses import ErrorResponse
 from ..pdf_generator import PDFGeneratorError
@@ -30,18 +30,12 @@ logger = logging.getLogger(__name__)
 router = APIRouter()
 
 
-def get_pdf_semaphore():
-    """Get PDF semaphore from app state (to be injected)."""
-    # This will be set by the main app
-    from ..api import PDF_SEMAPHORE
-    return PDF_SEMAPHORE
-
-
 @router.get("/{url:path}")
 async def download_url(
     url: str = Path(..., description="The URL to download"),
     accept: str | None = Header(None, description="Accept header for content negotiation"),
-    request: Request = None,
+    http_client: HTTPClientDep = None,
+    pdf_semaphore: PDFSemaphoreDep = None,
     api_key: str | None = Depends(get_api_key),
 ) -> Response:
     """
@@ -70,8 +64,7 @@ async def download_url(
         validated_url = validate_url(url)
         logger.info(f"Processing download request for: {validated_url}")
 
-        client = await get_client()
-        content, metadata = await client.download(validated_url, RequestPriority.HIGH)
+        content, metadata = await http_client.download(validated_url, RequestPriority.HIGH)
 
         format_type = parse_accept_header(accept)
         logger.info(f"Requested format: {format_type} (Accept: {accept})")
@@ -83,7 +76,6 @@ async def download_url(
         elif format_type == "markdown":
             return await handle_markdown_response(validated_url, content, metadata)
         elif format_type == "pdf":
-            pdf_semaphore = get_pdf_semaphore()
             return await handle_pdf_response(validated_url, metadata, pdf_semaphore)
         elif format_type == "html":
             return await handle_html_response(content, metadata)

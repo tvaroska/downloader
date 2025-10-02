@@ -8,20 +8,20 @@ import os
 from datetime import datetime, timedelta, timezone
 from typing import Any
 
-from fastapi import APIRouter, Depends, HTTPException, Path, Response
+from fastapi import APIRouter, Depends, HTTPException, Path, Request, Response
 
 from ..auth import get_api_key
 from ..content_converter import (
     convert_content_to_markdown,
     convert_content_to_text,
 )
+from ..dependencies import HTTPClientDep, JobManagerDep, PDFSemaphoreDep, BatchSemaphoreDep
 from ..http_client import (
     HTTPClientError,
     HTTPTimeoutError,
     RequestPriority,
-    get_client,
 )
-from ..job_manager import JobStatus, get_job_manager
+from ..job_manager import JobStatus
 from ..models.responses import (
     BatchRequest,
     BatchURLRequest,
@@ -39,23 +39,13 @@ logger = logging.getLogger(__name__)
 router = APIRouter()
 
 
-def get_batch_semaphore():
-    """Get batch semaphore from app state."""
-    from ..api import BATCH_SEMAPHORE
-    return BATCH_SEMAPHORE
-
-
-def get_pdf_semaphore():
-    """Get PDF semaphore from app state."""
-    from ..api import PDF_SEMAPHORE
-    return PDF_SEMAPHORE
-
-
 async def process_single_url_in_batch(
     url_request: BatchURLRequest,
     default_format: str,
     timeout: int,
-    request_id: str
+    request_id: str,
+    http_client,
+    pdf_semaphore
 ) -> BatchURLResult:
     """
     Process a single URL within a batch request.
@@ -71,7 +61,6 @@ async def process_single_url_in_batch(
     """
     start_time = asyncio.get_event_loop().time()
     format_to_use = url_request.format or default_format
-    pdf_semaphore = get_pdf_semaphore()
 
     try:
         validated_url = validate_url(url_request.url)
@@ -79,9 +68,8 @@ async def process_single_url_in_batch(
             f"[{request_id}] Processing batch URL: {validated_url} (format: {format_to_use})"
         )
 
-        client = await get_client()
         content, metadata = await asyncio.wait_for(
-            client.download(validated_url, RequestPriority.LOW), timeout=timeout
+            http_client.download(validated_url, RequestPriority.LOW), timeout=timeout
         )
 
         if format_to_use == "text":
@@ -289,7 +277,7 @@ async def process_single_url_in_batch(
 
 
 async def process_background_batch_job(
-    job_id: str, batch_request: BatchRequest
+    job_id: str, batch_request: BatchRequest, job_manager, batch_semaphore, http_client, pdf_semaphore
 ) -> tuple[list[dict], dict]:
     """
     Process batch job in background.
@@ -297,12 +285,14 @@ async def process_background_batch_job(
     Args:
         job_id: Job identifier for progress tracking
         batch_request: Batch processing configuration
+        job_manager: JobManager instance
+        batch_semaphore: Batch concurrency semaphore
+        http_client: HTTPClient instance
+        pdf_semaphore: PDF concurrency semaphore
 
     Returns:
         Tuple of (results_list, summary_dict)
     """
-    job_manager = await get_job_manager()
-    batch_semaphore = get_batch_semaphore()
     start_time = asyncio.get_event_loop().time()
 
     logger.info(f"[JOB-{job_id}] Starting background batch processing: {len(batch_request.urls)} URLs")
@@ -321,6 +311,8 @@ async def process_background_batch_job(
                     default_format=batch_request.default_format,
                     timeout=batch_request.timeout_per_url,
                     request_id=request_id,
+                    http_client=http_client,
+                    pdf_semaphore=pdf_semaphore,
                 )
                 return result
 
@@ -367,10 +359,15 @@ async def process_background_batch_job(
 @router.post("/batch")
 async def submit_batch_job(
     batch_request: BatchRequest,
+    request: Request,
+    http_client: HTTPClientDep = None,
+    job_manager: JobManagerDep = None,
+    batch_semaphore: BatchSemaphoreDep = None,
+    pdf_semaphore: PDFSemaphoreDep = None,
     api_key: str | None = Depends(get_api_key),
 ) -> JobSubmissionResponse:
     """Submit a batch processing job for background execution."""
-    if not bool(os.getenv("REDIS_URI")):
+    if job_manager is None:
         logger.warning("Batch processing requested but Redis is not configured")
         raise HTTPException(
             status_code=503,
@@ -391,14 +388,17 @@ async def submit_batch_job(
         )
 
     try:
-        job_manager = await get_job_manager()
         request_data = batch_request.model_dump()
         job_id = await job_manager.create_job(request_data)
 
         await job_manager.start_background_job(
             job_id,
             process_background_batch_job,
-            batch_request
+            batch_request,
+            job_manager,
+            batch_semaphore,
+            http_client,
+            pdf_semaphore
         )
 
         logger.info(f"[JOB-{job_id}] Submitted batch job with {len(batch_request.urls)} URLs")
@@ -432,11 +432,20 @@ async def submit_batch_job(
 @router.get("/jobs/{job_id}/status")
 async def get_job_status(
     job_id: str = Path(..., description="Job identifier"),
+    job_manager: JobManagerDep = None,
     api_key: str | None = Depends(get_api_key),
 ) -> JobStatusResponse:
     """Get the status of a batch processing job."""
+    if job_manager is None:
+        raise HTTPException(
+            status_code=503,
+            detail=ErrorResponse(
+                error="Batch processing is not available. Redis connection (REDIS_URI) is required.",
+                error_type="service_unavailable",
+            ).model_dump(),
+        )
+
     try:
-        job_manager = await get_job_manager()
         job_info = await job_manager.get_job_info(job_id)
 
         if not job_info:
@@ -480,11 +489,20 @@ async def get_job_status(
 @router.get("/jobs/{job_id}/results")
 async def get_job_results(
     job_id: str = Path(..., description="Job identifier"),
+    job_manager: JobManagerDep = None,
     api_key: str | None = Depends(get_api_key),
 ) -> Response:
     """Download the results of a completed batch processing job."""
+    if job_manager is None:
+        raise HTTPException(
+            status_code=503,
+            detail=ErrorResponse(
+                error="Batch processing is not available. Redis connection (REDIS_URI) is required.",
+                error_type="service_unavailable",
+            ).model_dump(),
+        )
+
     try:
-        job_manager = await get_job_manager()
         job_info = await job_manager.get_job_info(job_id)
 
         if not job_info:
@@ -555,11 +573,20 @@ async def get_job_results(
 @router.delete("/jobs/{job_id}")
 async def cancel_job(
     job_id: str = Path(..., description="Job identifier"),
+    job_manager: JobManagerDep = None,
     api_key: str | None = Depends(get_api_key),
 ) -> dict[str, Any]:
     """Cancel a running batch processing job."""
+    if job_manager is None:
+        raise HTTPException(
+            status_code=503,
+            detail=ErrorResponse(
+                error="Batch processing is not available. Redis connection (REDIS_URI) is required.",
+                error_type="service_unavailable",
+            ).model_dump(),
+        )
+
     try:
-        job_manager = await get_job_manager()
         job_info = await job_manager.get_job_info(job_id)
 
         if not job_info:
