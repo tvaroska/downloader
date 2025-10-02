@@ -60,7 +60,7 @@ async def get_job_manager_dependency(request: Request) -> JobManager | None:
 
 
 # PDF Generator Dependency
-async def get_pdf_generator_dependency(request: Request) -> PlaywrightPDFGenerator:
+async def get_pdf_generator_dependency(request: Request) -> PlaywrightPDFGenerator | None:
     """
     Get PDF generator instance from app state.
 
@@ -70,7 +70,7 @@ async def get_pdf_generator_dependency(request: Request) -> PlaywrightPDFGenerat
         request: FastAPI request containing app state
 
     Returns:
-        PDFGenerator instance
+        PDFGenerator instance or None if not available
 
     Raises:
         RuntimeError: If PDF generator not initialized
@@ -154,7 +154,7 @@ def get_rate_limiter(request: Request) -> Limiter:
 SettingsDep = Annotated[Settings, Depends(get_settings_dependency)]
 HTTPClientDep = Annotated[HTTPClient, Depends(get_http_client)]
 JobManagerDep = Annotated[JobManager | None, Depends(get_job_manager_dependency)]
-PDFGeneratorDep = Annotated[PlaywrightPDFGenerator, Depends(get_pdf_generator_dependency)]
+PDFGeneratorDep = Annotated[PlaywrightPDFGenerator | None, Depends(get_pdf_generator_dependency)]
 PDFSemaphoreDep = Annotated[asyncio.Semaphore, Depends(get_pdf_semaphore)]
 BatchSemaphoreDep = Annotated[asyncio.Semaphore, Depends(get_batch_semaphore)]
 RateLimiterDep = Annotated[Limiter, Depends(get_rate_limiter)]

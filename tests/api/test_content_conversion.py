@@ -9,6 +9,7 @@ from src.downloader.content_converter import (
 from src.downloader.services.content_processor import parse_accept_header
 
 
+@pytest.mark.smoke
 class TestContentConversion:
     @pytest.mark.parametrize(
         "header, expected_format",

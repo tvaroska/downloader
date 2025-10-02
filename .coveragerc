@@ -1,0 +1,29 @@
+[run]
+source = src/downloader
+branch = True
+omit =
+    */tests/*
+    */__init__.py
+    */conftest.py
+    */examples/*
+    */.venv/*
+
+[report]
+precision = 2
+show_missing = True
+skip_covered = False
+exclude_lines =
+    pragma: no cover
+    def __repr__
+    raise AssertionError
+    raise NotImplementedError
+    if __name__ == .__main__.:
+    if TYPE_CHECKING:
+    @abstractmethod
+    @abc.abstractmethod
+
+[html]
+directory = htmlcov
+
+[xml]
+output = coverage.xml

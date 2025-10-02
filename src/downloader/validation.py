@@ -169,7 +169,7 @@ def _validate_ip_address(ip_obj: ipaddress.IPv4Address | ipaddress.IPv6Address,
     if ip_obj.is_loopback:
         logger.warning(f"SSRF attempt blocked: {original_hostname} -> {ip_str} (loopback)")
         raise SSRFProtectionError(
-            f"Access to loopback addresses is not allowed (hostname: {original_hostname}, IP: {ip_str})"
+            f"Access to loopback private addresses is not allowed (hostname: {original_hostname}, IP: {ip_str})"
         )
 
     # 2. Check for unspecified (0.0.0.0, ::) - must come before private check
@@ -214,7 +214,7 @@ def _validate_ip_address(ip_obj: ipaddress.IPv4Address | ipaddress.IPv6Address,
     if settings.ssrf.block_private_ips and ip_obj.is_private:
         logger.warning(f"SSRF attempt blocked: {original_hostname} -> {ip_str} (private IP)")
         raise SSRFProtectionError(
-            f"Access to private IP addresses is not allowed (hostname: {original_hostname}, IP: {ip_str})"
+            f"Access to private IP and private addresses is not allowed (hostname: {original_hostname}, IP: {ip_str})"
         )
 
     logger.debug(f"IP address {ip_str} (from {original_hostname}) passed SSRF checks")

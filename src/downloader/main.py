@@ -41,13 +41,14 @@ logger.info(f"Rate limiter initialized with storage: {storage_uri}")
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """Application lifespan events - initialize and cleanup resources."""
-    # Store settings in app state
-    app.state.settings = settings
+    # Store settings in app state (call get_settings() to support test env reloading)
+    current_settings = get_settings()
+    app.state.settings = current_settings
 
     # Log configuration validation messages
-    logger.info(f"Starting {settings.app_name} v{settings.app_version}")
-    logger.info(f"Environment: {settings.environment}")
-    for message in settings.validate_settings():
+    logger.info(f"Starting {current_settings.app_name} v{current_settings.app_version}")
+    logger.info(f"Environment: {current_settings.environment}")
+    for message in current_settings.validate_settings():
         if "WARNING" in message:
             logger.warning(message.replace("WARNING: ", ""))
         elif "ERROR" in message:
@@ -58,30 +59,34 @@ async def lifespan(app: FastAPI):
     # Initialize HTTP client
     logger.info("Initializing HTTP client...")
     http_client = HTTPClient(
-        timeout=settings.http.request_timeout,
-        max_redirects=settings.http.max_redirects,
-        max_concurrent=settings.http.max_concurrent_api,
-        max_concurrent_batch=settings.http.max_concurrent_batch,
+        timeout=current_settings.http.request_timeout,
+        max_redirects=current_settings.http.max_redirects,
+        max_concurrent=current_settings.http.max_concurrent_api,
+        max_concurrent_batch=current_settings.http.max_concurrent_batch,
     )
     app.state.http_client = http_client
     logger.info("HTTP client initialized")
 
     # Initialize PDF generator with browser pool
     logger.info("Initializing PDF generator with browser pool...")
-    pdf_generator = PlaywrightPDFGenerator()
-    await pdf_generator.__aenter__()
-    app.state.pdf_generator = pdf_generator
-    logger.info("PDF generator initialized successfully")
+    try:
+        pdf_generator = PlaywrightPDFGenerator()
+        await pdf_generator.__aenter__()
+        app.state.pdf_generator = pdf_generator
+        logger.info("PDF generator initialized successfully")
+    except Exception as e:
+        logger.warning(f"PDF generator initialization failed: {e}. PDF generation will be unavailable.")
+        app.state.pdf_generator = None
 
     # Initialize semaphores for concurrency control
-    app.state.pdf_semaphore = asyncio.Semaphore(settings.pdf.concurrency)
-    app.state.batch_semaphore = asyncio.Semaphore(settings.batch.concurrency)
-    logger.info(f"Concurrency semaphores initialized (PDF={settings.pdf.concurrency}, BATCH={settings.batch.concurrency})")
+    app.state.pdf_semaphore = asyncio.Semaphore(current_settings.pdf.concurrency)
+    app.state.batch_semaphore = asyncio.Semaphore(current_settings.batch.concurrency)
+    logger.info(f"Concurrency semaphores initialized (PDF={current_settings.pdf.concurrency}, BATCH={current_settings.batch.concurrency})")
 
     # Initialize job manager if Redis is configured
-    if settings.redis.redis_uri:
+    if current_settings.redis.redis_uri:
         logger.info("Initializing job manager with Redis...")
-        job_manager = JobManager(settings.redis.redis_uri)
+        job_manager = JobManager(current_settings.redis.redis_uri)
         await job_manager.connect()
         app.state.job_manager = job_manager
         logger.info("Job manager initialized")
@@ -106,8 +111,9 @@ async def lifespan(app: FastAPI):
     # Close HTTP client
     await http_client.close()
 
-    # Close PDF generator
-    await pdf_generator.__aexit__(None, None, None)
+    # Close PDF generator if initialized
+    if app.state.pdf_generator:
+        await app.state.pdf_generator.__aexit__(None, None, None)
 
     # Close job manager if initialized
     if app.state.job_manager:
@@ -183,18 +189,25 @@ async def health_check(request: Request):
 
     batch_info = {
         "available": redis_available,
-        "concurrency_limit": batch_limit,
-        "current_active": batch_in_use,
-        "available_slots": batch_semaphore._value,
-        "utilization_percent": round(batch_util, 1),
     }
 
-    if not redis_available:
-        batch_info["reason"] = "Redis connection required"
+    if redis_available:
+        batch_info.update({
+            "max_concurrent_downloads": batch_limit,
+            "current_active_downloads": batch_in_use,
+            "available_slots": batch_semaphore._value,
+            "utilization_percent": round(batch_util, 1),
+        })
+    else:
+        batch_info["reason"] = "Redis connection (REDIS_URI) required"
 
     # Calculate PDF generation metrics
     pdf_in_use = pdf_limit - pdf_semaphore._value
     pdf_util = (pdf_in_use / pdf_limit) * 100 if pdf_limit > 0 else 0
+
+    # Check if PDF generator is available
+    pdf_generator = getattr(request.app.state, 'pdf_generator', None)
+    pdf_available = pdf_generator is not None
 
     health_info = {
         "status": "healthy",
@@ -210,9 +223,9 @@ async def health_check(request: Request):
             "job_manager": job_manager_status,
             "batch_processing": batch_info,
             "pdf_generation": {
-                "available": True,
-                "concurrency_limit": pdf_limit,
-                "current_active": pdf_in_use,
+                "available": pdf_available,
+                "max_concurrent_pdfs": pdf_limit,
+                "current_active_pdfs": pdf_in_use,
                 "available_slots": pdf_semaphore._value,
                 "utilization_percent": round(pdf_util, 1),
             },
