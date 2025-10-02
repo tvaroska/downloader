@@ -10,6 +10,7 @@ import logging
 from typing import Annotated
 
 from fastapi import Depends, Request
+from slowapi import Limiter
 
 from .config import Settings, get_settings
 from .http_client import HTTPClient
@@ -128,6 +129,27 @@ def get_settings_dependency() -> Settings:
     return get_settings()
 
 
+# Rate Limiter Dependency
+def get_rate_limiter(request: Request) -> Limiter:
+    """
+    Get rate limiter instance from app state.
+
+    The limiter is initialized during app startup with configured limits.
+
+    Args:
+        request: FastAPI request containing app state
+
+    Returns:
+        Limiter instance
+
+    Raises:
+        RuntimeError: If limiter not initialized
+    """
+    if not hasattr(request.app.state, 'limiter'):
+        raise RuntimeError("Rate limiter not initialized. Check app configuration.")
+    return request.app.state.limiter
+
+
 # Type aliases for cleaner route signatures
 SettingsDep = Annotated[Settings, Depends(get_settings_dependency)]
 HTTPClientDep = Annotated[HTTPClient, Depends(get_http_client)]
@@ -135,3 +157,4 @@ JobManagerDep = Annotated[JobManager | None, Depends(get_job_manager_dependency)
 PDFGeneratorDep = Annotated[PlaywrightPDFGenerator, Depends(get_pdf_generator_dependency)]
 PDFSemaphoreDep = Annotated[asyncio.Semaphore, Depends(get_pdf_semaphore)]
 BatchSemaphoreDep = Annotated[asyncio.Semaphore, Depends(get_batch_semaphore)]
+RateLimiterDep = Annotated[Limiter, Depends(get_rate_limiter)]

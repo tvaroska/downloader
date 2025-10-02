@@ -2,7 +2,7 @@
 
 import logging
 
-from fastapi import APIRouter, Depends, Header, HTTPException, Path, Response
+from fastapi import APIRouter, Depends, Header, HTTPException, Path, Request, Response
 
 from ..auth import get_api_key
 from ..dependencies import HTTPClientDep, PDFSemaphoreDep
@@ -32,6 +32,7 @@ router = APIRouter()
 
 @router.get("/{url:path}")
 async def download_url(
+    request: Request,
     url: str = Path(..., description="The URL to download"),
     accept: str | None = Header(None, description="Accept header for content negotiation"),
     http_client: HTTPClientDep = None,

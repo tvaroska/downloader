@@ -342,6 +342,62 @@ class CORSConfig(BaseSettings):
         return v
 
 
+class RateLimitConfig(BaseSettings):
+    """Rate limiting configuration.
+
+    Rate limits prevent abuse and ensure fair resource allocation across users.
+    Limits are expressed in the format: "count/time_window" (e.g., "100/minute").
+    """
+
+    # Global Rate Limits
+    # Why 100/minute? Balances legitimate high-frequency usage vs DoS protection
+    # Average user: 1-10 requests/minute; batch users: 20-50; 100 provides headroom
+    enabled: bool = Field(
+        default=True,
+        description="Enable rate limiting (disable only for testing)"
+    )
+
+    default_limit: str = Field(
+        default="100/minute",
+        description="Default rate limit for all endpoints (format: count/period)"
+    )
+
+    # Per-Endpoint Limits
+    # Why lower for download? Each download is resource-intensive (HTTP + conversion)
+    # Why higher for batch? Batch jobs are async, less immediate resource impact
+    download_limit: str = Field(
+        default="60/minute",
+        description="Rate limit for direct download endpoints"
+    )
+
+    batch_limit: str = Field(
+        default="20/minute",
+        description="Rate limit for batch job creation (jobs are async)"
+    )
+
+    status_limit: str = Field(
+        default="200/minute",
+        description="Rate limit for status/metrics endpoints (lightweight)"
+    )
+
+    # Storage Backend
+    # Redis enables distributed rate limiting across multiple instances
+    # If not configured, falls back to in-memory (single instance only)
+    storage_uri: str | None = Field(
+        default=None,
+        description="Redis URI for distributed rate limiting (uses REDIS_URI if None)"
+    )
+
+    # Custom Headers
+    # Standard rate limit headers help clients implement backoff strategies
+    headers_enabled: bool = Field(
+        default=True,
+        description="Include rate limit headers in responses (X-RateLimit-*)"
+    )
+
+    model_config = SettingsConfigDict(env_prefix="RATELIMIT_")
+
+
 class Settings(BaseSettings):
     """Main application settings combining all configuration sections."""
 
@@ -371,6 +427,7 @@ class Settings(BaseSettings):
     logging: LoggingConfig = Field(default_factory=LoggingConfig)
     ssrf: SSRFConfig = Field(default_factory=SSRFConfig)
     cors: CORSConfig = Field(default_factory=CORSConfig)
+    ratelimit: RateLimitConfig = Field(default_factory=RateLimitConfig)
 
     model_config = SettingsConfigDict(
         env_file=".env",
@@ -397,12 +454,16 @@ class Settings(BaseSettings):
             if not self.ssrf.resolve_dns:
                 messages.append("WARNING: DNS resolution disabled - SSRF risk increased")
 
+            if not self.ratelimit.enabled:
+                messages.append("WARNING: Rate limiting disabled in production - DoS risk")
+
         # Configuration info
         messages.append(f"INFO: PDF concurrency: {self.pdf.concurrency}")
         messages.append(f"INFO: Batch concurrency: {self.batch.concurrency}")
         messages.append(f"INFO: Max download size: {self.content.max_download_size / 1024 / 1024:.1f}MB")
         messages.append(f"INFO: Redis: {'enabled' if self.redis.redis_uri else 'disabled'}")
         messages.append(f"INFO: Auth: {'enabled' if self.auth.api_key else 'disabled'}")
+        messages.append(f"INFO: Rate limiting: {'enabled' if self.ratelimit.enabled else 'disabled'}")
 
         return messages
 

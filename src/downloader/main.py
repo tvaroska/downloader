@@ -6,6 +6,9 @@ from contextlib import asynccontextmanager
 
 from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
+from slowapi import Limiter, _rate_limit_exceeded_handler
+from slowapi.errors import RateLimitExceeded
+from slowapi.util import get_remote_address
 
 from . import __version__
 from .api import router
@@ -16,11 +19,23 @@ from .job_manager import JobManager
 from .logging_config import get_logger, setup_logging
 from .middleware import MetricsMiddleware, get_system_metrics_collector
 from .pdf_generator import PlaywrightPDFGenerator
+from .ratelimit_middleware import RateLimitMiddleware
 
 # Load settings and configure logging
 settings = get_settings()
 setup_logging(settings.logging)
 logger = get_logger(__name__)
+
+# Initialize rate limiter
+# Use Redis if configured (for distributed rate limiting), otherwise in-memory
+storage_uri = settings.ratelimit.storage_uri or settings.redis.redis_uri or "memory://"
+limiter = Limiter(
+    key_func=get_remote_address,
+    storage_uri=storage_uri,
+    default_limits=[],  # Limits applied per-endpoint via middleware
+    headers_enabled=settings.ratelimit.headers_enabled,
+)
+logger.info(f"Rate limiter initialized with storage: {storage_uri}")
 
 
 @asynccontextmanager
@@ -111,7 +126,12 @@ app = FastAPI(
     lifespan=lifespan,
 )
 
-# Add middleware in order: Metrics first, then CORS
+# Add rate limiter to app state and register exception handler
+app.state.limiter = limiter
+app.add_exception_handler(RateLimitExceeded, _rate_limit_exceeded_handler)
+
+# Add middleware in order: RateLimit first, then Metrics, then CORS
+app.add_middleware(RateLimitMiddleware, limiter=limiter)
 app.add_middleware(MetricsMiddleware)
 
 app.add_middleware(
