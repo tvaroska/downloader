@@ -179,7 +179,7 @@ When no Accept header is specified, returns the content as plain text with intel
 GET /https://example.com
 ```
 
-**Response:** 
+**Response:**
 ```
 Example Domain This domain is for use in illustrative examples in documents. You may use this domain in literature without prior coordination or asking for permission. More information...
 ```

@@ -1,8 +1,9 @@
 """Middleware for request metrics collection and monitoring."""
 
-import time
 import asyncio
-from typing import Callable
+import time
+from collections.abc import Callable
+
 from fastapi import Request, Response
 from starlette.middleware.base import BaseHTTPMiddleware
 
@@ -33,7 +34,7 @@ class MetricsMiddleware(BaseHTTPMiddleware):
                 endpoint=normalized_path,
                 method=method,
                 status_code=500,
-                response_time=response_time
+                response_time=response_time,
             )
             raise e
 
@@ -45,7 +46,7 @@ class MetricsMiddleware(BaseHTTPMiddleware):
             endpoint=normalized_path,
             method=method,
             status_code=status_code,
-            response_time=response_time
+            response_time=response_time,
         )
 
         # Add response time header for debugging
@@ -82,9 +83,15 @@ class SystemMetricsCollector:
         self.collector = get_metrics_collector()
         self._running = False
         self._task = None
+        self.app_state = None
 
-    async def start(self):
-        """Start background metrics collection."""
+    async def start(self, app_state=None):
+        """Start background metrics collection.
+
+        Args:
+            app_state: FastAPI app.state object containing semaphores and other resources
+        """
+        self.app_state = app_state
         if not self._running:
             self._running = True
             self._task = asyncio.create_task(self._collect_system_metrics())
@@ -110,25 +117,34 @@ class SystemMetricsCollector:
             except Exception as e:
                 # Log error but continue
                 import logging
+
                 logging.getLogger(__name__).error(f"Error collecting system metrics: {e}")
                 await asyncio.sleep(60)  # Wait longer on error
 
     async def _collect_metrics_snapshot(self):
         """Collect a snapshot of current system metrics."""
         try:
-            # Collect concurrency metrics
-            from .api import get_concurrency_stats
-            concurrency_stats = get_concurrency_stats()
+            # Collect concurrency metrics from semaphores
+            if self.app_state:
+                pdf_semaphore = getattr(self.app_state, "pdf_semaphore", None)
+                batch_semaphore = getattr(self.app_state, "batch_semaphore", None)
+                settings = getattr(self.app_state, "settings", None)
 
-            # Set gauge metrics
-            self.collector.set_gauge("pdf_concurrency_utilization",
-                                   concurrency_stats.pdf_concurrency.utilization_percent)
-            self.collector.set_gauge("batch_concurrency_utilization",
-                                   concurrency_stats.batch_concurrency.utilization_percent)
-            self.collector.set_gauge("pdf_concurrency_active",
-                                   concurrency_stats.pdf_concurrency.in_use)
-            self.collector.set_gauge("batch_concurrency_active",
-                                   concurrency_stats.batch_concurrency.in_use)
+                if pdf_semaphore and batch_semaphore and settings:
+                    # Calculate utilization
+                    pdf_limit = settings.pdf.concurrency
+                    batch_limit = settings.batch.concurrency
+                    pdf_in_use = pdf_limit - pdf_semaphore._value
+                    batch_in_use = batch_limit - batch_semaphore._value
+
+                    pdf_utilization = (pdf_in_use / pdf_limit * 100) if pdf_limit > 0 else 0
+                    batch_utilization = (batch_in_use / batch_limit * 100) if batch_limit > 0 else 0
+
+                    # Set gauge metrics
+                    self.collector.set_gauge("pdf_concurrency_utilization", pdf_utilization)
+                    self.collector.set_gauge("batch_concurrency_utilization", batch_utilization)
+                    self.collector.set_gauge("pdf_concurrency_active", pdf_in_use)
+                    self.collector.set_gauge("batch_concurrency_active", batch_in_use)
 
             # Collect Redis metrics if available
             await self._collect_redis_metrics()
@@ -141,25 +157,33 @@ class SystemMetricsCollector:
 
         except Exception as e:
             import logging
+
             logging.getLogger(__name__).error(f"Error in metrics snapshot: {e}")
 
     async def _collect_redis_metrics(self):
         """Collect Redis-specific metrics."""
         try:
-            import os
-            if os.getenv("REDIS_URI"):
-                from .job_manager import get_job_manager
-                job_manager = await get_job_manager()
+            if self.app_state:
+                job_manager = getattr(self.app_state, "job_manager", None)
                 if job_manager:
                     stats = await job_manager.get_connection_stats()
                     if stats.get("status") == "healthy":
                         self.collector.set_gauge("redis_status", 1)
                         if "created_connections" in stats:
-                            self.collector.set_gauge("redis_created_connections", stats["created_connections"])
+                            self.collector.set_gauge(
+                                "redis_created_connections",
+                                stats["created_connections"],
+                            )
                         if "available_connections" in stats:
-                            self.collector.set_gauge("redis_available_connections", stats["available_connections"])
+                            self.collector.set_gauge(
+                                "redis_available_connections",
+                                stats["available_connections"],
+                            )
                         if "in_use_connections" in stats:
-                            self.collector.set_gauge("redis_in_use_connections", stats["in_use_connections"])
+                            self.collector.set_gauge(
+                                "redis_in_use_connections",
+                                stats["in_use_connections"],
+                            )
                     else:
                         self.collector.set_gauge("redis_status", 0)
         except Exception:
@@ -168,7 +192,6 @@ class SystemMetricsCollector:
     async def _collect_pdf_pool_metrics(self):
         """Collect PDF browser pool metrics."""
         try:
-            from .pdf_generator import BrowserPool
             # This would need to be implemented in pdf_generator to expose pool stats
             # For now, just set a placeholder
             self.collector.set_gauge("pdf_pool_available", 1)  # Placeholder
@@ -178,24 +201,29 @@ class SystemMetricsCollector:
     async def _collect_http_client_metrics(self):
         """Collect HTTP client metrics."""
         try:
-            from .http_client import get_client
-            client = await get_client()  # Fix: await the async function
-            stats = client.get_connection_stats()
+            if self.app_state:
+                http_client = getattr(self.app_state, "http_client", None)
+                if http_client:
+                    stats = http_client.get_connection_stats()
 
-            if stats.get("status") == "healthy":
-                self.collector.set_gauge("http_client_status", 1)
+                    if stats.get("status") == "healthy":
+                        self.collector.set_gauge("http_client_status", 1)
 
-                # Extract circuit breaker stats
-                circuit_breakers = stats.get("circuit_breakers", {})
-                for url, cb_stats in circuit_breakers.items():
-                    # Normalize URL for metric name
-                    normalized_url = url.replace(".", "_").replace(":", "_")
-                    self.collector.set_gauge(f"circuit_breaker_{normalized_url}_failures",
-                                           cb_stats.get("failure_count", 0))
-                    self.collector.set_gauge(f"circuit_breaker_{normalized_url}_state",
-                                           1 if cb_stats.get("state") == "closed" else 0)
-            else:
-                self.collector.set_gauge("http_client_status", 0)
+                        # Extract circuit breaker stats
+                        circuit_breakers = stats.get("circuit_breakers", {})
+                        for url, cb_stats in circuit_breakers.items():
+                            # Normalize URL for metric name
+                            normalized_url = url.replace(".", "_").replace(":", "_")
+                            self.collector.set_gauge(
+                                f"circuit_breaker_{normalized_url}_failures",
+                                cb_stats.get("failure_count", 0),
+                            )
+                            self.collector.set_gauge(
+                                f"circuit_breaker_{normalized_url}_state",
+                                1 if cb_stats.get("state") == "closed" else 0,
+                            )
+                    else:
+                        self.collector.set_gauge("http_client_status", 0)
         except Exception:
             self.collector.set_gauge("http_client_status", 0)
 

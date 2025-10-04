@@ -37,7 +37,7 @@ async def get_http_client(request: Request) -> HTTPClient:
     Raises:
         RuntimeError: If HTTP client not initialized
     """
-    if not hasattr(request.app.state, 'http_client'):
+    if not hasattr(request.app.state, "http_client"):
         raise RuntimeError("HTTP client not initialized. Check app lifespan configuration.")
     return request.app.state.http_client
 
@@ -56,11 +56,13 @@ async def get_job_manager_dependency(request: Request) -> JobManager | None:
     Returns:
         JobManager instance or None if not configured
     """
-    return getattr(request.app.state, 'job_manager', None)
+    return getattr(request.app.state, "job_manager", None)
 
 
 # PDF Generator Dependency
-async def get_pdf_generator_dependency(request: Request) -> PlaywrightPDFGenerator | None:
+async def get_pdf_generator_dependency(
+    request: Request,
+) -> PlaywrightPDFGenerator | None:
     """
     Get PDF generator instance from app state.
 
@@ -75,7 +77,7 @@ async def get_pdf_generator_dependency(request: Request) -> PlaywrightPDFGenerat
     Raises:
         RuntimeError: If PDF generator not initialized
     """
-    if not hasattr(request.app.state, 'pdf_generator'):
+    if not hasattr(request.app.state, "pdf_generator"):
         raise RuntimeError("PDF generator not initialized. Check app lifespan configuration.")
     return request.app.state.pdf_generator
 
@@ -93,7 +95,7 @@ def get_pdf_semaphore(request: Request) -> asyncio.Semaphore:
     Returns:
         Semaphore for PDF generation concurrency control
     """
-    if not hasattr(request.app.state, 'pdf_semaphore'):
+    if not hasattr(request.app.state, "pdf_semaphore"):
         raise RuntimeError("PDF semaphore not initialized. Check app lifespan configuration.")
     return request.app.state.pdf_semaphore
 
@@ -110,7 +112,7 @@ def get_batch_semaphore(request: Request) -> asyncio.Semaphore:
     Returns:
         Semaphore for batch processing concurrency control
     """
-    if not hasattr(request.app.state, 'batch_semaphore'):
+    if not hasattr(request.app.state, "batch_semaphore"):
         raise RuntimeError("Batch semaphore not initialized. Check app lifespan configuration.")
     return request.app.state.batch_semaphore
 
@@ -145,7 +147,7 @@ def get_rate_limiter(request: Request) -> Limiter:
     Raises:
         RuntimeError: If limiter not initialized
     """
-    if not hasattr(request.app.state, 'limiter'):
+    if not hasattr(request.app.state, "limiter"):
         raise RuntimeError("Rate limiter not initialized. Check app configuration.")
     return request.app.state.limiter
 

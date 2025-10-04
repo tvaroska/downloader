@@ -26,7 +26,7 @@ async def submit_batch_job(urls_with_formats: list[dict]) -> str:
         "urls": urls_with_formats,
         "default_format": "text",
         "concurrency_limit": 10,
-        "timeout_per_url": 30
+        "timeout_per_url": 30,
     }
 
     async with httpx.AsyncClient() as client:
@@ -90,8 +90,10 @@ async def wait_for_completion(job_id: str) -> dict[str, Any]:
         status = status_info["status"]
         progress = status_info["progress"]
 
-        print(f"   [{elapsed:6.1f}s] Status: {status:10} | Progress: {progress:3}% | "
-              f"Processed: {status_info['processed_urls']}/{status_info['total_urls']}")
+        print(
+            f"   [{elapsed:6.1f}s] Status: {status:10} | Progress: {progress:3}% | "
+            f"Processed: {status_info['processed_urls']}/{status_info['total_urls']}"
+        )
 
         if status == "completed":
             print(f"✅ Job completed successfully in {elapsed:.1f} seconds!")
@@ -115,20 +117,14 @@ async def main():
     urls_to_process = [
         {
             "url": "https://koomen.dev/essays/horseless-carriages/",
-            "format": "text"
+            "format": "text",
         },
         {
             "url": "https://koomen.dev/essays/horseless-carriages/",
-            "format": "markdown"
+            "format": "markdown",
         },
-        {
-            "url": "https://httpbin.org/json",
-            "format": "json"
-        },
-        {
-            "url": "https://example.com",
-            "format": "html"
-        }
+        {"url": "https://httpbin.org/json", "format": "json"},
+        {"url": "https://example.com", "format": "html"},
     ]
 
     print(f"📋 Processing {len(urls_to_process)} URLs:")
@@ -175,7 +171,7 @@ async def main():
 
         if result["success"]:
             if result.get("content"):
-                content_preview = result["content"][:100].replace('\n', ' ')
+                content_preview = result["content"][:100].replace("\n", " ")
                 if len(result["content"]) > 100:
                     content_preview += "..."
             elif result.get("content_base64"):
@@ -184,14 +180,13 @@ async def main():
             content_preview = result.get("error", "Unknown error")
 
         print(f"   {i}. {status_icon} {result['url']}")
-        print(f"      Format: {result['format']}, "
-              f"Duration: {result.get('duration', 0):.2f}s")
+        print(f"      Format: {result['format']}, " f"Duration: {result.get('duration', 0):.2f}s")
         print(f"      Content: {content_preview}")
         print()
 
     # Optionally save results to file
     filename = f"batch_results_{job_id[:8]}.json"
-    with open(filename, 'w') as f:
+    with open(filename, "w") as f:
         json.dump(results, f, indent=2)
     print(f"💾 Full results saved to: {filename}")
 

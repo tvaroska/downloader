@@ -126,7 +126,7 @@ def _check_ssrf_protection(hostname: str, settings: Settings) -> None:
                     ip_addresses.append(ip_obj)
 
                 logger.debug(f"Resolved '{hostname}' to {len(ip_addresses)} IP address(es)")
-            except (socket.gaierror, socket.error) as e:
+            except (OSError, socket.gaierror) as e:
                 logger.warning(f"DNS resolution failed for '{hostname}': {e}")
                 raise SSRFProtectionError(
                     f"Cannot resolve hostname '{hostname}'. DNS resolution failed."
@@ -145,9 +145,11 @@ def _check_ssrf_protection(hostname: str, settings: Settings) -> None:
         _validate_ip_address(ip_obj, hostname, settings)
 
 
-def _validate_ip_address(ip_obj: ipaddress.IPv4Address | ipaddress.IPv6Address,
-                         original_hostname: str,
-                         settings: Settings) -> None:
+def _validate_ip_address(
+    ip_obj: ipaddress.IPv4Address | ipaddress.IPv6Address,
+    original_hostname: str,
+    settings: Settings,
+) -> None:
     """
     Validate that an IP address is not in a restricted range.
 
@@ -182,7 +184,9 @@ def _validate_ip_address(ip_obj: ipaddress.IPv4Address | ipaddress.IPv6Address,
     # 3. Specific check for cloud metadata IP (169.254.169.254) - must come before link-local and private
     if settings.ssrf.block_cloud_metadata:
         if ip_str == "169.254.169.254" or ip_str == "fd00:ec2::254":
-            logger.warning(f"SSRF attempt blocked: {original_hostname} -> {ip_str} (cloud metadata)")
+            logger.warning(
+                f"SSRF attempt blocked: {original_hostname} -> {ip_str} (cloud metadata)"
+            )
             raise SSRFProtectionError(
                 f"Access to cloud metadata endpoints is not allowed (hostname: {original_hostname}, IP: {ip_str})"
             )
@@ -236,7 +240,11 @@ def _is_hostname_blocked(hostname: str) -> bool:
     hostname_lower = hostname.lower()
 
     # Check for localhost variations
-    localhost_patterns = ["localhost", "localhost.localdomain", "ip6-localhost"]
+    localhost_patterns = [
+        "localhost",
+        "localhost.localdomain",
+        "ip6-localhost",
+    ]
     if hostname_lower in localhost_patterns:
         return True
 

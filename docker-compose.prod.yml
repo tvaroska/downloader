@@ -1,0 +1,39 @@
+# Production configuration overlay
+# Usage: docker compose -f docker-compose.yml -f docker-compose.prod.yml up -d
+
+services:
+  downloader:
+    # Production-specific overrides
+    restart: unless-stopped
+    ports:
+      - "80:80"  # Override dev port 8000
+    volumes: []  # Remove volume mount for production
+    environment:
+      - PYTHONPATH=/app/src
+      - REDIS_URI=redis://redis:6379
+      - LOG_LEVEL=INFO
+      - LOG_JSON_LOGS=true
+      - ENVIRONMENT=production
+    # Use production CMD from Dockerfile (no --reload)
+    command: ["python", "-m", "uvicorn", "src.downloader.main:app", "--host", "0.0.0.0", "--port", "80"]
+    # Resource limits
+    deploy:
+      resources:
+        limits:
+          cpus: '2'
+          memory: 2G
+        reservations:
+          cpus: '0.5'
+          memory: 512M
+
+  redis:
+    restart: unless-stopped
+    # Redis resource limits
+    deploy:
+      resources:
+        limits:
+          cpus: '0.5'
+          memory: 512M
+        reservations:
+          cpus: '0.1'
+          memory: 128M

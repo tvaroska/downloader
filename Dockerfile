@@ -49,7 +49,7 @@ RUN groupadd -r appuser && useradd -r -g appuser appuser \
 # Set ownership
 RUN chown -R appuser:appuser /app
 
-# Switch to non-root user  
+# Switch to non-root user
 USER appuser
 
 EXPOSE 80

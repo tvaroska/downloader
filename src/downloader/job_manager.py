@@ -17,6 +17,7 @@ logger = logging.getLogger(__name__)
 
 class JobStatus(str, Enum):
     """Job status enumeration."""
+
     PENDING = "pending"
     RUNNING = "running"
     COMPLETED = "completed"
@@ -26,6 +27,7 @@ class JobStatus(str, Enum):
 
 class JobInfo(BaseModel):
     """Job information model."""
+
     job_id: str = Field(..., description="Unique job identifier")
     status: JobStatus = Field(..., description="Current job status")
     created_at: datetime = Field(..., description="Job creation timestamp")
@@ -44,6 +46,7 @@ class JobInfo(BaseModel):
 
 class JobResult(BaseModel):
     """Job result model for completed jobs."""
+
     job_id: str = Field(..., description="Job identifier")
     status: JobStatus = Field(..., description="Final job status")
     total_duration: float = Field(..., description="Total processing time in seconds")
@@ -82,7 +85,7 @@ class JobManager:
                 retry_on_timeout=True,
                 retry_on_error=[redis.BusyLoadingError, redis.ConnectionError],
                 health_check_interval=30,  # Health check every 30s
-                decode_responses=True
+                decode_responses=True,
             )
 
             # Create Redis client using the connection pool
@@ -90,7 +93,9 @@ class JobManager:
 
             # Test connection and log pool info
             await self.redis_client.ping()
-            logger.info("Connected to Redis with connection pool (max_connections=20) for job management")
+            logger.info(
+                "Connected to Redis with connection pool (max_connections=20) for job management"
+            )
 
         except Exception as e:
             logger.error(f"Failed to connect to Redis: {e}")
@@ -130,10 +135,10 @@ class JobManager:
     async def create_job(self, request_data: dict[str, Any]) -> str:
         """
         Create a new background job.
-        
+
         Args:
             request_data: Original request data
-            
+
         Returns:
             Job ID
         """
@@ -150,16 +155,12 @@ class JobManager:
             created_at=now,
             total_urls=len(request_data.get("urls", [])),
             request_data=request_data,
-            expires_at=expires_at
+            expires_at=expires_at,
         )
 
         # Store job info in Redis
         job_key = self._get_job_key(job_id)
-        await self.redis_client.setex(
-            job_key,
-            self.job_ttl,
-            job_info.model_dump_json()
-        )
+        await self.redis_client.setex(job_key, self.job_ttl, job_info.model_dump_json())
 
         logger.info(f"Created job {job_id} with {job_info.total_urls} URLs")
         return job_id
@@ -167,10 +168,10 @@ class JobManager:
     async def get_job_info(self, job_id: str) -> JobInfo | None:
         """
         Get job information.
-        
+
         Args:
             job_id: Job identifier
-            
+
         Returns:
             JobInfo if found, None otherwise
         """
@@ -198,7 +199,7 @@ class JobManager:
         successful_urls: int | None = None,
         failed_urls: int | None = None,
         error_message: str | None = None,
-        max_retries: int = 3
+        max_retries: int = 3,
     ):
         """Update job status using atomic Redis transaction with retry logic for consistency."""
         if not self.redis_client:
@@ -226,9 +227,13 @@ class JobManager:
 
                     if status == JobStatus.RUNNING and job_info.started_at is None:
                         job_info.started_at = now
-                    elif status in [JobStatus.COMPLETED, JobStatus.FAILED, JobStatus.CANCELLED]:
+                    elif status in [
+                        JobStatus.COMPLETED,
+                        JobStatus.FAILED,
+                        JobStatus.CANCELLED,
+                    ]:
                         job_info.completed_at = now
-                        job_info.results_available = (status == JobStatus.COMPLETED)
+                        job_info.results_available = status == JobStatus.COMPLETED
 
                     if progress is not None:
                         job_info.progress = progress
@@ -243,11 +248,7 @@ class JobManager:
 
                     # Execute atomic update
                     pipe.multi()
-                    await pipe.setex(
-                        job_key,
-                        self.job_ttl,
-                        job_info.model_dump_json()
-                    )
+                    await pipe.setex(job_key, self.job_ttl, job_info.model_dump_json())
                     await pipe.execute()
 
                     logger.debug(f"Updated job {job_id} status to {status} (atomic operation)")
@@ -256,18 +257,27 @@ class JobManager:
             except redis.WatchError:
                 if attempt < max_retries - 1:
                     # Small exponential backoff to reduce collision probability
-                    wait_time = 0.01 * (2 ** attempt)  # 10ms, 20ms, 40ms
-                    logger.debug(f"Job {job_id} was modified during update, retrying in {wait_time:.3f}s (attempt {attempt + 1}/{max_retries})")
+                    wait_time = 0.01 * (2**attempt)  # 10ms, 20ms, 40ms
+                    logger.debug(
+                        f"Job {job_id} was modified during update, retrying in {wait_time:.3f}s (attempt {attempt + 1}/{max_retries})"
+                    )
                     await asyncio.sleep(wait_time)
                     continue
                 else:
-                    logger.error(f"Job {job_id} failed to update after {max_retries} attempts due to concurrent modifications")
+                    logger.error(
+                        f"Job {job_id} failed to update after {max_retries} attempts due to concurrent modifications"
+                    )
                     raise
             except Exception as e:
                 logger.error(f"Failed to update job {job_id}: {e}")
                 raise
 
-    async def store_job_results(self, job_id: str, results: list[dict[str, Any]], summary: dict[str, Any]):
+    async def store_job_results(
+        self,
+        job_id: str,
+        results: list[dict[str, Any]],
+        summary: dict[str, Any],
+    ):
         """Store job results."""
         if not self.redis_client:
             raise RuntimeError("Redis client not connected")
@@ -288,16 +298,12 @@ class JobManager:
             results=results,
             summary=summary,
             created_at=job_info.created_at,
-            completed_at=job_info.completed_at or datetime.now(timezone.utc)
+            completed_at=job_info.completed_at or datetime.now(timezone.utc),
         )
 
         # Store results in Redis
         result_key = self._get_result_key(job_id)
-        await self.redis_client.setex(
-            result_key,
-            self.job_ttl,
-            job_result.model_dump_json()
-        )
+        await self.redis_client.setex(result_key, self.job_ttl, job_result.model_dump_json())
 
         logger.info(f"Stored results for job {job_id}")
 
@@ -320,6 +326,7 @@ class JobManager:
 
     async def start_background_job(self, job_id: str, job_processor_func, *args, **kwargs):
         """Start background job processing."""
+
         async def job_wrapper():
             try:
                 await self.update_job_status(job_id, JobStatus.RUNNING)
@@ -340,11 +347,7 @@ class JobManager:
                 raise
 
             except Exception as e:
-                await self.update_job_status(
-                    job_id,
-                    JobStatus.FAILED,
-                    error_message=str(e)
-                )
+                await self.update_job_status(job_id, JobStatus.FAILED, error_message=str(e))
                 logger.error(f"Job {job_id} failed: {e}")
 
             finally:
@@ -375,7 +378,10 @@ class JobManager:
 
         # Update job status if it exists
         job_info = await self.get_job_info(job_id)
-        if job_info and job_info.status in [JobStatus.PENDING, JobStatus.RUNNING]:
+        if job_info and job_info.status in [
+            JobStatus.PENDING,
+            JobStatus.RUNNING,
+        ]:
             await self.update_job_status(job_id, JobStatus.CANCELLED)
             return True
 
@@ -398,16 +404,22 @@ class JobManager:
             if self.connection_pool:
                 try:
                     pool_stats = {
-                        'max_connections': self.connection_pool.max_connections,
-                        'connection_pool_class': self.connection_pool.__class__.__name__
+                        "max_connections": self.connection_pool.max_connections,
+                        "connection_pool_class": self.connection_pool.__class__.__name__,
                     }
                     # Try to get detailed stats if attributes exist
-                    if hasattr(self.connection_pool, '_created_connections'):
-                        pool_stats['created_connections'] = self.connection_pool._created_connections
-                    if hasattr(self.connection_pool, '_available_connections'):
-                        pool_stats['available_connections'] = len(self.connection_pool._available_connections)
-                    if hasattr(self.connection_pool, '_in_use_connections'):
-                        pool_stats['in_use_connections'] = len(self.connection_pool._in_use_connections)
+                    if hasattr(self.connection_pool, "_created_connections"):
+                        pool_stats["created_connections"] = (
+                            self.connection_pool._created_connections
+                        )
+                    if hasattr(self.connection_pool, "_available_connections"):
+                        pool_stats["available_connections"] = len(
+                            self.connection_pool._available_connections
+                        )
+                    if hasattr(self.connection_pool, "_in_use_connections"):
+                        pool_stats["in_use_connections"] = len(
+                            self.connection_pool._in_use_connections
+                        )
 
                     logger.debug(f"Redis connection pool stats: {pool_stats}")
                 except Exception as e:
@@ -430,16 +442,16 @@ class JobManager:
             stats = {
                 "status": "healthy" if is_healthy else "unhealthy",
                 "pool_size": self.connection_pool.max_connections,
-                "health_check_interval": self._health_check_interval
+                "health_check_interval": self._health_check_interval,
             }
 
             # Add detailed stats if available
-            if hasattr(self.connection_pool, '_created_connections'):
-                stats['created_connections'] = self.connection_pool._created_connections
-            if hasattr(self.connection_pool, '_available_connections'):
-                stats['available_connections'] = len(self.connection_pool._available_connections)
-            if hasattr(self.connection_pool, '_in_use_connections'):
-                stats['in_use_connections'] = len(self.connection_pool._in_use_connections)
+            if hasattr(self.connection_pool, "_created_connections"):
+                stats["created_connections"] = self.connection_pool._created_connections
+            if hasattr(self.connection_pool, "_available_connections"):
+                stats["available_connections"] = len(self.connection_pool._available_connections)
+            if hasattr(self.connection_pool, "_in_use_connections"):
+                stats["in_use_connections"] = len(self.connection_pool._in_use_connections)
 
             return stats
         except Exception as e:
@@ -457,10 +469,7 @@ class JobManager:
         # additional cleanup logic here if needed
 
         # Clean up completed background task references
-        completed_tasks = [
-            job_id for job_id, task in self._background_tasks.items()
-            if task.done()
-        ]
+        completed_tasks = [job_id for job_id, task in self._background_tasks.items() if task.done()]
 
         for job_id in completed_tasks:
             del self._background_tasks[job_id]

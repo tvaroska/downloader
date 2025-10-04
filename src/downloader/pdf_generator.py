@@ -43,9 +43,9 @@ class BrowserPool:
                 browser = await self._launch_browser()
                 self._all_browsers.add(browser)
                 self._browser_health[browser] = {
-                    'usage_count': 0,
-                    'last_used': asyncio.get_event_loop().time(),
-                    'healthy': True
+                    "usage_count": 0,
+                    "last_used": asyncio.get_event_loop().time(),
+                    "healthy": True,
                 }
                 await self._available_browsers.put(browser)
                 logger.info(f"Browser {i + 1}/{self.pool_size} initialized")
@@ -90,8 +90,8 @@ class BrowserPool:
 
             # Update health metrics
             if browser in self._browser_health:
-                self._browser_health[browser]['usage_count'] += 1
-                self._browser_health[browser]['last_used'] = asyncio.get_event_loop().time()
+                self._browser_health[browser]["usage_count"] += 1
+                self._browser_health[browser]["last_used"] = asyncio.get_event_loop().time()
 
             return browser
         except asyncio.TimeoutError:
@@ -144,9 +144,9 @@ class BrowserPool:
             new_browser = await self._launch_browser()
             self._all_browsers.add(new_browser)
             self._browser_health[new_browser] = {
-                'usage_count': 0,
-                'last_used': asyncio.get_event_loop().time(),
-                'healthy': True
+                "usage_count": 0,
+                "last_used": asyncio.get_event_loop().time(),
+                "healthy": True,
             }
 
             # Add to available queue
@@ -191,23 +191,32 @@ class BrowserPool:
     def get_pool_stats(self) -> dict:
         """Get browser pool statistics for monitoring."""
         available_count = self._available_browsers.qsize()
-        total_usage = sum(stats['usage_count'] for stats in self._browser_health.values())
+        total_usage = sum(stats["usage_count"] for stats in self._browser_health.values())
 
         return {
-            'total_browsers': len(self._all_browsers),
-            'available_browsers': available_count,
-            'busy_browsers': len(self._all_browsers) - available_count,
-            'total_usage': total_usage,
-            'pool_efficiency': (total_usage / max(len(self._all_browsers), 1)) if self._all_browsers else 0
+            "total_browsers": len(self._all_browsers),
+            "available_browsers": available_count,
+            "busy_browsers": len(self._all_browsers) - available_count,
+            "total_usage": total_usage,
+            "pool_efficiency": (total_usage / max(len(self._all_browsers), 1))
+            if self._all_browsers
+            else 0,
         }
 
 
 class PlaywrightPDFGenerator:
     """PDF generator using Playwright with browser pooling for concurrent PDF generation."""
 
-    def __init__(self, pool_size: int = 3):
+    def __init__(
+        self,
+        pool_size: int = 3,
+        page_load_timeout: int = 30000,
+        wait_until: str = "networkidle",
+    ):
         self.pool: BrowserPool | None = None
         self.pool_size = pool_size
+        self.page_load_timeout = page_load_timeout
+        self.wait_until = wait_until
 
     async def __aenter__(self):
         """Async context manager entry."""
@@ -275,9 +284,7 @@ class PlaywrightPDFGenerator:
                 except Exception as e:
                     logger.warning(f"Error releasing browser to pool: {e}")
 
-    async def generate_pdf(
-        self, url: str, options: dict[str, Any] | None = None
-    ) -> bytes:
+    async def generate_pdf(self, url: str, options: dict[str, Any] | None = None) -> bytes:
         """
         Generate PDF from URL using optimized browser pool with automatic resource cleanup.
 
@@ -291,7 +298,7 @@ class PlaywrightPDFGenerator:
         Raises:
             PDFGeneratorError: If PDF generation fails
         """
-        # Default PDF options
+        # Default PDF options - use instance settings
         pdf_options = {
             "format": "A4",
             "print_background": True,
@@ -301,8 +308,8 @@ class PlaywrightPDFGenerator:
                 "bottom": "20px",
                 "left": "20px",
             },
-            "wait_for": "networkidle",
-            "timeout": 30000,  # 30 seconds
+            "wait_for": self.wait_until,
+            "timeout": self.page_load_timeout,
         }
 
         # Override with custom options
@@ -338,7 +345,8 @@ class PlaywrightPDFGenerator:
 
                     # Wait for page to be fully loaded
                     await page.wait_for_load_state(
-                        "networkidle", timeout=pdf_options.get("timeout", 30000)
+                        "networkidle",
+                        timeout=pdf_options.get("timeout", 30000),
                     )
 
                     # Try to close any signup boxes/modals
@@ -355,7 +363,12 @@ class PlaywrightPDFGenerator:
                         print_background=pdf_options.get("print_background", True),
                         margin=pdf_options.get(
                             "margin",
-                            {"top": "20px", "right": "20px", "bottom": "20px", "left": "20px"},
+                            {
+                                "top": "20px",
+                                "right": "20px",
+                                "bottom": "20px",
+                                "left": "20px",
+                            },
                         ),
                         prefer_css_page_size=True,
                         display_header_footer=False,
@@ -386,8 +399,8 @@ class PlaywrightPDFGenerator:
                 '[title="Close"]',
                 '[aria-label="Close"]',
                 '[title="close"]',
-                '.modal-close',
-                '.close-button',
+                ".modal-close",
+                ".close-button",
             ]
             for selector in close_selectors:
                 close_buttons = await page.query_selector_all(selector)
@@ -420,9 +433,7 @@ async def get_pdf_generator():
     # Use lock to prevent multiple simultaneous initializations
     async with _initialization_lock:
         if _pdf_generator is None:
-            _pdf_generator = PlaywrightPDFGenerator(
-                pool_size=2
-            )  # Reduce pool size for Docker
+            _pdf_generator = PlaywrightPDFGenerator(pool_size=2)  # Reduce pool size for Docker
             await _pdf_generator.start()
 
     try:
@@ -438,9 +449,7 @@ async def get_pdf_generator():
         raise
 
 
-async def generate_pdf_from_url(
-    url: str, options: dict[str, Any] | None = None
-) -> bytes:
+async def generate_pdf_from_url(url: str, options: dict[str, Any] | None = None) -> bytes:
     """
     Generate PDF from URL using shared generator instance.
 

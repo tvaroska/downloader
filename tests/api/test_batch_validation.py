@@ -1,6 +1,5 @@
 """Tests for batch processing request validation."""
 
-
 from fastapi.testclient import TestClient
 
 from src.downloader.main import app

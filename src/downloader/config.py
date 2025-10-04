@@ -26,19 +26,19 @@ class HTTPClientConfig(BaseSettings):
         default=100,
         ge=10,
         le=500,
-        description="Number of connections to keep alive in the pool"
+        description="Number of connections to keep alive in the pool",
     )
     max_connections: int = Field(
         default=200,
         ge=20,
         le=1000,
-        description="Maximum total connections (should be >= 2x keepalive)"
+        description="Maximum total connections (should be >= 2x keepalive)",
     )
     keepalive_expiry: float = Field(
         default=30.0,
         ge=5.0,
         le=300.0,
-        description="Seconds to keep idle connections alive"
+        description="Seconds to keep idle connections alive",
     )
 
     # Request Settings
@@ -48,13 +48,13 @@ class HTTPClientConfig(BaseSettings):
         default=30.0,
         ge=5.0,
         le=300.0,
-        description="Default timeout for HTTP requests in seconds"
+        description="Default timeout for HTTP requests in seconds",
     )
     max_redirects: int = Field(
         default=10,
         ge=0,
         le=50,
-        description="Maximum number of redirects to follow"
+        description="Maximum number of redirects to follow",
     )
 
     # Concurrency Settings
@@ -64,19 +64,19 @@ class HTTPClientConfig(BaseSettings):
         default=20,
         ge=1,
         le=100,
-        description="Max concurrent HTTP requests for API endpoints"
+        description="Max concurrent HTTP requests for API endpoints",
     )
     max_concurrent_batch: int = Field(
         default=5,
         ge=1,
         le=50,
-        description="Max concurrent HTTP requests for batch processing"
+        description="Max concurrent HTTP requests for batch processing",
     )
 
     # HTTP/2 Support
     http2_enabled: bool = Field(
         default=True,
-        description="Enable HTTP/2 support for better multiplexing"
+        description="Enable HTTP/2 support for better multiplexing",
     )
 
     model_config = SettingsConfigDict(env_prefix="HTTP_")
@@ -112,21 +112,21 @@ class PDFConfig(BaseSettings):
         default_factory=_get_default_concurrency,
         ge=1,
         le=50,
-        description="Max concurrent PDF generations (default: 2x CPU cores, max 12)"
+        description="Max concurrent PDF generations (default: 2x CPU cores, max 12)",
     )
 
     # Playwright Settings
-    # Why 10s? Most pages load within 5s; 10s is aggressive but prevents indefinite hangs
+    # Why 30s? Most pages load within 10-15s; 30s handles complex JS-heavy sites
+    # Complex sites like StackOverflow can take 20-30s to fully load
     # networkidle can hang on streaming sites, but provides best results when it works
     page_load_timeout: int = Field(
-        default=10000,
+        default=30000,
         ge=1000,
-        le=60000,
-        description="Playwright page load timeout in milliseconds"
+        le=120000,
+        description="Playwright page load timeout in milliseconds",
     )
     wait_until: Literal["load", "domcontentloaded", "networkidle", "commit"] = Field(
-        default="networkidle",
-        description="Playwright wait_until strategy"
+        default="networkidle", description="Playwright wait_until strategy"
     )
 
     # Browser Pool Settings
@@ -136,7 +136,7 @@ class PDFConfig(BaseSettings):
         default=3,
         ge=1,
         le=10,
-        description="Number of browser instances to maintain in the pool"
+        description="Number of browser instances to maintain in the pool",
     )
 
     model_config = SettingsConfigDict(env_prefix="PDF_")
@@ -160,7 +160,7 @@ class BatchConfig(BaseSettings):
         default_factory=_get_default_concurrency,
         ge=1,
         le=100,
-        description="Max concurrent batch requests (default: 8x CPU cores, max 50)"
+        description="Max concurrent batch requests (default: 8x CPU cores, max 50)",
     )
 
     # Batch Size Limits
@@ -170,7 +170,7 @@ class BatchConfig(BaseSettings):
         default=50,
         ge=1,
         le=1000,
-        description="Maximum number of URLs allowed in a single batch request"
+        description="Maximum number of URLs allowed in a single batch request",
     )
 
     # Timeout Settings
@@ -179,7 +179,7 @@ class BatchConfig(BaseSettings):
         default=30,
         ge=5,
         le=300,
-        description="Default timeout per URL in batch processing (seconds)"
+        description="Default timeout per URL in batch processing (seconds)",
     )
 
     model_config = SettingsConfigDict(env_prefix="BATCH_")
@@ -197,7 +197,7 @@ class ContentConfig(BaseSettings):
         default=50 * 1024 * 1024,  # 50MB in bytes
         ge=1024 * 1024,  # Min 1MB
         le=500 * 1024 * 1024,  # Max 500MB
-        description="Maximum download size in bytes (default: 50MB)"
+        description="Maximum download size in bytes (default: 50MB)",
     )
 
     # Cache Settings
@@ -208,13 +208,13 @@ class ContentConfig(BaseSettings):
         default=1000,
         ge=0,
         le=10000,
-        description="Maximum number of entries in content conversion cache"
+        description="Maximum number of entries in content conversion cache",
     )
     cache_cleanup_interval: int = Field(
         default=3600,
         ge=60,
         le=86400,
-        description="Interval in seconds between cache cleanup runs"
+        description="Interval in seconds between cache cleanup runs",
     )
 
     model_config = SettingsConfigDict(env_prefix="CONTENT_")
@@ -225,7 +225,8 @@ class RedisConfig(BaseSettings):
 
     redis_uri: str | None = Field(
         default=None,
-        description="Redis connection URI (e.g., redis://localhost:6379)"
+        alias="REDIS_URI",
+        description="Redis connection URI (e.g., redis://localhost:6379)",
     )
 
     # Connection Pool Settings
@@ -233,10 +234,11 @@ class RedisConfig(BaseSettings):
         default=10,
         ge=1,
         le=100,
-        description="Maximum Redis connections in pool"
+        alias="REDIS_MAX_CONNECTIONS",
+        description="Maximum Redis connections in pool",
     )
 
-    model_config = SettingsConfigDict(env_prefix="REDIS_")
+    model_config = SettingsConfigDict(env_prefix="REDIS_", populate_by_name=True)
 
 
 class AuthConfig(BaseSettings):
@@ -245,7 +247,7 @@ class AuthConfig(BaseSettings):
     api_key: str | None = Field(
         default=None,
         alias="DOWNLOADER_KEY",
-        description="API key for authentication (if None, auth is disabled)"
+        description="API key for authentication (if None, auth is disabled)",
     )
 
     model_config = SettingsConfigDict(case_sensitive=True)
@@ -256,43 +258,39 @@ class LoggingConfig(BaseSettings):
 
     # Log Levels
     log_level: Literal["DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"] = Field(
-        default="INFO",
-        description="Application log level"
+        default="INFO", description="Application log level"
     )
 
     # Access Logging (separate from error logs)
     access_log_level: Literal["DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"] = Field(
-        default="INFO",
-        description="Uvicorn access log level"
+        default="INFO", description="Uvicorn access log level"
     )
 
     # Structured Logging
     json_logs: bool = Field(
         default=False,
-        description="Enable JSON formatted logs (recommended for production)"
+        description="Enable JSON formatted logs (recommended for production)",
     )
 
     # Log Files
     access_log_file: str | None = Field(
-        default=None,
-        description="Path to access log file (None = stdout)"
+        default=None, description="Path to access log file (None = stdout)"
     )
     error_log_file: str | None = Field(
-        default=None,
-        description="Path to error log file (None = stderr)"
+        default=None, description="Path to error log file (None = stderr)"
     )
 
     # Log Rotation
     log_rotation_size: int = Field(
         default=10 * 1024 * 1024,  # 10MB
         ge=1024 * 1024,  # Min 1MB
-        description="Log file size before rotation (bytes)"
+        description="Log file size before rotation (bytes)",
     )
     log_rotation_count: int = Field(
         default=5,
         ge=1,
         le=100,
-        description="Number of rotated log files to keep"
+        description="Number of rotated log files to keep",
     )
 
     model_config = SettingsConfigDict(env_prefix="LOG_")
@@ -303,20 +301,19 @@ class SSRFConfig(BaseSettings):
 
     # Private IP Protection
     block_private_ips: bool = Field(
-        default=True,
-        description="Block requests to private IP addresses"
+        default=True, description="Block requests to private IP addresses"
     )
 
     # Cloud Metadata Protection
     block_cloud_metadata: bool = Field(
         default=True,
-        description="Block requests to cloud metadata endpoints (169.254.169.254)"
+        description="Block requests to cloud metadata endpoints (169.254.169.254)",
     )
 
     # DNS Resolution
     resolve_dns: bool = Field(
         default=True,
-        description="Resolve DNS and check IPs before making requests"
+        description="Resolve DNS and check IPs before making requests",
     )
 
     model_config = SettingsConfigDict(env_prefix="SSRF_")
@@ -328,7 +325,7 @@ class CORSConfig(BaseSettings):
     # Why "*" default? Development convenience; should be restricted in production
     allowed_origins: list[str] = Field(
         default=["*"],
-        description="Allowed CORS origins (use specific domains in production)"
+        description="Allowed CORS origins (use specific domains in production)",
     )
 
     model_config = SettingsConfigDict(env_prefix="CORS_")
@@ -354,12 +351,12 @@ class RateLimitConfig(BaseSettings):
     # Average user: 1-10 requests/minute; batch users: 20-50; 100 provides headroom
     enabled: bool = Field(
         default=True,
-        description="Enable rate limiting (disable only for testing)"
+        description="Enable rate limiting (disable only for testing)",
     )
 
     default_limit: str = Field(
         default="100/minute",
-        description="Default rate limit for all endpoints (format: count/period)"
+        description="Default rate limit for all endpoints (format: count/period)",
     )
 
     # Per-Endpoint Limits
@@ -367,17 +364,17 @@ class RateLimitConfig(BaseSettings):
     # Why higher for batch? Batch jobs are async, less immediate resource impact
     download_limit: str = Field(
         default="60/minute",
-        description="Rate limit for direct download endpoints"
+        description="Rate limit for direct download endpoints",
     )
 
     batch_limit: str = Field(
         default="20/minute",
-        description="Rate limit for batch job creation (jobs are async)"
+        description="Rate limit for batch job creation (jobs are async)",
     )
 
     status_limit: str = Field(
         default="200/minute",
-        description="Rate limit for status/metrics endpoints (lightweight)"
+        description="Rate limit for status/metrics endpoints (lightweight)",
     )
 
     # Storage Backend
@@ -385,14 +382,14 @@ class RateLimitConfig(BaseSettings):
     # If not configured, falls back to in-memory (single instance only)
     storage_uri: str | None = Field(
         default=None,
-        description="Redis URI for distributed rate limiting (uses REDIS_URI if None)"
+        description="Redis URI for distributed rate limiting (uses REDIS_URI if None)",
     )
 
     # Custom Headers
     # Standard rate limit headers help clients implement backoff strategies
     headers_enabled: bool = Field(
         default=True,
-        description="Include rate limit headers in responses (X-RateLimit-*)"
+        description="Include rate limit headers in responses (X-RateLimit-*)",
     )
 
     model_config = SettingsConfigDict(env_prefix="RATELIMIT_")
@@ -402,19 +399,12 @@ class Settings(BaseSettings):
     """Main application settings combining all configuration sections."""
 
     # Application Metadata
-    app_name: str = Field(
-        default="REST API Downloader",
-        description="Application name"
-    )
-    app_version: str = Field(
-        default="0.0.1",
-        description="Application version"
-    )
+    app_name: str = Field(default="REST API Downloader", description="Application name")
+    app_version: str = Field(default="0.0.1", description="Application version")
 
     # Environment
     environment: Literal["development", "staging", "production"] = Field(
-        default="development",
-        description="Runtime environment"
+        default="development", description="Runtime environment"
     )
 
     # Component Configurations
@@ -460,10 +450,14 @@ class Settings(BaseSettings):
         # Configuration info
         messages.append(f"INFO: PDF concurrency: {self.pdf.concurrency}")
         messages.append(f"INFO: Batch concurrency: {self.batch.concurrency}")
-        messages.append(f"INFO: Max download size: {self.content.max_download_size / 1024 / 1024:.1f}MB")
+        messages.append(
+            f"INFO: Max download size: {self.content.max_download_size / 1024 / 1024:.1f}MB"
+        )
         messages.append(f"INFO: Redis: {'enabled' if self.redis.redis_uri else 'disabled'}")
         messages.append(f"INFO: Auth: {'enabled' if self.auth.api_key else 'disabled'}")
-        messages.append(f"INFO: Rate limiting: {'enabled' if self.ratelimit.enabled else 'disabled'}")
+        messages.append(
+            f"INFO: Rate limiting: {'enabled' if self.ratelimit.enabled else 'disabled'}"
+        )
 
         return messages
 

@@ -2,12 +2,11 @@
 
 import logging
 import multiprocessing
-import os
 from datetime import datetime, timezone
 
 from fastapi import APIRouter, Request, Response
 
-from ..dependencies import PDFSemaphoreDep, BatchSemaphoreDep
+from ..dependencies import BatchSemaphoreDep, PDFSemaphoreDep
 
 logger = logging.getLogger(__name__)
 
@@ -22,7 +21,7 @@ async def get_metrics():
     collector = get_metrics_collector()
     return Response(
         content=collector.get_prometheus_metrics(),
-        media_type="text/plain; version=0.0.4; charset=utf-8"
+        media_type="text/plain; version=0.0.4; charset=utf-8",
     )
 
 
@@ -65,7 +64,7 @@ async def get_live_metrics(
     # Try to get Redis stats
     redis_stats = {}
     try:
-        job_manager = getattr(request.app.state, 'job_manager', None)
+        job_manager = getattr(request.app.state, "job_manager", None)
         if job_manager:
             redis_stats = await job_manager.get_connection_stats()
     except Exception as e:
@@ -86,23 +85,24 @@ async def get_live_metrics(
                 "limit": pdf_limit,
                 "active": pdf_in_use,
                 "available": pdf_semaphore._value,
-                "utilization_percent": round((pdf_in_use / pdf_limit) * 100, 1) if pdf_limit > 0 else 0
+                "utilization_percent": round((pdf_in_use / pdf_limit) * 100, 1)
+                if pdf_limit > 0
+                else 0,
             },
             "batch": {
                 "limit": batch_limit,
                 "active": batch_in_use,
                 "available": batch_semaphore._value,
-                "utilization_percent": round((batch_in_use / batch_limit) * 100, 1) if batch_limit > 0 else 0
-            }
+                "utilization_percent": round((batch_in_use / batch_limit) * 100, 1)
+                if batch_limit > 0
+                else 0,
+            },
         },
         "performance": performance,
-        "connections": {
-            "redis": redis_stats,
-            "http_client": http_stats
-        },
+        "connections": {"redis": redis_stats, "http_client": http_stats},
         "system": {
             "cpu_cores": multiprocessing.cpu_count(),
             "pdf_scaling": "2x CPU cores (max 12)",
-            "batch_scaling": "8x CPU cores (max 50)"
-        }
+            "batch_scaling": "8x CPU cores (max 50)",
+        },
     }

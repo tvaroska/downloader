@@ -87,9 +87,7 @@ async def download_url(
         logger.warning(f"URL validation failed for {url}: {e}")
         raise HTTPException(
             status_code=400,
-            detail=ErrorResponse(
-                error=str(e), error_type="validation_error"
-            ).model_dump(),
+            detail=ErrorResponse(error=str(e), error_type="validation_error").model_dump(),
         )
 
     except HTTPTimeoutError as e:
@@ -112,9 +110,7 @@ async def download_url(
         logger.error(f"Download error for {url}: {e}")
         raise HTTPException(
             status_code=500,
-            detail=ErrorResponse(
-                error=str(e), error_type="download_error"
-            ).model_dump(),
+            detail=ErrorResponse(error=str(e), error_type="download_error").model_dump(),
         )
 
     except PDFGeneratorError as e:
@@ -122,7 +118,8 @@ async def download_url(
         raise HTTPException(
             status_code=500,
             detail=ErrorResponse(
-                error=f"PDF generation failed: {e}", error_type="pdf_generation_error"
+                error=f"PDF generation failed: {e}",
+                error_type="pdf_generation_error",
             ).model_dump(),
         )
 

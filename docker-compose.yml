@@ -1,15 +1,22 @@
-version: '3.8'
+# Default development configuration
+# For production, use: docker compose -f docker-compose.yml -f docker-compose.prod.yml up -d
 
 services:
   downloader:
     build: .
+    image: downloader:latest
     ports:
       - "8000:8000"
     volumes:
       - .:/app
     environment:
       - PYTHONPATH=/app/src
-    command: python -m uvicorn src.downloader.main:app --host 0.0.0.0 --port 8000 --reload
+      - REDIS_URI=redis://redis:6379
+      - LOG_LEVEL=DEBUG
+      - ENVIRONMENT=development
+    command: ["python", "-m", "uvicorn", "src.downloader.main:app", "--host", "0.0.0.0", "--port", "8000", "--reload", "--reload-exclude", ".claude/*"]
+    depends_on:
+      - redis
 
   redis:
     image: redis:7-alpine

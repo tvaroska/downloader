@@ -31,38 +31,20 @@ OUTPUT_DIR = Path("batch_outputs")
 
 # Example URLs for batch processing
 EXAMPLE_URLS = [
-    {
-        "url": "https://example.com",
-        "format": "text"
-    },
-    {
-        "url": "https://httpbin.org/html",
-        "format": "markdown"
-    },
-    {
-        "url": "https://github.com/python/cpython",
-        "format": "text"
-    },
+    {"url": "https://example.com", "format": "text"},
+    {"url": "https://httpbin.org/html", "format": "markdown"},
+    {"url": "https://github.com/python/cpython", "format": "text"},
     {
         "url": "https://docs.python.org/3/library/asyncio.html",
-        "format": "markdown"
+        "format": "markdown",
     },
-    {
-        "url": "https://fastapi.tiangolo.com/",
-        "format": "html"
-    }
+    {"url": "https://fastapi.tiangolo.com/", "format": "html"},
 ]
 
 # PDF examples (separate batch to demonstrate PDF functionality)
 PDF_URLS = [
-    {
-        "url": "https://example.com",
-        "format": "pdf"
-    },
-    {
-        "url": "https://httpbin.org/html",
-        "format": "pdf"
-    }
+    {"url": "https://example.com", "format": "pdf"},
+    {"url": "https://httpbin.org/html", "format": "pdf"},
 ]
 
 
@@ -84,9 +66,7 @@ async def check_server_health() -> bool:
         return False
 
 
-async def process_batch_request(
-    urls: list[dict], batch_name: str, **kwargs
-) -> dict[str, Any]:
+async def process_batch_request(urls: list[dict], batch_name: str, **kwargs) -> dict[str, Any]:
     """
     Process a batch request and return the results.
 
@@ -106,7 +86,7 @@ async def process_batch_request(
         "default_format": "text",
         "concurrency_limit": 5,
         "timeout_per_url": 30,
-        **kwargs  # Allow overriding defaults
+        **kwargs,  # Allow overriding defaults
     }
 
     print("📊 Batch configuration:")
@@ -135,7 +115,10 @@ async def process_batch_request(
             else:
                 print(f"❌ Batch '{batch_name}' failed: {response.status_code}")
                 print(f"   Error: {response.text}")
-                return {"error": response.text, "status_code": response.status_code}
+                return {
+                    "error": response.text,
+                    "status_code": response.status_code,
+                }
 
     except asyncio.TimeoutError:
         print(f"⏰ Batch '{batch_name}' timed out")
@@ -169,20 +152,21 @@ def save_batch_results(batch_data: dict[str, Any], batch_name: str):
                 "markdown": "md",
                 "html": "html",
                 "json": "json",
-                "pdf": "pdf"
+                "pdf": "pdf",
             }
             ext = format_map.get(result["format"], "txt")
 
             # Create safe filename
             url_part = result["url"].replace("https://", "").replace("http://", "")
             url_part = "".join(c for c in url_part if c.isalnum() or c in "._-")[:50]
-            filename = f"{batch_name}_{i+1:02d}_{url_part}.{ext}"
+            filename = f"{batch_name}_{i + 1:02d}_{url_part}.{ext}"
 
             content_file = OUTPUT_DIR / filename
 
             if result["format"] == "pdf":
                 # Save PDF as binary
                 import base64
+
                 pdf_content = base64.b64decode(result["content_base64"])
                 with open(content_file, "wb") as f:
                     f.write(pdf_content)
@@ -217,33 +201,29 @@ def print_batch_summary(batch_data: dict[str, Any], batch_name: str):
         size = f"{result['size']:,}B" if result.get("size") else "N/A"
 
         print(f"   {status} [{i:02d}] {result['url']}")
-        print(
-            f"       Format: {result['format']} | Duration: {duration} | Size: {size}"
-        )
+        print(f"       Format: {result['format']} | Duration: {duration} | Size: {size}")
 
         if not result["success"]:
             print(f"       Error: {result.get('error', 'Unknown error')}")
 
         if result.get("content") and len(result["content"]) < 100:
             preview = (
-                result["content"][:97] + "..."
-                if len(result["content"]) > 97
-                else result["content"]
+                result["content"][:97] + "..." if len(result["content"]) > 97 else result["content"]
             )
             print(f"       Preview: {preview}")
 
 
 async def demonstrate_basic_batch():
     """Demonstrate basic batch processing with different formats."""
-    print("\n" + "="*80)
+    print("\n" + "=" * 80)
     print("🎯 BASIC BATCH PROCESSING DEMONSTRATION")
-    print("="*80)
+    print("=" * 80)
 
     batch_data = await process_batch_request(
         urls=EXAMPLE_URLS,
         batch_name="basic_demo",
         default_format="text",
-        concurrency_limit=3
+        concurrency_limit=3,
     )
 
     print_batch_summary(batch_data, "basic_demo")
@@ -252,16 +232,16 @@ async def demonstrate_basic_batch():
 
 async def demonstrate_pdf_batch():
     """Demonstrate PDF batch processing."""
-    print("\n" + "="*80)
+    print("\n" + "=" * 80)
     print("📄 PDF BATCH PROCESSING DEMONSTRATION")
-    print("="*80)
+    print("=" * 80)
 
     batch_data = await process_batch_request(
         urls=PDF_URLS,
         batch_name="pdf_demo",
         default_format="pdf",
         concurrency_limit=2,  # Lower concurrency for PDF generation
-        timeout_per_url=60    # Longer timeout for PDF generation
+        timeout_per_url=60,  # Longer timeout for PDF generation
     )
 
     print_batch_summary(batch_data, "pdf_demo")
@@ -270,9 +250,9 @@ async def demonstrate_pdf_batch():
 
 async def demonstrate_error_handling():
     """Demonstrate error handling in batch processing."""
-    print("\n" + "="*80)
+    print("\n" + "=" * 80)
     print("⚠️  ERROR HANDLING DEMONSTRATION")
-    print("="*80)
+    print("=" * 80)
 
     # Mix of valid and invalid URLs
     error_urls = [
@@ -280,7 +260,10 @@ async def demonstrate_error_handling():
         {"url": "https://httpbin.org/status/404", "format": "text"},
         {"url": "https://httpbin.org/status/500", "format": "text"},
         {"url": "invalid-url-format", "format": "text"},
-        {"url": "https://httpbin.org/delay/10", "format": "text"},  # Will timeout
+        {
+            "url": "https://httpbin.org/delay/10",
+            "format": "text",
+        },  # Will timeout
     ]
 
     batch_data = await process_batch_request(
@@ -288,7 +271,7 @@ async def demonstrate_error_handling():
         batch_name="error_demo",
         default_format="text",
         concurrency_limit=5,
-        timeout_per_url=5  # Short timeout to demonstrate timeout handling
+        timeout_per_url=5,  # Short timeout to demonstrate timeout handling
     )
 
     print_batch_summary(batch_data, "error_demo")
@@ -297,9 +280,9 @@ async def demonstrate_error_handling():
 
 async def demonstrate_high_concurrency():
     """Demonstrate high concurrency batch processing."""
-    print("\n" + "="*80)
+    print("\n" + "=" * 80)
     print("🚀 HIGH CONCURRENCY DEMONSTRATION")
-    print("="*80)
+    print("=" * 80)
 
     # Create many URLs for concurrent processing
     high_concurrency_urls = [
@@ -312,7 +295,7 @@ async def demonstrate_high_concurrency():
         urls=high_concurrency_urls,
         batch_name="concurrency_demo",
         default_format="text",
-        concurrency_limit=10  # High concurrency
+        concurrency_limit=10,  # High concurrency
     )
 
     print_batch_summary(batch_data, "concurrency_demo")
@@ -342,25 +325,17 @@ async def main():
         print("\n🎯 Examples Summary:")
         print("   All batch processing examples completed!")
         print(f"   Check the '{OUTPUT_DIR}' directory for saved results.")
-        print(
-            "   Each batch creates both detailed JSON logs and individual "
-            "content files."
-        )
+        print("   Each batch creates both detailed JSON logs and individual " "content files.")
 
         print("\n💡 Tips for using batch processing:")
         print("   • Use appropriate concurrency limits based on your server resources")
-        print(
-            "   • Set reasonable timeouts for different content types "
-            "(PDF takes longer)"
-        )
+        print("   • Set reasonable timeouts for different content types " "(PDF takes longer)")
         print("   • Monitor the batch_id for tracking specific batch operations")
         print(
-            "   • Handle partial failures gracefully - some URLs may fail "
-            "while others succeed"
+            "   • Handle partial failures gracefully - some URLs may fail " "while others succeed"
         )
         print(
-            "   • Use different formats in the same batch for efficient "
-            "multi-format processing"
+            "   • Use different formats in the same batch for efficient " "multi-format processing"
         )
 
         print("\n🏁 Examples completed successfully!")

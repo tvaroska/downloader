@@ -14,8 +14,14 @@ class TestValidateUrl:
             ("https://example.com", "https://example.com"),
             ("http://example.com", "http://example.com"),
             ("example.com", "http://example.com"),
-            ("https://example.com/path/to/resource", "https://example.com/path/to/resource"),
-            ("https://example.com/search?q=test", "https://example.com/search?q=test"),
+            (
+                "https://example.com/path/to/resource",
+                "https://example.com/path/to/resource",
+            ),
+            (
+                "https://example.com/search?q=test",
+                "https://example.com/search?q=test",
+            ),
             ("  https://example.com  ", "https://example.com"),
         ],
     )

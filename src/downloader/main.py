@@ -13,7 +13,7 @@ from slowapi.util import get_remote_address
 from . import __version__
 from .api import router
 from .auth import get_auth_status
-from .config import Settings, get_settings
+from .config import get_settings
 from .http_client import HTTPClient
 from .job_manager import JobManager
 from .logging_config import get_logger, setup_logging
@@ -70,18 +70,28 @@ async def lifespan(app: FastAPI):
     # Initialize PDF generator with browser pool
     logger.info("Initializing PDF generator with browser pool...")
     try:
-        pdf_generator = PlaywrightPDFGenerator()
+        pdf_generator = PlaywrightPDFGenerator(
+            pool_size=current_settings.pdf.pool_size,
+            page_load_timeout=current_settings.pdf.page_load_timeout,
+            wait_until=current_settings.pdf.wait_until,
+        )
         await pdf_generator.__aenter__()
         app.state.pdf_generator = pdf_generator
-        logger.info("PDF generator initialized successfully")
+        logger.info(
+            f"PDF generator initialized successfully (timeout={current_settings.pdf.page_load_timeout}ms, wait_until={current_settings.pdf.wait_until})"
+        )
     except Exception as e:
-        logger.warning(f"PDF generator initialization failed: {e}. PDF generation will be unavailable.")
+        logger.warning(
+            f"PDF generator initialization failed: {e}. PDF generation will be unavailable."
+        )
         app.state.pdf_generator = None
 
     # Initialize semaphores for concurrency control
     app.state.pdf_semaphore = asyncio.Semaphore(current_settings.pdf.concurrency)
     app.state.batch_semaphore = asyncio.Semaphore(current_settings.batch.concurrency)
-    logger.info(f"Concurrency semaphores initialized (PDF={current_settings.pdf.concurrency}, BATCH={current_settings.batch.concurrency})")
+    logger.info(
+        f"Concurrency semaphores initialized (PDF={current_settings.pdf.concurrency}, BATCH={current_settings.batch.concurrency})"
+    )
 
     # Initialize job manager if Redis is configured
     if current_settings.redis.redis_uri:
@@ -97,7 +107,7 @@ async def lifespan(app: FastAPI):
     # Start system metrics collection
     logger.info("Starting system metrics collection...")
     system_metrics = get_system_metrics_collector()
-    await system_metrics.start()
+    await system_metrics.start(app_state=app.state)
     logger.info("System metrics collection started")
 
     yield
@@ -162,7 +172,7 @@ async def health_check(request: Request):
     batch_limit = app_settings.batch.concurrency
 
     # Check if Redis is available for batch processing
-    job_manager = getattr(request.app.state, 'job_manager', None)
+    job_manager = getattr(request.app.state, "job_manager", None)
     redis_available = job_manager is not None
 
     # Check job manager status
@@ -192,12 +202,14 @@ async def health_check(request: Request):
     }
 
     if redis_available:
-        batch_info.update({
-            "max_concurrent_downloads": batch_limit,
-            "current_active_downloads": batch_in_use,
-            "available_slots": batch_semaphore._value,
-            "utilization_percent": round(batch_util, 1),
-        })
+        batch_info.update(
+            {
+                "max_concurrent_downloads": batch_limit,
+                "current_active_downloads": batch_in_use,
+                "available_slots": batch_semaphore._value,
+                "utilization_percent": round(batch_util, 1),
+            }
+        )
     else:
         batch_info["reason"] = "Redis connection (REDIS_URI) required"
 
@@ -206,7 +218,7 @@ async def health_check(request: Request):
     pdf_util = (pdf_in_use / pdf_limit) * 100 if pdf_limit > 0 else 0
 
     # Check if PDF generator is available
-    pdf_generator = getattr(request.app.state, 'pdf_generator', None)
+    pdf_generator = getattr(request.app.state, "pdf_generator", None)
     pdf_available = pdf_generator is not None
 
     health_info = {

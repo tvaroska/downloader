@@ -36,7 +36,11 @@ class TestExamples:
     def test_content_formats_example(self):
         """Test that content_formats.py runs successfully."""
         example_path = os.path.join(
-            os.path.dirname(__file__), "..", "..", "examples", "content_formats.py"
+            os.path.dirname(__file__),
+            "..",
+            "..",
+            "examples",
+            "content_formats.py",
         )
 
         result = subprocess.run(
@@ -51,7 +55,11 @@ class TestExamples:
     def test_batch_processing_example(self):
         """Test that batch_processing.py runs successfully."""
         example_path = os.path.join(
-            os.path.dirname(__file__), "..", "..", "examples", "batch_processing.py"
+            os.path.dirname(__file__),
+            "..",
+            "..",
+            "examples",
+            "batch_processing.py",
         )
 
         result = subprocess.run(
@@ -67,7 +75,11 @@ class TestExamples:
     def test_batch_job_example(self):
         """Test that batch_job_example.py runs successfully."""
         example_path = os.path.join(
-            os.path.dirname(__file__), "..", "..", "examples", "batch_job_example.py"
+            os.path.dirname(__file__),
+            "..",
+            "..",
+            "examples",
+            "batch_job_example.py",
         )
 
         result = subprocess.run(
@@ -84,9 +96,10 @@ class TestExamples:
         """Test that concurrent_pdf_requests.py runs successfully."""
         example_path = os.path.join(
             os.path.dirname(__file__),
-            "..", "..",
+            "..",
+            "..",
             "examples",
-            "concurrent_pdf_requests.py"
+            "concurrent_pdf_requests.py",
         )
 
         result = subprocess.run(
@@ -128,14 +141,10 @@ class TestEndpoints:
 
         headers = {
             "Authorization": "Bearer test-api-key-e2e",
-            "Accept": "text/plain"
+            "Accept": "text/plain",
         }
 
-        response = requests.get(
-            f"{app_base_url}/https://example.com",
-            headers=headers,
-            timeout=30
-        )
+        response = requests.get(f"{app_base_url}/https://example.com", headers=headers, timeout=30)
 
         assert response.status_code == 200
         assert len(response.text) > 0
@@ -146,22 +155,22 @@ class TestEndpoints:
 
         headers = {
             "Authorization": "Bearer test-api-key-e2e",
-            "Content-Type": "application/json"
+            "Content-Type": "application/json",
         }
 
         batch_request = {
             "urls": [
                 {"url": "https://example.com"},
-                {"url": "https://example.org"}
+                {"url": "https://example.org"},
             ],
-            "default_format": "text"
+            "default_format": "text",
         }
 
         response = requests.post(
             f"{app_base_url}/batch",
             headers=headers,
             json=batch_request,
-            timeout=30
+            timeout=30,
         )
 
         assert response.status_code == 200

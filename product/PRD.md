@@ -178,7 +178,7 @@ GET /https%3A%2F%2Fexample.com%2Fapi%2Fdata
       "timeout": 30
     },
     {
-      "url": "https://example.com/api/data2", 
+      "url": "https://example.com/api/data2",
       "id": "request2"
     }
   ],
@@ -205,7 +205,7 @@ GET /https%3A%2F%2Fexample.com%2Fapi%2Fdata
       "download_time": 0.45
     },
     {
-      "id": "request2", 
+      "id": "request2",
       "url": "https://example.com/api/data2",
       "status": "error",
       "error": "Connection timeout",

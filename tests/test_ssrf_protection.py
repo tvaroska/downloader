@@ -1,12 +1,13 @@
 """Test SSRF protection implementation."""
 
 import pytest
+
+from src.downloader.config import Settings, SSRFConfig
 from src.downloader.validation import (
     SSRFProtectionError,
     URLValidationError,
     validate_url,
 )
-from src.downloader.config import Settings, SSRFConfig
 
 
 class TestSSRFProtection:
@@ -31,10 +32,7 @@ class TestSSRFProtection:
 
     def test_block_private_ips_class_a(self):
         """Block private IP addresses in 10.0.0.0/8 range."""
-        settings = Settings(ssrf=SSRFConfig(
-            resolve_dns=False,
-            block_private_ips=True
-        ))
+        settings = Settings(ssrf=SSRFConfig(resolve_dns=False, block_private_ips=True))
 
         with pytest.raises(SSRFProtectionError, match="private IP"):
             validate_url("http://10.0.0.1", settings)
@@ -44,10 +42,7 @@ class TestSSRFProtection:
 
     def test_block_private_ips_class_b(self):
         """Block private IP addresses in 172.16.0.0/12 range."""
-        settings = Settings(ssrf=SSRFConfig(
-            resolve_dns=False,
-            block_private_ips=True
-        ))
+        settings = Settings(ssrf=SSRFConfig(resolve_dns=False, block_private_ips=True))
 
         with pytest.raises(SSRFProtectionError, match="private IP"):
             validate_url("http://172.16.0.1", settings)
@@ -57,10 +52,7 @@ class TestSSRFProtection:
 
     def test_block_private_ips_class_c(self):
         """Block private IP addresses in 192.168.0.0/16 range."""
-        settings = Settings(ssrf=SSRFConfig(
-            resolve_dns=False,
-            block_private_ips=True
-        ))
+        settings = Settings(ssrf=SSRFConfig(resolve_dns=False, block_private_ips=True))
 
         with pytest.raises(SSRFProtectionError, match="private IP"):
             validate_url("http://192.168.0.1", settings)
@@ -70,10 +62,7 @@ class TestSSRFProtection:
 
     def test_block_cloud_metadata_ip(self):
         """Block cloud metadata endpoint IP."""
-        settings = Settings(ssrf=SSRFConfig(
-            resolve_dns=False,
-            block_cloud_metadata=True
-        ))
+        settings = Settings(ssrf=SSRFConfig(resolve_dns=False, block_cloud_metadata=True))
 
         with pytest.raises(SSRFProtectionError, match="cloud metadata"):
             validate_url("http://169.254.169.254", settings)
@@ -83,10 +72,7 @@ class TestSSRFProtection:
 
     def test_block_link_local(self):
         """Block link-local addresses (169.254.0.0/16)."""
-        settings = Settings(ssrf=SSRFConfig(
-            resolve_dns=False,
-            block_cloud_metadata=True
-        ))
+        settings = Settings(ssrf=SSRFConfig(resolve_dns=False, block_cloud_metadata=True))
 
         # Any 169.254.x.x address should be blocked (link-local)
         with pytest.raises(SSRFProtectionError, match="link-local"):
@@ -121,10 +107,7 @@ class TestSSRFProtection:
 
     def test_allow_private_ips_when_disabled(self):
         """Allow private IPs when block_private_ips=False."""
-        settings = Settings(ssrf=SSRFConfig(
-            resolve_dns=False,
-            block_private_ips=False
-        ))
+        settings = Settings(ssrf=SSRFConfig(resolve_dns=False, block_private_ips=False))
 
         # Should not raise (private IPs allowed)
         result = validate_url("http://192.168.1.1", settings)
@@ -135,10 +118,7 @@ class TestSSRFProtection:
 
     def test_allow_public_ips(self):
         """Allow legitimate public IP addresses."""
-        settings = Settings(ssrf=SSRFConfig(
-            resolve_dns=False,
-            block_private_ips=True
-        ))
+        settings = Settings(ssrf=SSRFConfig(resolve_dns=False, block_private_ips=True))
 
         # Google Public DNS
         result = validate_url("http://8.8.8.8", settings)
@@ -168,10 +148,7 @@ class TestSSRFProtection:
 
     def test_allow_public_domains_without_dns(self):
         """Allow public domains when DNS resolution is disabled."""
-        settings = Settings(ssrf=SSRFConfig(
-            resolve_dns=False,
-            block_private_ips=True
-        ))
+        settings = Settings(ssrf=SSRFConfig(resolve_dns=False, block_private_ips=True))
 
         # Should not raise (hostname-based check passes)
         result = validate_url("http://example.com", settings)
@@ -182,10 +159,7 @@ class TestSSRFProtection:
 
     def test_dns_resolution_for_public_domain(self):
         """Test DNS resolution for legitimate public domains."""
-        settings = Settings(ssrf=SSRFConfig(
-            resolve_dns=True,
-            block_private_ips=True
-        ))
+        settings = Settings(ssrf=SSRFConfig(resolve_dns=True, block_private_ips=True))
 
         # example.com should resolve to public IPs
         result = validate_url("http://example.com", settings)
@@ -228,14 +202,14 @@ class TestSSRFProtection:
 
         # Non-existent domain should fail DNS resolution
         with pytest.raises(SSRFProtectionError, match="Cannot resolve hostname"):
-            validate_url("http://this-domain-definitely-does-not-exist-12345.com", settings)
+            validate_url(
+                "http://this-domain-definitely-does-not-exist-12345.com",
+                settings,
+            )
 
     def test_ipv6_private_addresses(self):
         """Test blocking of IPv6 private addresses."""
-        settings = Settings(ssrf=SSRFConfig(
-            resolve_dns=False,
-            block_private_ips=True
-        ))
+        settings = Settings(ssrf=SSRFConfig(resolve_dns=False, block_private_ips=True))
 
         # fd00::/8 is private IPv6 range
         with pytest.raises(SSRFProtectionError, match="private IP"):
@@ -261,10 +235,7 @@ class TestSSRFProtection:
 
     def test_url_with_port(self):
         """Test that URLs with ports work correctly."""
-        settings = Settings(ssrf=SSRFConfig(
-            resolve_dns=False,
-            block_private_ips=True
-        ))
+        settings = Settings(ssrf=SSRFConfig(resolve_dns=False, block_private_ips=True))
 
         # Public IP with port should work
         result = validate_url("http://8.8.8.8:8080", settings)
@@ -276,10 +247,7 @@ class TestSSRFProtection:
 
     def test_url_with_path_and_query(self):
         """Test that URLs with paths and query strings work correctly."""
-        settings = Settings(ssrf=SSRFConfig(
-            resolve_dns=False,
-            block_private_ips=True
-        ))
+        settings = Settings(ssrf=SSRFConfig(resolve_dns=False, block_private_ips=True))
 
         # Public IP with path/query
         result = validate_url("http://8.8.8.8/path?query=value", settings)

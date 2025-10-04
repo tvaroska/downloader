@@ -34,9 +34,7 @@ class TestHTTPClient:
         mock_response.content = b"<html>test</html>"
         mock_response.reason_phrase = "OK"
 
-        with patch.object(
-            http_client._client, "get", new_callable=AsyncMock
-        ) as mock_get:
+        with patch.object(http_client._client, "get", new_callable=AsyncMock) as mock_get:
             mock_get.return_value = mock_response
 
             content, metadata = await http_client.download("https://example.com")
@@ -49,9 +47,7 @@ class TestHTTPClient:
 
     @pytest.mark.asyncio
     async def test_timeout_error(self, http_client):
-        with patch.object(
-            http_client._client, "get", new_callable=AsyncMock
-        ) as mock_get:
+        with patch.object(http_client._client, "get", new_callable=AsyncMock) as mock_get:
             mock_get.side_effect = httpx.TimeoutException("Timeout")
 
             with pytest.raises(HTTPTimeoutError) as exc_info:
@@ -65,9 +61,7 @@ class TestHTTPClient:
         mock_response.status_code = 404
         mock_response.reason_phrase = "Not Found"
 
-        with patch.object(
-            http_client._client, "get", new_callable=AsyncMock
-        ) as mock_get:
+        with patch.object(http_client._client, "get", new_callable=AsyncMock) as mock_get:
             mock_get.return_value = mock_response
 
             with pytest.raises(HTTPClientError) as exc_info:
@@ -77,9 +71,7 @@ class TestHTTPClient:
 
     @pytest.mark.asyncio
     async def test_request_error(self, http_client):
-        with patch.object(
-            http_client._client, "get", new_callable=AsyncMock
-        ) as mock_get:
+        with patch.object(http_client._client, "get", new_callable=AsyncMock) as mock_get:
             mock_get.side_effect = httpx.RequestError("Connection failed")
 
             with pytest.raises(HTTPClientError) as exc_info:

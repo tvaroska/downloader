@@ -10,7 +10,7 @@ This directory contains practical examples demonstrating how to use the REST API
    # Using Docker (recommended)
    docker build -t downloader .
    docker run -p 8000:80 downloader
-   
+
    # Or locally with uv
    uv run python run.py
    ```
@@ -78,7 +78,7 @@ This directory contains practical examples demonstrating how to use the REST API
 import httpx
 
 # Extract article text
-response = httpx.get("http://localhost:8000/https://news.ycombinator.com", 
+response = httpx.get("http://localhost:8000/https://news.ycombinator.com",
                     headers={"Accept": "text/plain"})
 article_text = response.text
 ```
@@ -122,21 +122,21 @@ async with httpx.AsyncClient() as client:
     response = await client.post("http://localhost:8000/batch", json=batch_request)
     job = response.json()
     job_id = job["job_id"]
-    
+
     # Poll for completion
     while True:
         status_response = await client.get(f"http://localhost:8000/jobs/{job_id}/status")
         status = status_response.json()
-        
+
         if status["status"] == "completed":
             break
         elif status["status"] == "failed":
             print(f"Job failed: {status['error_message']}")
             break
-            
+
         print(f"Progress: {status['progress']}%")
         await asyncio.sleep(2)
-    
+
     # Download results
     results_response = await client.get(f"http://localhost:8000/jobs/{job_id}/results")
     results = results_response.json()

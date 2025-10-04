@@ -33,7 +33,7 @@ TEST_URLS = {
     "simple": "https://example.com",
     "news": "https://news.ycombinator.com",
     "documentation": "https://docs.python.org/3/",
-    "json_api": "https://httpbin.org/json"
+    "json_api": "https://httpbin.org/json",
 }
 
 
@@ -74,7 +74,7 @@ async def demo_text_format():
             response = await client.get(
                 f"{BASE_URL}/{url}",
                 headers={"Accept": "text/plain"},
-                timeout=TIMEOUT
+                timeout=TIMEOUT,
             )
 
             if response.status_code == 200:
@@ -86,8 +86,7 @@ async def demo_text_format():
                 print(f"   Content Length: {response.headers.get('x-content-length')}")
 
                 # Show preview
-                preview = (text_content[:300] + "..."
-                          if len(text_content) > 300 else text_content)
+                preview = text_content[:300] + "..." if len(text_content) > 300 else text_content
                 print("\n📝 Content preview:")
                 print(f"   {preview}")
 
@@ -119,16 +118,15 @@ async def demo_markdown_format():
             response = await client.get(
                 f"{BASE_URL}/{url}",
                 headers={"Accept": "text/markdown"},
-                timeout=TIMEOUT
+                timeout=TIMEOUT,
             )
 
             if response.status_code == 200:
                 markdown_content = response.text
-                print(f"✅ Success! Generated {len(markdown_content)} characters of "
-                      f"markdown")
+                print(f"✅ Success! Generated {len(markdown_content)} characters of " f"markdown")
 
                 # Show preview
-                lines = markdown_content.split('\n')
+                lines = markdown_content.split("\n")
                 preview_lines = lines[:10] if len(lines) > 10 else lines
                 print("\n📝 Markdown preview:")
                 for line in preview_lines:
@@ -163,7 +161,7 @@ async def demo_json_format():
             response = await client.get(
                 f"{BASE_URL}/{url}",
                 headers={"Accept": "application/json"},
-                timeout=TIMEOUT
+                timeout=TIMEOUT,
             )
 
             if response.status_code == 200:
@@ -176,16 +174,14 @@ async def demo_json_format():
                 print(f"   Content Type: {json_data.get('content_type')}")
 
                 # Decode base64 content
-                if 'content' in json_data:
-                    content_b64 = json_data['content']
-                    decoded_content = base64.b64decode(content_b64).decode(
-                        'utf-8', errors='ignore')
-                    print(f"   Decoded content length: {len(decoded_content)} "
-                          f"characters")
+                if "content" in json_data:
+                    content_b64 = json_data["content"]
+                    decoded_content = base64.b64decode(content_b64).decode("utf-8", errors="ignore")
+                    print(f"   Decoded content length: {len(decoded_content)} characters")
 
                 # Show metadata
-                if 'metadata' in json_data:
-                    metadata = json_data['metadata']
+                if "metadata" in json_data:
+                    metadata = json_data["metadata"]
                     print("📋 Metadata:")
                     print(f"   Status Code: {metadata.get('status_code')}")
                     print(f"   Headers count: {len(metadata.get('headers', {}))}")
@@ -217,7 +213,7 @@ async def demo_pdf_format():
             response = await client.get(
                 f"{BASE_URL}/{url}",
                 headers={"Accept": "application/pdf"},
-                timeout=TIMEOUT
+                timeout=TIMEOUT,
             )
 
             if response.status_code == 200:
@@ -226,8 +222,7 @@ async def demo_pdf_format():
                 print("📊 Response headers:")
                 print(f"   Content-Type: {response.headers.get('content-type')}")
                 print(f"   Content-Length: {response.headers.get('content-length')}")
-                print(f"   Content-Disposition: "
-                      f"{response.headers.get('content-disposition')}")
+                print(f"   Content-Disposition: " f"{response.headers.get('content-disposition')}")
 
                 # Save to file
                 OUTPUT_DIR.mkdir(exist_ok=True)
@@ -238,8 +233,10 @@ async def demo_pdf_format():
 
             elif response.status_code == 503:
                 print("⏳ PDF service temporarily unavailable (503)")
-                print("   This is normal under high load - the service limits "
-                      "concurrent PDF generation")
+                print(
+                    "   This is normal under high load - the service limits "
+                    "concurrent PDF generation"
+                )
 
             else:
                 print(f"❌ Request failed with status {response.status_code}")
@@ -266,7 +263,7 @@ async def demo_html_format():
             response = await client.get(
                 f"{BASE_URL}/{url}",
                 headers={"Accept": "text/html"},
-                timeout=TIMEOUT
+                timeout=TIMEOUT,
             )
 
             if response.status_code == 200:
@@ -274,7 +271,7 @@ async def demo_html_format():
                 print(f"✅ Success! Retrieved {len(html_content)} characters of HTML")
 
                 # Show preview
-                lines = html_content.split('\n')
+                lines = html_content.split("\n")
                 preview_lines = lines[:5] if len(lines) > 5 else lines
                 print("\n📝 HTML preview:")
                 for line in preview_lines:
@@ -305,7 +302,7 @@ async def demo_error_handling():
         "invalid-url",
         "localhost:8080",
         "https://this-domain-does-not-exist.invalid",
-        "https://httpbin.org/status/404"
+        "https://httpbin.org/status/404",
     ]
 
     async with httpx.AsyncClient() as client:
@@ -316,7 +313,7 @@ async def demo_error_handling():
                 response = await client.get(
                     f"{BASE_URL}/{url}",
                     headers={"Accept": "text/plain"},
-                    timeout=10
+                    timeout=10,
                 )
 
                 if response.status_code == 200:
@@ -360,9 +357,9 @@ async def main():
         await demo_error_handling()
 
         # Summary
-        print("\n" + "="*60)
+        print("\n" + "=" * 60)
         print("🎯 Basic Usage Examples Completed!")
-        print("="*60)
+        print("=" * 60)
         print(f"📁 Output files saved to: {OUTPUT_DIR}/")
         print("\n💡 Key takeaways:")
         print("   • Use Accept headers to control response format")

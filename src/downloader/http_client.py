@@ -43,13 +43,15 @@ class CircuitBreakerOpen(DownloadError):
 
 class RequestPriority(Enum):
     """Request priority levels for queue management."""
+
     HIGH = 1  # Online API requests
-    LOW = 2   # Batch requests
+    LOW = 2  # Batch requests
 
 
 @dataclass
 class QueuedRequest:
     """Represents a queued request with priority and metadata."""
+
     url: str
     priority: RequestPriority
     future: asyncio.Future
@@ -69,7 +71,12 @@ class QueuedRequest:
 class CircuitBreaker:
     """Per-domain circuit breaker pattern for failing endpoints."""
 
-    def __init__(self, failure_threshold: int = 10, recovery_timeout: float = 60.0, half_open_max_calls: int = 3):
+    def __init__(
+        self,
+        failure_threshold: int = 10,
+        recovery_timeout: float = 60.0,
+        half_open_max_calls: int = 3,
+    ):
         """
         Initialize circuit breaker.
 
@@ -95,7 +102,7 @@ class CircuitBreaker:
             if time.time() - self.last_failure_time > self.recovery_timeout:
                 self.state = "half-open"
                 self.half_open_calls = 0
-                logger.info(f"Circuit breaker moving to half-open state")
+                logger.info("Circuit breaker moving to half-open state")
                 return True
             return False
         elif self.state == "half-open":
@@ -110,7 +117,7 @@ class CircuitBreaker:
                 self.state = "closed"
                 self.failure_count = 0
                 self.success_count = 0
-                logger.info(f"Circuit breaker recovered, moving to closed state")
+                logger.info("Circuit breaker recovered, moving to closed state")
         else:
             self.failure_count = max(0, self.failure_count - 1)  # Gradual recovery
 
@@ -121,7 +128,7 @@ class CircuitBreaker:
 
         if self.state == "half-open":
             self.state = "open"
-            logger.warning(f"Circuit breaker re-opened during half-open state")
+            logger.warning("Circuit breaker re-opened during half-open state")
         elif self.failure_count >= self.failure_threshold and self.state == "closed":
             self.state = "open"
             logger.warning(f"Circuit breaker opened after {self.failure_count} failures")
@@ -170,8 +177,8 @@ class HTTPClient:
         # Optimized connection limits for high concurrency workloads
         limits = httpx.Limits(
             max_keepalive_connections=100,  # Keep-alive pool size
-            max_connections=200,           # Total connection pool size
-            keepalive_expiry=30.0,         # Keep connections alive for 30s
+            max_connections=200,  # Total connection pool size
+            keepalive_expiry=30.0,  # Keep connections alive for 30s
         )
 
         # Create httpx client with optimized configuration
@@ -190,11 +197,13 @@ class HTTPClient:
             },
         )
 
-        logger.info(f"HTTP client initialized with optimized connection pooling: "
-                   f"max_connections={limits.max_connections}, "
-                   f"max_keepalive={limits.max_keepalive_connections}, "
-                   f"http2=True, api_concurrent={max_concurrent}, "
-                   f"batch_concurrent={max_concurrent_batch}")
+        logger.info(
+            f"HTTP client initialized with optimized connection pooling: "
+            f"max_connections={limits.max_connections}, "
+            f"max_keepalive={limits.max_keepalive_connections}, "
+            f"http2=True, api_concurrent={max_concurrent}, "
+            f"batch_concurrent={max_concurrent_batch}"
+        )
 
         # Start queue processor
         self._start_queue_processor()
@@ -209,9 +218,7 @@ class HTTPClient:
         while not self._shutdown_event.is_set():
             try:
                 # Wait for request with timeout to allow periodic shutdown checks
-                priority_item = await asyncio.wait_for(
-                    self.request_queue.get(), timeout=1.0
-                )
+                priority_item = await asyncio.wait_for(self.request_queue.get(), timeout=1.0)
                 _, request = priority_item
 
                 # Process request in background
@@ -230,20 +237,24 @@ class HTTPClient:
         circuit_breaker = self._get_circuit_breaker(domain)
 
         # Choose semaphore based on priority
-        semaphore = self.api_semaphore if request.priority == RequestPriority.HIGH else self.batch_semaphore
+        semaphore = (
+            self.api_semaphore if request.priority == RequestPriority.HIGH else self.batch_semaphore
+        )
 
         try:
             # Check circuit breaker before acquiring semaphore
             if not circuit_breaker.can_execute():
                 if request.priority == RequestPriority.LOW and request.retry_count < 3:
                     # Retry batch requests with exponential backoff
-                    delay = min(30, 2 ** request.retry_count)
+                    delay = min(30, 2**request.retry_count)
                     await asyncio.sleep(delay)
                     request.retry_count += 1
                     await self.request_queue.put((request.priority.value, request))
                     return
                 else:
-                    request.future.set_exception(CircuitBreakerOpen(f"Circuit breaker is open for {domain}"))
+                    request.future.set_exception(
+                        CircuitBreakerOpen(f"Circuit breaker is open for {domain}")
+                    )
                     return
 
             async with semaphore:
@@ -259,10 +270,11 @@ class HTTPClient:
             circuit_breaker.record_failure()
 
             # Retry logic for batch requests
-            if (request.priority == RequestPriority.LOW and
-                request.retry_count < 3 and
-                not isinstance(e, CircuitBreakerOpen)):
-
+            if (
+                request.priority == RequestPriority.LOW
+                and request.retry_count < 3
+                and not isinstance(e, CircuitBreakerOpen)
+            ):
                 delay = min(10, 1 + request.retry_count * 2)
                 await asyncio.sleep(delay)
                 request.retry_count += 1
@@ -276,11 +288,13 @@ class HTTPClient:
             self.circuit_breakers[domain] = CircuitBreaker(
                 failure_threshold=10,
                 recovery_timeout=60.0,
-                half_open_max_calls=3
+                half_open_max_calls=3,
             )
         return self.circuit_breakers[domain]
 
-    async def download(self, url: str, priority: RequestPriority = RequestPriority.HIGH) -> tuple[bytes, dict[str, Any]]:
+    async def download(
+        self, url: str, priority: RequestPriority = RequestPriority.HIGH
+    ) -> tuple[bytes, dict[str, Any]]:
         """
         Download content from a URL with priority queue and per-domain circuit breaker.
 
@@ -299,12 +313,7 @@ class HTTPClient:
         """
         # Create future for result
         future = asyncio.Future()
-        request = QueuedRequest(
-            url=url,
-            priority=priority,
-            future=future,
-            timestamp=time.time()
-        )
+        request = QueuedRequest(url=url, priority=priority, future=future, timestamp=time.time())
 
         # Add to queue
         await self.request_queue.put((priority.value, request))
@@ -312,7 +321,9 @@ class HTTPClient:
         # Wait for result
         return await future
 
-    async def _do_download(self, url: str, circuit_breaker: CircuitBreaker) -> tuple[bytes, dict[str, Any]]:
+    async def _do_download(
+        self, url: str, circuit_breaker: CircuitBreaker
+    ) -> tuple[bytes, dict[str, Any]]:
         """Internal download method with circuit breaker protection."""
         logger.info(f"Starting download from: {url}")
 
@@ -323,7 +334,7 @@ class HTTPClient:
             if response.status_code >= 400:
                 raise HTTPClientError(
                     f"HTTP {response.status_code}: {response.reason_phrase}",
-                    status_code=response.status_code
+                    status_code=response.status_code,
                 )
 
             content = response.content
@@ -367,17 +378,17 @@ class HTTPClient:
         """Get HTTP client connection statistics for monitoring."""
         try:
             # Get connection pool stats if available
-            pool = getattr(self._client, '_transport', None)
+            pool = getattr(self._client, "_transport", None)
             circuit_breaker_stats = {
                 domain: {
                     "state": cb.state,
                     "failures": cb.failure_count,
-                    "last_failure": cb.last_failure_time
+                    "last_failure": cb.last_failure_time,
                 }
                 for domain, cb in self.circuit_breakers.items()
             }
 
-            if pool and hasattr(pool, '_pool'):
+            if pool and hasattr(pool, "_pool"):
                 connection_pool = pool._pool
                 stats = {
                     "status": "healthy",
@@ -390,15 +401,26 @@ class HTTPClient:
                         "max_connections": self._client.limits.max_connections,
                         "max_keepalive": self._client.limits.max_keepalive_connections,
                         "keepalive_expiry": self._client.limits.keepalive_expiry,
-                    }
+                    },
                 }
 
                 # Add detailed pool stats if available
-                if hasattr(connection_pool, '_connections'):
-                    stats.update({
-                        "active_connections": len(getattr(connection_pool, '_connections', [])),
-                        "pool_efficiency": "optimized" if len([cb for cb in self.circuit_breakers.values() if cb.state != "closed"]) == 0 else "degraded"
-                    })
+                if hasattr(connection_pool, "_connections"):
+                    stats.update(
+                        {
+                            "active_connections": len(getattr(connection_pool, "_connections", [])),
+                            "pool_efficiency": "optimized"
+                            if len(
+                                [
+                                    cb
+                                    for cb in self.circuit_breakers.values()
+                                    if cb.state != "closed"
+                                ]
+                            )
+                            == 0
+                            else "degraded",
+                        }
+                    )
 
                 return stats
             else:
@@ -406,15 +428,11 @@ class HTTPClient:
                     "status": "basic",
                     "circuit_breakers": circuit_breaker_stats,
                     "queue_size": self.request_queue.qsize(),
-                    "http2_enabled": True
+                    "http2_enabled": True,
                 }
 
         except Exception as e:
-            return {
-                "status": "error",
-                "error": str(e),
-                "circuit_breakers": {}
-            }
+            return {"status": "error", "error": str(e), "circuit_breakers": {}}
 
     async def close(self):
         """Close the HTTP client and release resources."""

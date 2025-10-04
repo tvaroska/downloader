@@ -10,8 +10,8 @@ from fastapi import HTTPException, Response
 from ..content_converter import (
     convert_content_to_markdown,
     convert_content_to_text,
-    should_use_playwright_fallback,
     convert_content_with_playwright_fallback,
+    should_use_playwright_fallback,
 )
 from ..models.responses import ErrorResponse, ResponseMetadata
 from ..pdf_generator import generate_pdf_from_url
@@ -54,7 +54,7 @@ async def _playwright_fallback_for_content(
     original_content: bytes,
     content_type: str,
     output_format: str,
-    request_id: str = ""
+    request_id: str = "",
 ) -> str:
     """
     Apply Playwright fallback for empty HTML content.
@@ -70,8 +70,12 @@ async def _playwright_fallback_for_content(
     Returns:
         Enhanced content from Playwright or original content
     """
-    if not processed_content.strip() and should_use_playwright_fallback(url, original_content, content_type):
-        logger.info(f"[{request_id}] Triggering Playwright {output_format} fallback for empty content")
+    if not processed_content.strip() and should_use_playwright_fallback(
+        url, original_content, content_type
+    ):
+        logger.info(
+            f"[{request_id}] Triggering Playwright {output_format} fallback for empty content"
+        )
         try:
             fallback_start_time = asyncio.get_event_loop().time()
             fallback_content = await convert_content_with_playwright_fallback(url, output_format)
@@ -112,9 +116,7 @@ async def handle_json_response(content: bytes, metadata: ResponseMetadata) -> Re
 
 
 async def handle_text_response(
-    validated_url: str,
-    content: bytes,
-    metadata: ResponseMetadata
+    validated_url: str, content: bytes, metadata: ResponseMetadata
 ) -> Response:
     """Handle plain text format response."""
     text_content = convert_content_to_text(content, metadata["content_type"])
@@ -125,7 +127,11 @@ async def handle_text_response(
         )
 
         text_content = await _playwright_fallback_for_content(
-            validated_url, text_content, content, metadata["content_type"], "text"
+            validated_url,
+            text_content,
+            content,
+            metadata["content_type"],
+            "text",
         )
 
         if text_content.strip():
@@ -145,9 +151,7 @@ async def handle_text_response(
 
 
 async def handle_markdown_response(
-    validated_url: str,
-    content: bytes,
-    metadata: ResponseMetadata
+    validated_url: str, content: bytes, metadata: ResponseMetadata
 ) -> Response:
     """Handle markdown format response."""
     markdown_content = convert_content_to_markdown(content, metadata["content_type"])
@@ -158,7 +162,11 @@ async def handle_markdown_response(
         )
 
         markdown_content = await _playwright_fallback_for_content(
-            validated_url, markdown_content, content, metadata["content_type"], "markdown"
+            validated_url,
+            markdown_content,
+            content,
+            metadata["content_type"],
+            "markdown",
         )
 
         if markdown_content.strip():
@@ -180,7 +188,7 @@ async def handle_markdown_response(
 async def handle_pdf_response(
     validated_url: str,
     metadata: ResponseMetadata,
-    pdf_semaphore: asyncio.Semaphore
+    pdf_semaphore: asyncio.Semaphore,
 ) -> Response:
     """Handle PDF format response with concurrency control."""
     logger.info(f"Generating PDF for: {validated_url}")

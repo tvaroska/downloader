@@ -32,8 +32,12 @@ dev = [
 requires = ["hatchling"]
 build-backend = "hatchling.build"
 
+[tool.black]
+line-length = 100
+target-version = ["py310"]
+
 [tool.ruff]
-line-length = 88
+line-length = 100
 target-version = "py310"
 
 [tool.ruff.lint]
@@ -46,7 +50,12 @@ select = [
     "C4", # flake8-comprehensions
     "UP", # pyupgrade
 ]
-ignore = []
+ignore = [
+    "E501",  # Line too long (handled by formatter)
+    "E722",  # Bare except
+    "B008",  # Function call in argument defaults (FastAPI Depends pattern)
+    "B904",  # Exception chaining
+]
 
 [tool.ruff.format]
 quote-style = "double"

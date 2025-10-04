@@ -11,12 +11,12 @@ def test_rate_limiting_config():
     settings = get_settings()
 
     # Verify rate limiting configuration exists
-    assert hasattr(settings, 'ratelimit')
-    assert hasattr(settings.ratelimit, 'enabled')
-    assert hasattr(settings.ratelimit, 'default_limit')
-    assert hasattr(settings.ratelimit, 'download_limit')
-    assert hasattr(settings.ratelimit, 'batch_limit')
-    assert hasattr(settings.ratelimit, 'status_limit')
+    assert hasattr(settings, "ratelimit")
+    assert hasattr(settings.ratelimit, "enabled")
+    assert hasattr(settings.ratelimit, "default_limit")
+    assert hasattr(settings.ratelimit, "download_limit")
+    assert hasattr(settings.ratelimit, "batch_limit")
+    assert hasattr(settings.ratelimit, "status_limit")
 
     # Verify default values
     assert isinstance(settings.ratelimit.enabled, bool)
@@ -27,13 +27,14 @@ def test_rate_limiting_config():
 @pytest.mark.smoke
 def test_rate_limiting_middleware_initialization():
     """Test that rate limiting middleware can be initialized."""
+    from fastapi import FastAPI
     from slowapi import Limiter
     from slowapi.util import get_remote_address
-    from src.downloader.ratelimit_middleware import RateLimitMiddleware
-    from src.downloader.config import get_settings
-    from fastapi import FastAPI
 
-    settings = get_settings()
+    from src.downloader.config import get_settings
+    from src.downloader.ratelimit_middleware import RateLimitMiddleware
+
+    get_settings()
 
     # Create a test app and limiter
     app = FastAPI()
@@ -46,18 +47,19 @@ def test_rate_limiting_middleware_initialization():
     middleware = RateLimitMiddleware(app, limiter)
 
     # Verify middleware has required attributes
-    assert hasattr(middleware, 'limiter')
-    assert hasattr(middleware, 'settings')
-    assert hasattr(middleware, 'rate_limits')
+    assert hasattr(middleware, "limiter")
+    assert hasattr(middleware, "settings")
+    assert hasattr(middleware, "rate_limits")
 
 
 @pytest.mark.smoke
 def test_rate_limiting_patterns():
     """Test rate limiting pattern matching."""
+    from fastapi import FastAPI
     from slowapi import Limiter
     from slowapi.util import get_remote_address
+
     from src.downloader.ratelimit_middleware import RateLimitMiddleware
-    from fastapi import FastAPI
 
     app = FastAPI()
     limiter = Limiter(key_func=get_remote_address, storage_uri="memory://")
@@ -91,7 +93,7 @@ def test_main_app_has_rate_limiter():
     from src.downloader.main import app
 
     # App should have limiter in state
-    assert hasattr(app.state, 'limiter')
+    assert hasattr(app.state, "limiter")
     assert app.state.limiter is not None
 
 

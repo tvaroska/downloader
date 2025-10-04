@@ -40,9 +40,7 @@ class TestPlaywrightPDFGenerator:
 
         generator = PlaywrightPDFGenerator()
 
-        with pytest.raises(
-            PDFGeneratorError, match="PDF generator initialization failed"
-        ):
+        with pytest.raises(PDFGeneratorError, match="PDF generator initialization failed"):
             await generator.start()
 
     @pytest.mark.asyncio
@@ -212,9 +210,7 @@ class TestGlobalPDFFunctions:
     @pytest.mark.asyncio
     async def test_generate_pdf_from_url(self):
         """Test generate_pdf_from_url function."""
-        with patch(
-            "src.downloader.pdf_generator.get_pdf_generator"
-        ) as mock_get_generator:
+        with patch("src.downloader.pdf_generator.get_pdf_generator") as mock_get_generator:
             mock_generator = AsyncMock()
             mock_generator.generate_pdf = AsyncMock(return_value=b"PDF content")
 
@@ -226,9 +222,7 @@ class TestGlobalPDFFunctions:
             result = await generate_pdf_from_url("https://example.com")
 
             assert result == b"PDF content"
-            mock_generator.generate_pdf.assert_called_once_with(
-                "https://example.com", None
-            )
+            mock_generator.generate_pdf.assert_called_once_with("https://example.com", None)
 
     @pytest.mark.asyncio
     async def test_get_pdf_generator_creates_new(self):

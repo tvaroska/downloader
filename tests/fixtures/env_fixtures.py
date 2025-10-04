@@ -11,6 +11,7 @@ def env_no_auth():
     """Fixture to clear authentication environment variables."""
     with patch.dict(os.environ, {}, clear=True):
         from src.downloader.config import reload_settings
+
         reload_settings()
         yield
         reload_settings()
@@ -23,6 +24,7 @@ def env_with_auth():
     with patch.dict(os.environ, {"DOWNLOADER_KEY": "test-key"}, clear=True):
         # Need to reload settings here while env is patched
         from src.downloader.config import reload_settings
+
         reload_settings()
         yield
         # Cleanup
@@ -34,6 +36,7 @@ def env_with_redis():
     """Fixture to set Redis environment variables."""
     with patch.dict(os.environ, {"REDIS_URI": "redis://localhost:6379"}, clear=True):
         from src.downloader.config import reload_settings
+
         reload_settings()
         yield
         reload_settings()
@@ -46,6 +49,7 @@ def env_no_redis():
         if "REDIS_URI" in os.environ:
             del os.environ["REDIS_URI"]
         from src.downloader.config import reload_settings
+
         reload_settings()
         yield
         reload_settings()

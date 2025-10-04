@@ -1,7 +1,7 @@
 # REST API Downloader - User Journey Documentation
 
-**Document Version:** 1.0  
-**Last Updated:** January 2025  
+**Document Version:** 1.0
+**Last Updated:** January 2025
 **Status:** Active
 
 ## Overview
@@ -10,25 +10,25 @@ This document provides detailed user journey maps for each primary persona of th
 
 ## Journey Map Legend
 
-**Phases:** Discovery → Evaluation → Integration → Production → Optimization  
-**Emotions:** 😊 Positive, 😐 Neutral, 😟 Negative, 🤔 Uncertain  
-**Touchpoints:** Key interaction points with the service  
-**Actions:** Specific tasks and activities  
-**Pain Points:** Friction or challenges encountered  
-**Opportunities:** Areas for improvement or enhancement  
+**Phases:** Discovery → Evaluation → Integration → Production → Optimization
+**Emotions:** 😊 Positive, 😐 Neutral, 😟 Negative, 🤔 Uncertain
+**Touchpoints:** Key interaction points with the service
+**Actions:** Specific tasks and activities
+**Pain Points:** Friction or challenges encountered
+**Opportunities:** Areas for improvement or enhancement
 
 ---
 
 ## 1. Maya Chen - API Integration Developer Journey
 
 ### Journey Overview
-**Goal:** Integrate content extraction capabilities into SaaS product  
-**Duration:** 1-2 weeks from discovery to production  
-**Complexity:** Medium - requires API integration and error handling  
+**Goal:** Integrate content extraction capabilities into SaaS product
+**Duration:** 1-2 weeks from discovery to production
+**Complexity:** Medium - requires API integration and error handling
 
 ### Phase 1: Discovery & Initial Research (Days 1-2)
-**Emotion:** 🤔 → 😊  
-**Duration:** 4-8 hours  
+**Emotion:** 🤔 → 😊
+**Duration:** 4-8 hours
 
 **Trigger Events:**
 - Product manager requests content extraction feature
@@ -81,8 +81,8 @@ This document provides detailed user journey maps for each primary persona of th
 - 🔄 Include production deployment checklist
 
 ### Phase 2: Proof of Concept Development (Days 2-4)
-**Emotion:** 😊 → 😐 → 😊  
-**Duration:** 8-16 hours  
+**Emotion:** 😊 → 😐 → 😊
+**Duration:** 8-16 hours
 
 **Touchpoints:**
 - API endpoints (/{url}, /health)
@@ -137,8 +137,8 @@ This document provides detailed user journey maps for each primary persona of th
 - 🔄 Add rate limiting information to documentation
 
 ### Phase 3: Production Integration (Days 5-7)
-**Emotion:** 😐 → 😟 → 😊  
-**Duration:** 12-20 hours  
+**Emotion:** 😐 → 😟 → 😊
+**Duration:** 12-20 hours
 
 **Touchpoints:**
 - Production API endpoints
@@ -194,8 +194,8 @@ This document provides detailed user journey maps for each primary persona of th
 - 🔄 Improve production deployment documentation
 
 ### Phase 4: Ongoing Operations (Continuous)
-**Emotion:** 😊 → 😐 (maintenance)  
-**Duration:** Ongoing  
+**Emotion:** 😊 → 😐 (maintenance)
+**Duration:** Ongoing
 
 **Touchpoints:**
 - Daily API usage and monitoring
@@ -231,13 +231,13 @@ This document provides detailed user journey maps for each primary persona of th
 ## 2. David Rodriguez - Data Pipeline Engineer Journey
 
 ### Journey Overview
-**Goal:** Integrate batch content processing into ETL pipeline  
-**Duration:** 2-3 weeks from evaluation to production  
-**Complexity:** High - requires integration with existing data infrastructure  
+**Goal:** Integrate batch content processing into ETL pipeline
+**Duration:** 2-3 weeks from evaluation to production
+**Complexity:** High - requires integration with existing data infrastructure
 
 ### Phase 1: Requirements Analysis & Evaluation (Days 1-3)
-**Emotion:** 🤔 → 😊  
-**Duration:** 12-16 hours  
+**Emotion:** 🤔 → 😊
+**Duration:** 12-16 hours
 
 **Trigger Events:**
 - Need to scale existing web scraping infrastructure
@@ -287,8 +287,8 @@ This document provides detailed user journey maps for each primary persona of th
 - ✅ Detailed error reporting
 
 ### Phase 2: Pipeline Integration Development (Days 4-10)
-**Emotion:** 😐 → 😟 → 😊  
-**Duration:** 24-32 hours  
+**Emotion:** 😐 → 😟 → 😊
+**Duration:** 24-32 hours
 
 **Touchpoints:**
 - Batch API endpoint
@@ -339,8 +339,8 @@ This document provides detailed user journey maps for each primary persona of th
 - ✅ Reliable operation under load
 
 ### Phase 3: Production Deployment & Operations (Days 11-15)
-**Emotion:** 😐 → 😊  
-**Duration:** 16-24 hours  
+**Emotion:** 😐 → 😊
+**Duration:** 16-24 hours
 
 **Touchpoints:**
 - Production batch processing
@@ -380,8 +380,8 @@ This document provides detailed user journey maps for each primary persona of th
 - ✅ Predictable performance and costs
 
 ### Phase 4: Optimization & Scaling (Ongoing)
-**Emotion:** 😊  
-**Duration:** Ongoing  
+**Emotion:** 😊
+**Duration:** Ongoing
 
 **Actions & Thoughts:**
 1. **Performance Monitoring** (daily)
@@ -404,13 +404,13 @@ This document provides detailed user journey maps for each primary persona of th
 ## 3. Sarah Kim - DevOps Platform Engineer Journey
 
 ### Journey Overview
-**Goal:** Deploy secure, scalable content extraction service  
-**Duration:** 1-2 weeks from evaluation to production  
-**Complexity:** Medium-High - requires security, monitoring, and operational setup  
+**Goal:** Deploy secure, scalable content extraction service
+**Duration:** 1-2 weeks from evaluation to production
+**Complexity:** Medium-High - requires security, monitoring, and operational setup
 
 ### Phase 1: Security & Compliance Evaluation (Days 1-3)
-**Emotion:** 🤔 → 😊  
-**Duration:** 12-20 hours  
+**Emotion:** 🤔 → 😊
+**Duration:** 12-20 hours
 
 **Trigger Events:**
 - Business requirement for content extraction capabilities
@@ -460,8 +460,8 @@ This document provides detailed user journey maps for each primary persona of th
 - ✅ Good security documentation
 
 ### Phase 2: Deployment Infrastructure Setup (Days 4-7)
-**Emotion:** 😐 → 😊  
-**Duration:** 16-24 hours  
+**Emotion:** 😐 → 😊
+**Duration:** 16-24 hours
 
 **Touchpoints:**
 - Kubernetes deployment manifests
@@ -506,8 +506,8 @@ This document provides detailed user journey maps for each primary persona of th
 - ✅ Predictable resource requirements
 
 ### Phase 3: Production Operations Setup (Days 8-10)
-**Emotion:** 😊  
-**Duration:** 12-16 hours  
+**Emotion:** 😊
+**Duration:** 12-16 hours
 
 **Touchpoints:**
 - Production environment
@@ -547,8 +547,8 @@ This document provides detailed user journey maps for each primary persona of th
 - ✅ Predictable performance and resource usage
 
 ### Phase 4: Ongoing Operations (Continuous)
-**Emotion:** 😊  
-**Duration:** Ongoing  
+**Emotion:** 😊
+**Duration:** Ongoing
 
 **Actions & Thoughts:**
 1. **Daily Operations** (15-30 minutes/day)
@@ -572,13 +572,13 @@ This document provides detailed user journey maps for each primary persona of th
 ## 4. Alex Thompson - Content Research Analyst Journey
 
 ### Journey Overview
-**Goal:** Automate content collection for competitive research  
-**Duration:** 3-5 days from discovery to regular usage  
-**Complexity:** Low-Medium - requires basic API usage and automation  
+**Goal:** Automate content collection for competitive research
+**Duration:** 3-5 days from discovery to regular usage
+**Complexity:** Low-Medium - requires basic API usage and automation
 
 ### Phase 1: Discovery & Quick Evaluation (Day 1)
-**Emotion:** 🤔 → 😊  
-**Duration:** 2-4 hours  
+**Emotion:** 🤔 → 😊
+**Duration:** 2-4 hours
 
 **Trigger Events:**
 - Manual content collection becoming too time-consuming
@@ -619,8 +619,8 @@ This document provides detailed user journey maps for each primary persona of th
 - ✅ Clear documentation with examples
 
 ### Phase 2: Basic Automation Setup (Days 2-3)
-**Emotion:** 😐 → 😊  
-**Duration:** 4-6 hours  
+**Emotion:** 😐 → 😊
+**Duration:** 4-6 hours
 
 **Touchpoints:**
 - Python scripts or Jupyter notebooks
@@ -654,8 +654,8 @@ This document provides detailed user journey maps for each primary persona of th
 - ✅ Significant time savings in workflow
 
 ### Phase 3: Regular Usage & Optimization (Days 4-5+)
-**Emotion:** 😊  
-**Duration:** Ongoing  
+**Emotion:** 😊
+**Duration:** Ongoing
 
 **Actions & Thoughts:**
 1. **Regular Project Usage** (daily/weekly)

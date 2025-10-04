@@ -3,7 +3,6 @@
 import pytest
 from fastapi.testclient import TestClient
 
-from src.downloader.config import reload_settings
 from src.downloader.main import app
 
 

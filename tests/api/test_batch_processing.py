@@ -13,7 +13,10 @@ client = TestClient(app)
 class TestBatchProcessing:
     """Test core batch processing functionality."""
 
-    @patch("src.downloader.api.process_background_batch_job", new_callable=AsyncMock)
+    @patch(
+        "src.downloader.api.process_background_batch_job",
+        new_callable=AsyncMock,
+    )
     @patch("src.downloader.api.get_client")
     def test_batch_available_with_redis(
         self,
@@ -39,7 +42,10 @@ class TestBatchProcessing:
             assert data["job_id"] == "test_job_id"
             assert data["status"] == "pending"
 
-    @patch("src.downloader.api.process_background_batch_job", new_callable=AsyncMock)
+    @patch(
+        "src.downloader.api.process_background_batch_job",
+        new_callable=AsyncMock,
+    )
     @patch("src.downloader.api.get_client")
     def test_batch_basic_success(
         self,
@@ -69,10 +75,17 @@ class TestBatchProcessing:
             data = response.json()
             assert data["job_id"] is not None
 
-    @patch("src.downloader.api.process_background_batch_job", new_callable=AsyncMock)
+    @patch(
+        "src.downloader.api.process_background_batch_job",
+        new_callable=AsyncMock,
+    )
     @patch("src.downloader.api.get_client")
     def test_batch_mixed_success_failure(
-        self, mock_get_client, mock_process_job, env_with_redis, mock_job_manager
+        self,
+        mock_get_client,
+        mock_process_job,
+        env_with_redis,
+        mock_job_manager,
     ):
         """Test batch processing with mix of successful and failed URLs."""
         from src.downloader.http_client import HTTPClientError
@@ -109,7 +122,10 @@ class TestBatchProcessing:
             assert response.status_code == 200
             assert response.json()["job_id"] is not None
 
-    @patch("src.downloader.api.process_background_batch_job", new_callable=AsyncMock)
+    @patch(
+        "src.downloader.api.process_background_batch_job",
+        new_callable=AsyncMock,
+    )
     @patch("src.downloader.api.get_client")
     def test_batch_different_formats(
         self,
@@ -122,7 +138,10 @@ class TestBatchProcessing:
     ):
         """Test batch processing with different output formats."""
         mock_client = AsyncMock()
-        mock_client.download.return_value = (sample_html_content, sample_metadata)
+        mock_client.download.return_value = (
+            sample_html_content,
+            sample_metadata,
+        )
         mock_get_client.return_value = mock_client
 
         with patch("src.downloader.api.get_job_manager", return_value=mock_job_manager):
@@ -140,12 +159,21 @@ class TestBatchProcessing:
             assert response.status_code == 200
             assert response.json()["job_id"] is not None
 
-    @patch("src.downloader.api.process_background_batch_job", new_callable=AsyncMock)
+    @patch(
+        "src.downloader.api.process_background_batch_job",
+        new_callable=AsyncMock,
+    )
     @patch("src.downloader.api.get_client")
     @patch("src.downloader.api.generate_pdf_from_url")
-    def test_batch_pdf_format(self, mock_generate_pdf, mock_get_client,
-                               mock_process_job, env_with_redis, mock_job_manager,
-                               mock_http_client):
+    def test_batch_pdf_format(
+        self,
+        mock_generate_pdf,
+        mock_get_client,
+        mock_process_job,
+        env_with_redis,
+        mock_job_manager,
+        mock_http_client,
+    ):
         """Test batch processing with PDF format."""
         mock_get_client.return_value = mock_http_client
 
@@ -162,10 +190,18 @@ class TestBatchProcessing:
             assert response.status_code == 200
             assert response.json()["job_id"] is not None
 
-    @patch("src.downloader.api.process_background_batch_job", new_callable=AsyncMock)
+    @patch(
+        "src.downloader.api.process_background_batch_job",
+        new_callable=AsyncMock,
+    )
     @patch("src.downloader.api.get_client")
-    def test_batch_timeout_handling(self, mock_get_client, mock_process_job,
-                                     env_with_redis, mock_job_manager):
+    def test_batch_timeout_handling(
+        self,
+        mock_get_client,
+        mock_process_job,
+        env_with_redis,
+        mock_job_manager,
+    ):
         """Test batch processing with timeout scenarios."""
         from src.downloader.http_client import HTTPTimeoutError
 
@@ -184,10 +220,18 @@ class TestBatchProcessing:
             assert response.status_code == 200
             assert response.json()["job_id"] is not None
 
-    @patch("src.downloader.api.process_background_batch_job", new_callable=AsyncMock)
+    @patch(
+        "src.downloader.api.process_background_batch_job",
+        new_callable=AsyncMock,
+    )
     @patch("src.downloader.api.get_client")
-    def test_batch_concurrency_control(self, mock_get_client, mock_process_job,
-                                        env_with_redis, mock_job_manager):
+    def test_batch_concurrency_control(
+        self,
+        mock_get_client,
+        mock_process_job,
+        env_with_redis,
+        mock_job_manager,
+    ):
         """Test batch processing respects concurrency limits."""
         download_times = []
 
@@ -224,10 +268,18 @@ class TestBatchProcessing:
             assert response.status_code == 200
             assert response.json()["job_id"] is not None
 
-    @patch("src.downloader.api.process_background_batch_job", new_callable=AsyncMock)
+    @patch(
+        "src.downloader.api.process_background_batch_job",
+        new_callable=AsyncMock,
+    )
     @patch("src.downloader.api.get_client")
-    def test_batch_large_content_handling(self, mock_get_client, mock_process_job,
-                                           env_with_redis, mock_job_manager):
+    def test_batch_large_content_handling(
+        self,
+        mock_get_client,
+        mock_process_job,
+        env_with_redis,
+        mock_job_manager,
+    ):
         """Test batch processing handles large content properly."""
         large_content = b"<html>" + b"x" * 10000 + b"</html>"
 

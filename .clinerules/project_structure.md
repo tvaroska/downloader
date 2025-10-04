@@ -226,7 +226,7 @@ project-name/
 - Simple, focused demonstrations
 - Learning-oriented tutorials
 
-### Advanced Examples  
+### Advanced Examples
 - Complex scenarios and patterns
 - Performance and optimization
 

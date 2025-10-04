@@ -4,23 +4,20 @@ import asyncio
 import base64
 import json
 import logging
-import os
 from datetime import datetime, timedelta, timezone
 from typing import Any
 
 from fastapi import APIRouter, Depends, HTTPException, Path, Request, Response
 
 from ..auth import get_api_key
-from ..content_converter import (
-    convert_content_to_markdown,
-    convert_content_to_text,
+from ..content_converter import convert_content_to_markdown, convert_content_to_text
+from ..dependencies import (
+    BatchSemaphoreDep,
+    HTTPClientDep,
+    JobManagerDep,
+    PDFSemaphoreDep,
 )
-from ..dependencies import HTTPClientDep, JobManagerDep, PDFSemaphoreDep, BatchSemaphoreDep
-from ..http_client import (
-    HTTPClientError,
-    HTTPTimeoutError,
-    RequestPriority,
-)
+from ..http_client import HTTPClientError, HTTPTimeoutError, RequestPriority
 from ..job_manager import JobStatus
 from ..models.responses import (
     BatchRequest,
@@ -45,7 +42,7 @@ async def process_single_url_in_batch(
     timeout: int,
     request_id: str,
     http_client,
-    pdf_semaphore
+    pdf_semaphore,
 ) -> BatchURLResult:
     """
     Process a single URL within a batch request.
@@ -69,15 +66,19 @@ async def process_single_url_in_batch(
         )
 
         content, metadata = await asyncio.wait_for(
-            http_client.download(validated_url, RequestPriority.LOW), timeout=timeout
+            http_client.download(validated_url, RequestPriority.LOW),
+            timeout=timeout,
         )
 
         if format_to_use == "text":
-            processed_content = convert_content_to_text(
-                content, metadata["content_type"]
-            )
+            processed_content = convert_content_to_text(content, metadata["content_type"])
             processed_content = await _playwright_fallback_for_content(
-                validated_url, processed_content, content, metadata["content_type"], "text", request_id
+                validated_url,
+                processed_content,
+                content,
+                metadata["content_type"],
+                "text",
+                request_id,
             )
 
             duration = asyncio.get_event_loop().time() - start_time
@@ -93,11 +94,14 @@ async def process_single_url_in_batch(
             )
 
         elif format_to_use == "markdown":
-            processed_content = convert_content_to_markdown(
-                content, metadata["content_type"]
-            )
+            processed_content = convert_content_to_markdown(content, metadata["content_type"])
             processed_content = await _playwright_fallback_for_content(
-                validated_url, processed_content, content, metadata["content_type"], "markdown", request_id
+                validated_url,
+                processed_content,
+                content,
+                metadata["content_type"],
+                "markdown",
+                request_id,
             )
 
             duration = asyncio.get_event_loop().time() - start_time
@@ -268,7 +272,12 @@ async def process_single_url_in_batch(
 
 
 async def process_background_batch_job(
-    job_id: str, batch_request: BatchRequest, job_manager, batch_semaphore, http_client, pdf_semaphore
+    job_id: str,
+    batch_request: BatchRequest,
+    job_manager,
+    batch_semaphore,
+    http_client,
+    pdf_semaphore,
 ) -> tuple[list[dict], dict]:
     """
     Process batch job in background.
@@ -286,13 +295,13 @@ async def process_background_batch_job(
     """
     start_time = asyncio.get_event_loop().time()
 
-    logger.info(f"[JOB-{job_id}] Starting background batch processing: {len(batch_request.urls)} URLs")
+    logger.info(
+        f"[JOB-{job_id}] Starting background batch processing: {len(batch_request.urls)} URLs"
+    )
 
     request_semaphore = asyncio.Semaphore(batch_request.concurrency_limit)
 
-    async def process_with_semaphore(
-        url_request: BatchURLRequest, index: int
-    ) -> BatchURLResult:
+    async def process_with_semaphore(url_request: BatchURLRequest, index: int) -> BatchURLResult:
         """Process a single URL with concurrency control."""
         async with request_semaphore:
             async with batch_semaphore:
@@ -308,8 +317,7 @@ async def process_background_batch_job(
                 return result
 
     tasks = [
-        process_with_semaphore(url_request, i)
-        for i, url_request in enumerate(batch_request.urls)
+        process_with_semaphore(url_request, i) for i, url_request in enumerate(batch_request.urls)
     ]
 
     results = await asyncio.gather(*tasks, return_exceptions=False)
@@ -326,7 +334,7 @@ async def process_background_batch_job(
         progress=100,
         processed_urls=len(results),
         successful_urls=len(successful_results),
-        failed_urls=len(failed_results)
+        failed_urls=len(failed_results),
     )
 
     logger.info(
@@ -389,7 +397,7 @@ async def submit_batch_job(
             job_manager,
             batch_semaphore,
             http_client,
-            pdf_semaphore
+            pdf_semaphore,
         )
 
         logger.info(f"[JOB-{job_id}] Submitted batch job with {len(batch_request.urls)} URLs")
@@ -593,9 +601,15 @@ async def cancel_job(
 
         if cancelled:
             logger.info(f"Successfully cancelled job {job_id}")
-            return {"success": True, "message": f"Job {job_id} cancelled successfully"}
+            return {
+                "success": True,
+                "message": f"Job {job_id} cancelled successfully",
+            }
         else:
-            return {"success": False, "message": f"Job {job_id} could not be cancelled (may already be completed)"}
+            return {
+                "success": False,
+                "message": f"Job {job_id} could not be cancelled (may already be completed)",
+            }
 
     except HTTPException:
         raise

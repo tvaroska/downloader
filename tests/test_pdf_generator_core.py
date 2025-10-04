@@ -1,12 +1,8 @@
 """Tests for core PDF generation functionality."""
 
-
 import pytest
 
-from src.downloader.pdf_generator import (
-    PDFGeneratorError,
-    PlaywrightPDFGenerator,
-)
+from src.downloader.pdf_generator import PDFGeneratorError, PlaywrightPDFGenerator
 
 
 class TestPlaywrightPDFGenerator:
@@ -35,9 +31,7 @@ class TestPlaywrightPDFGenerator:
 
         generator = PlaywrightPDFGenerator()
 
-        with pytest.raises(
-            PDFGeneratorError, match="PDF generator initialization failed"
-        ):
+        with pytest.raises(PDFGeneratorError, match="PDF generator initialization failed"):
             await generator.start()
 
     @pytest.mark.asyncio

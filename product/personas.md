@@ -1,7 +1,7 @@
 # REST API Downloader - User Personas & Market Analysis
 
-**Document Version:** 1.0  
-**Last Updated:** January 2025  
+**Document Version:** 1.0
+**Last Updated:** January 2025
 **Status:** Active
 
 ## Executive Summary
@@ -36,7 +36,7 @@ Maya works at a content management platform that helps marketing teams aggregate
 
 **Goals & Motivations:**
 - **Primary Goal:** Build reliable content ingestion pipelines for her company's product
-- **Secondary Goals:** 
+- **Secondary Goals:**
   - Minimize development time for content extraction features
   - Ensure consistent content quality across different websites
   - Handle various content formats (HTML, markdown, PDF) seamlessly

@@ -24,9 +24,7 @@ def mock_http_client():
             "headers": {"content-type": "text/html"},
         },
     )
-    with patch(
-        "src.downloader.api.get_client", return_value=mock_client
-    ) as mock_get_client:
+    with patch("src.downloader.api.get_client", return_value=mock_client) as mock_get_client:
         yield mock_get_client
 
 
@@ -127,7 +125,11 @@ class TestDownloadEndpoint:
         "error, expected_status, expected_error_type",
         [
             (HTTPTimeoutError("Request timed out"), 408, "timeout_error"),
-            (HTTPClientError("HTTP 404: Not Found", status_code=404), 404, "http_error"),
+            (
+                HTTPClientError("HTTP 404: Not Found", status_code=404),
+                404,
+                "http_error",
+            ),
         ],
     )
     def test_download_client_errors(self, error, expected_status, expected_error_type):
@@ -143,8 +145,10 @@ class TestDownloadEndpoint:
             assert data["error_type"] == expected_error_type
 
     def test_download_pdf_format(self):
-        with patch("src.downloader.api.get_client") as mock_get_client, \
-             patch("src.downloader.api.generate_pdf_from_url") as mock_generate_pdf:
+        with (
+            patch("src.downloader.api.get_client") as mock_get_client,
+            patch("src.downloader.api.generate_pdf_from_url") as mock_generate_pdf,
+        ):
             # Mock HTTP client
             mock_client = AsyncMock()
             mock_client.download.return_value = (
@@ -163,9 +167,7 @@ class TestDownloadEndpoint:
             pdf_content = b"%PDF-1.4 fake pdf content"
             mock_generate_pdf.return_value = pdf_content
 
-            response = client.get(
-                "/https://example.com", headers={"Accept": "application/pdf"}
-            )
+            response = client.get("/https://example.com", headers={"Accept": "application/pdf"})
             assert response.status_code == 200
             assert response.headers["content-type"] == "application/pdf"
             assert "Content-Disposition" in response.headers
@@ -177,8 +179,10 @@ class TestDownloadEndpoint:
     def test_download_pdf_generation_error(self):
         from src.downloader.pdf_generator import PDFGeneratorError
 
-        with patch("src.downloader.api.get_client") as mock_get_client, \
-             patch("src.downloader.api.generate_pdf_from_url") as mock_generate_pdf:
+        with (
+            patch("src.downloader.api.get_client") as mock_get_client,
+            patch("src.downloader.api.generate_pdf_from_url") as mock_generate_pdf,
+        ):
             # Mock HTTP client
             mock_client = AsyncMock()
             mock_client.download.return_value = (
@@ -196,9 +200,7 @@ class TestDownloadEndpoint:
             # Mock PDF generation failure
             mock_generate_pdf.side_effect = PDFGeneratorError("Browser failed to start")
 
-            response = client.get(
-                "/https://example.com", headers={"Accept": "application/pdf"}
-            )
+            response = client.get("/https://example.com", headers={"Accept": "application/pdf"})
             assert response.status_code == 500
             data = response.json()["detail"]
             assert data["success"] is False
@@ -207,8 +209,10 @@ class TestDownloadEndpoint:
 
     def test_download_pdf_service_unavailable(self):
         """Test PDF service unavailable when at capacity."""
-        with patch("src.downloader.api.get_client") as mock_get_client, \
-             patch("src.downloader.api.PDF_SEMAPHORE") as mock_semaphore:
+        with (
+            patch("src.downloader.api.get_client") as mock_get_client,
+            patch("src.downloader.api.PDF_SEMAPHORE") as mock_semaphore,
+        ):
             # Mock HTTP client
             mock_client = AsyncMock()
             mock_client.download.return_value = (
@@ -226,9 +230,7 @@ class TestDownloadEndpoint:
             # Mock semaphore to be locked (at capacity)
             mock_semaphore.locked.return_value = True
 
-            response = client.get(
-                "/https://example.com", headers={"Accept": "application/pdf"}
-            )
+            response = client.get("/https://example.com", headers={"Accept": "application/pdf"})
 
             assert response.status_code == 503
             data = response.json()["detail"]
@@ -248,7 +250,11 @@ class TestDownloadEndpoint:
         "headers, expected_status, expected_error_type",
         [
             (None, 401, "authentication_required"),
-            ({"Authorization": "Bearer wrong-key"}, 401, "authentication_failed"),
+            (
+                {"Authorization": "Bearer wrong-key"},
+                401,
+                "authentication_failed",
+            ),
             ({"X-API-Key": "wrong-key"}, 401, "authentication_failed"),
         ],
     )

@@ -62,8 +62,14 @@ class PDFRequestResult:
         self.pdf_size: int = 0
         self.file_path: str = ""
 
-    def finish(self, success: bool, status_code: int = 0, error: str = "",
-               pdf_size: int = 0, file_path: str = ""):
+    def finish(
+        self,
+        success: bool,
+        status_code: int = 0,
+        error: str = "",
+        pdf_size: int = 0,
+        file_path: str = "",
+    ):
         """Mark the request as finished and calculate metrics."""
         self.end_time = time.time()
         self.duration = self.end_time - self.start_time
@@ -83,7 +89,7 @@ class PDFRequestResult:
             "error": self.error,
             "pdf_size": self.pdf_size,
             "file_path": self.file_path,
-            "timestamp": datetime.fromtimestamp(self.start_time).isoformat()
+            "timestamp": datetime.fromtimestamp(self.start_time).isoformat(),
         }
 
 
@@ -128,7 +134,7 @@ async def generate_pdf_request(
         response = await client.get(
             f"{BASE_URL}/{url}",
             headers={"Accept": "application/pdf"},
-            timeout=REQUEST_TIMEOUT
+            timeout=REQUEST_TIMEOUT,
         )
 
         if response.status_code == 200:
@@ -139,7 +145,9 @@ async def generate_pdf_request(
             if SAVE_PDFS:
                 # Save PDF to file
                 OUTPUT_DIR.mkdir(exist_ok=True)
-                filename = f"request_{request_id:02d}_{url.replace('https://', '').replace('/', '_')}.pdf"
+                filename = (
+                    f"request_{request_id:02d}_{url.replace('https://', '').replace('/', '_')}.pdf"
+                )
                 file_path = OUTPUT_DIR / filename
 
                 with open(file_path, "wb") as f:
@@ -151,22 +159,26 @@ async def generate_pdf_request(
                 success=True,
                 status_code=200,
                 pdf_size=pdf_size,
-                file_path=file_path
+                file_path=file_path,
             )
-            print(f"✅ [{request_id:02d}] PDF generated successfully: {pdf_size:,} bytes in {result.duration:.2f}s")
+            print(
+                f"✅ [{request_id:02d}] PDF generated successfully: {pdf_size:,} bytes in {result.duration:.2f}s"
+            )
 
         else:
             # Handle HTTP errors
             try:
                 error_data = response.json()
-                error_msg = error_data.get("detail", {}).get("error", f"HTTP {response.status_code}")
+                error_msg = error_data.get("detail", {}).get(
+                    "error", f"HTTP {response.status_code}"
+                )
             except:
                 error_msg = f"HTTP {response.status_code}: {response.text[:100]}"
 
             result.finish(
                 success=False,
                 status_code=response.status_code,
-                error=error_msg
+                error=error_msg,
             )
             print(f"❌ [{request_id:02d}] PDF generation failed: {error_msg}")
 
@@ -184,7 +196,7 @@ async def generate_pdf_request(
 async def run_concurrent_pdf_test() -> list[PDFRequestResult]:
     """
     Run concurrent PDF generation requests and collect results.
-    
+
     Returns:
         List of PDFRequestResult objects with timing and outcome data
     """
@@ -209,7 +221,9 @@ async def run_concurrent_pdf_test() -> list[PDFRequestResult]:
 
         # Start timer and run all requests concurrently
         start_time = time.time()
-        print(f"🏁 Starting {len(tasks)} concurrent requests at {datetime.now().strftime('%H:%M:%S')}")
+        print(
+            f"🏁 Starting {len(tasks)} concurrent requests at {datetime.now().strftime('%H:%M:%S')}"
+        )
 
         # Execute all requests concurrently
         results = await asyncio.gather(*tasks, return_exceptions=False)
@@ -244,21 +258,23 @@ def analyze_results(results: list[PDFRequestResult]) -> dict[str, Any]:
         durations = [r.duration for r in successful_results]
         pdf_sizes = [r.pdf_size for r in successful_results]
 
-        analysis.update({
-            "timing_stats": {
-                "min_duration": min(durations),
-                "max_duration": max(durations),
-                "avg_duration": statistics.mean(durations),
-                "median_duration": statistics.median(durations),
-                "total_duration": sum(durations)
-            },
-            "size_stats": {
-                "min_pdf_size": min(pdf_sizes),
-                "max_pdf_size": max(pdf_sizes),
-                "avg_pdf_size": statistics.mean(pdf_sizes),
-                "total_pdf_size": sum(pdf_sizes)
+        analysis.update(
+            {
+                "timing_stats": {
+                    "min_duration": min(durations),
+                    "max_duration": max(durations),
+                    "avg_duration": statistics.mean(durations),
+                    "median_duration": statistics.median(durations),
+                    "total_duration": sum(durations),
+                },
+                "size_stats": {
+                    "min_pdf_size": min(pdf_sizes),
+                    "max_pdf_size": max(pdf_sizes),
+                    "avg_pdf_size": statistics.mean(pdf_sizes),
+                    "total_pdf_size": sum(pdf_sizes),
+                },
             }
-        })
+        )
 
         # Calculate requests per second
         if durations:
@@ -277,9 +293,9 @@ def analyze_results(results: list[PDFRequestResult]) -> dict[str, Any]:
 
 def print_results_summary(results: list[PDFRequestResult], analysis: dict[str, Any]):
     """Print a formatted summary of the test results."""
-    print("\n" + "="*80)
+    print("\n" + "=" * 80)
     print("📊 CONCURRENT PDF GENERATION TEST RESULTS")
-    print("="*80)
+    print("=" * 80)
 
     # Overview
     print("📈 Overview:")
@@ -332,15 +348,17 @@ async def save_detailed_results(results: list[PDFRequestResult], analysis: dict[
             "concurrent_requests": CONCURRENT_REQUESTS,
             "request_timeout": REQUEST_TIMEOUT,
             "test_urls": TEST_URLS,
-            "save_pdfs": SAVE_PDFS
+            "save_pdfs": SAVE_PDFS,
         },
         "test_timestamp": datetime.now().isoformat(),
         "analysis": analysis,
-        "individual_results": [result.to_dict() for result in results]
+        "individual_results": [result.to_dict() for result in results],
     }
 
     OUTPUT_DIR.mkdir(exist_ok=True)
-    results_file = OUTPUT_DIR / f"concurrent_pdf_test_{datetime.now().strftime('%Y%m%d_%H%M%S')}.json"
+    results_file = (
+        OUTPUT_DIR / f"concurrent_pdf_test_{datetime.now().strftime('%Y%m%d_%H%M%S')}.json"
+    )
 
     with open(results_file, "w") as f:
         json.dump(output_data, f, indent=2)

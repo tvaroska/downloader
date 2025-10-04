@@ -1,0 +1,68 @@
+{
+  "job_id": "97389df3-e8a3-4c09-8f7c-98327fdc5678",
+  "status": "running",
+  "total_duration": 0.0,
+  "results": [
+    {
+      "url": "https://koomen.dev/essays/horseless-carriages/",
+      "success": true,
+      "format": "text",
+      "content": "\u001b\u0003\ufffdrjn\u0011C\bEuZ8\u0003\u0016y\u001a8l(H0=5JOY[@} #G@:,NW ;&wR\u0001?`\u0001(7v| $ELaRo ?[`wzx]m 9iDtz\u0003RdQ\ufffdXo\u0013Oqr\u0764/]J)Tc92\u0002? \u0221\u03c6\u0004\u000f Z\u0002!Rw\u0652dI/\u078b8Q8h#4\u0004%\u0017#$H\u03f8TNx(q \u0016W?KWbX\u000e` 1J7+)\u01e1L@\u001a(\u00c7JZ\u026au\ufffd5\u007f\u05a2Ju>-/\\_\"\u0015 ~&jGMt$\u016b9&d]f\u0004z\u0004%g{\u0664%7W\u0001",
+      "content_base64": null,
+      "size": 211,
+      "content_type": "text/html; charset=utf-8",
+      "duration": 0.2300000000000182,
+      "error": null,
+      "error_type": null,
+      "status_code": 200
+    },
+    {
+      "url": "https://koomen.dev/essays/horseless-carriages/",
+      "success": true,
+      "format": "markdown",
+      "content": "\u001b\u0003\ufffdrjn\u0011C\bEuZ8\u0003\u0016y\u001a8l(H0=5JOY[@}\u001c#G@:,NW\n\u001f;&wR\u0001?`\u0001(7v|\u001f$ELaRo\u001c?[`wzx]m\f\u001e9iDtz\u0003RdQ\ufffdXo\u0013Oqr\u0764/]J)Tc92\u0002?\u000b\u0221\u03c6\u0004\u000f\u001fZ\u0002!Rw\u0652dI/\u078b8Q8h#4\u0004%\u0017#$H\u03f8TNx(q\u001d\u0016W?KWbX\u000e`\t\u001f1J7+)\u01e1L@\u001a(\u00c7JZ\u026au\ufffd5\u007f\u05a2Ju>-/\\_\"\u0015\u001d~&jGMt$\u016b9&d]f\u0004z\u0004%g{\u0664%7W\u0001",
+      "content_base64": null,
+      "size": 214,
+      "content_type": "text/html; charset=utf-8",
+      "duration": 0.23099999999976717,
+      "error": null,
+      "error_type": null,
+      "status_code": 200
+    },
+    {
+      "url": "https://httpbin.org/json",
+      "success": true,
+      "format": "json",
+      "content": "{\"success\": true, \"url\": \"https://httpbin.org/json\", \"size\": 429, \"content_type\": \"application/json\", \"content\": \"ewogICJzbGlkZXNob3ciOiB7CiAgICAiYXV0aG9yIjogIllvdXJzIFRydWx5IiwgCiAgICAiZGF0ZSI6ICJkYXRlIG9mIHB1YmxpY2F0aW9uIiwgCiAgICAic2xpZGVzIjogWwogICAgICB7CiAgICAgICAgInRpdGxlIjogIldha2UgdXAgdG8gV29uZGVyV2lkZ2V0cyEiLCAKICAgICAgICAidHlwZSI6ICJhbGwiCiAgICAgIH0sIAogICAgICB7CiAgICAgICAgIml0ZW1zIjogWwogICAgICAgICAgIldoeSA8ZW0+V29uZGVyV2lkZ2V0czwvZW0+IGFyZSBncmVhdCIsIAogICAgICAgICAgIldobyA8ZW0+YnV5czwvZW0+IFdvbmRlcldpZGdldHMiCiAgICAgICAgXSwgCiAgICAgICAgInRpdGxlIjogIk92ZXJ2aWV3IiwgCiAgICAgICAgInR5cGUiOiAiYWxsIgogICAgICB9CiAgICBdLCAKICAgICJ0aXRsZSI6ICJTYW1wbGUgU2xpZGUgU2hvdyIKICB9Cn0K\", \"metadata\": {\"status_code\": 200, \"headers\": {\"date\": \"Sat, 04 Oct 2025 15:43:01 GMT\", \"content-type\": \"application/json\", \"content-length\": \"429\", \"server\": \"gunicorn/19.9.0\", \"access-control-allow-origin\": \"*\", \"access-control-allow-credentials\": \"true\"}, \"url\": \"https://httpbin.org/json\", \"size\": 429, \"content_type\": \"application/json\", \"http_version\": \"HTTP/2\", \"connection_reused\": null}}",
+      "content_base64": null,
+      "size": 1083,
+      "content_type": "application/json",
+      "duration": 1.1340000000000146,
+      "error": null,
+      "error_type": null,
+      "status_code": 200
+    },
+    {
+      "url": "https://example.com",
+      "success": true,
+      "format": "html",
+      "content": "<!doctype html>\n<html>\n<head>\n    <title>Example Domain</title>\n\n    <meta charset=\"utf-8\" />\n    <meta http-equiv=\"Content-type\" content=\"text/html; charset=utf-8\" />\n    <meta name=\"viewport\" content=\"width=device-width, initial-scale=1\" />\n    <style type=\"text/css\">\n    body {\n        background-color: #f0f0f2;\n        margin: 0;\n        padding: 0;\n        font-family: -apple-system, system-ui, BlinkMacSystemFont, \"Segoe UI\", \"Open Sans\", \"Helvetica Neue\", Helvetica, Arial, sans-serif;\n        \n    }\n    div {\n        width: 600px;\n        margin: 5em auto;\n        padding: 2em;\n        background-color: #fdfdff;\n        border-radius: 0.5em;\n        box-shadow: 2px 3px 7px 2px rgba(0,0,0,0.02);\n    }\n    a:link, a:visited {\n        color: #38488f;\n        text-decoration: none;\n    }\n    @media (max-width: 700px) {\n        div {\n            margin: 0 auto;\n            width: auto;\n        }\n    }\n    </style>    \n</head>\n\n<body>\n<div>\n    <h1>Example Domain</h1>\n    <p>This domain is for use in illustrative examples in documents. You may use this\n    domain in literature without prior coordination or asking for permission.</p>\n    <p><a href=\"https://www.iana.org/domains/example\">More information...</a></p>\n</div>\n</body>\n</html>\n",
+      "content_base64": null,
+      "size": 1256,
+      "content_type": "text/html",
+      "duration": 0.16700000000037107,
+      "error": null,
+      "error_type": null,
+      "status_code": 200
+    }
+  ],
+  "summary": {
+    "total_requests": 4,
+    "successful_requests": 4,
+    "failed_requests": 0,
+    "success_rate": 100.0,
+    "total_duration": 1.155999999999949
+  },
+  "created_at": "2025-10-04T15:43:00.692909Z",
+  "completed_at": "2025-10-04T15:43:01.857397Z"
+}

@@ -25,7 +25,7 @@ class CustomJsonFormatter(jsonlogger.JsonFormatter):
         self,
         log_record: dict[str, Any],
         record: logging.LogRecord,
-        message_dict: dict[str, Any]
+        message_dict: dict[str, Any],
     ) -> None:
         """Add custom fields to the log record."""
         super().add_fields(log_record, record, message_dict)
@@ -42,11 +42,28 @@ class CustomJsonFormatter(jsonlogger.JsonFormatter):
         # Add extra fields from record
         for key, value in record.__dict__.items():
             if key not in [
-                "name", "msg", "args", "created", "filename", "funcName",
-                "levelname", "levelno", "lineno", "module", "msecs",
-                "message", "pathname", "process", "processName",
-                "relativeCreated", "thread", "threadName", "exc_info",
-                "exc_text", "stack_info", "taskName"
+                "name",
+                "msg",
+                "args",
+                "created",
+                "filename",
+                "funcName",
+                "levelname",
+                "levelno",
+                "lineno",
+                "module",
+                "msecs",
+                "message",
+                "pathname",
+                "process",
+                "processName",
+                "relativeCreated",
+                "thread",
+                "threadName",
+                "exc_info",
+                "exc_text",
+                "stack_info",
+                "taskName",
             ]:
                 log_record[key] = value
 
@@ -62,13 +79,13 @@ def setup_logging(config: LoggingConfig) -> None:
         # JSON structured logging for production
         formatter = CustomJsonFormatter(
             "%(timestamp)s %(level)s %(logger)s %(message)s",
-            datefmt="%Y-%m-%d %H:%M:%S"
+            datefmt="%Y-%m-%d %H:%M:%S",
         )
     else:
         # Human-readable logging for development
         formatter = logging.Formatter(
             "%(asctime)s - %(name)s - %(levelname)s - %(message)s",
-            datefmt="%Y-%m-%d %H:%M:%S"
+            datefmt="%Y-%m-%d %H:%M:%S",
         )
 
     # Configure root logger
@@ -88,7 +105,7 @@ def setup_logging(config: LoggingConfig) -> None:
             filename=str(error_log_path),
             maxBytes=config.log_rotation_size,
             backupCount=config.log_rotation_count,
-            encoding="utf-8"
+            encoding="utf-8",
         )
         error_handler.setLevel(config.log_level)
         error_handler.setFormatter(formatter)
@@ -118,7 +135,7 @@ def setup_logging(config: LoggingConfig) -> None:
             filename=str(access_log_path),
             maxBytes=config.log_rotation_size,
             backupCount=config.log_rotation_count,
-            encoding="utf-8"
+            encoding="utf-8",
         )
         access_handler.setLevel(config.access_log_level)
 
@@ -129,7 +146,7 @@ def setup_logging(config: LoggingConfig) -> None:
             # Standard access log format
             access_formatter = logging.Formatter(
                 "%(asctime)s - %(levelname)s - %(message)s",
-                datefmt="%Y-%m-%d %H:%M:%S"
+                datefmt="%Y-%m-%d %H:%M:%S",
             )
             access_handler.setFormatter(access_formatter)
 
@@ -144,7 +161,7 @@ def setup_logging(config: LoggingConfig) -> None:
         else:
             access_formatter = logging.Formatter(
                 "%(asctime)s - %(levelname)s - %(message)s",
-                datefmt="%Y-%m-%d %H:%M:%S"
+                datefmt="%Y-%m-%d %H:%M:%S",
             )
             access_handler.setFormatter(access_formatter)
 

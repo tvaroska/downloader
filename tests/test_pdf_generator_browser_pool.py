@@ -4,10 +4,7 @@ from unittest.mock import AsyncMock
 
 import pytest
 
-from src.downloader.pdf_generator import (
-    PDFGeneratorError,
-    PlaywrightPDFGenerator,
-)
+from src.downloader.pdf_generator import PDFGeneratorError, PlaywrightPDFGenerator
 
 
 class TestPDFGeneratorBrowserPool:

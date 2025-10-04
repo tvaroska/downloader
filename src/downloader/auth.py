@@ -6,7 +6,7 @@ import os
 from fastapi import Depends, HTTPException, Request, status
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 
-from .config import Settings, get_settings
+from .config import Settings
 
 logger = logging.getLogger(__name__)
 
@@ -142,7 +142,10 @@ def get_auth_status(settings: Settings | None = None) -> dict:
 
     return {
         "auth_enabled": auth_enabled,
-        "auth_methods": ["Authorization: Bearer <api_key>", "X-API-Key: <api_key>"]
+        "auth_methods": [
+            "Authorization: Bearer <api_key>",
+            "X-API-Key: <api_key>",
+        ]
         if auth_enabled
         else None,
     }

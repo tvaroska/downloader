@@ -19,8 +19,31 @@ def docker_services():
         cwd=os.path.dirname(__file__),
     )
 
-    # Wait for services to be ready
-    time.sleep(5)
+    # Wait for services to be healthy (check healthcheck status)
+    max_attempts = 60  # 60 attempts * 2s = 2 minutes max wait
+    attempt = 0
+    while attempt < max_attempts:
+        result = subprocess.run(
+            ["docker-compose", "-f", compose_file, "ps", "--format", "json"],
+            capture_output=True,
+            text=True,
+            cwd=os.path.dirname(__file__),
+        )
+        if result.returncode == 0 and "healthy" in result.stdout:
+            break
+        attempt += 1
+        time.sleep(2)
+
+    if attempt >= max_attempts:
+        # Log container status before failing
+        subprocess.run(
+            ["docker-compose", "-f", compose_file, "logs"],
+            cwd=os.path.dirname(__file__),
+        )
+        raise RuntimeError("Services failed to become healthy within timeout")
+
+    # Extra grace period after health check passes
+    time.sleep(3)
 
     yield
 

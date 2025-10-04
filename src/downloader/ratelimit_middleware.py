@@ -6,12 +6,10 @@ request-level rate limiting based on endpoint patterns.
 
 import logging
 import re
-from typing import Callable
+from collections.abc import Callable
 
 from fastapi import Request, Response
 from slowapi import Limiter
-from slowapi.errors import RateLimitExceeded
-from slowapi.util import get_remote_address
 from starlette.middleware.base import BaseHTTPMiddleware
 
 from .config import get_settings
@@ -50,14 +48,17 @@ class RateLimitMiddleware(BaseHTTPMiddleware):
 
         return [
             # Status/metrics endpoints (high limit)
-            (re.compile(r"^/(health|metrics).*$"), self.settings.ratelimit.status_limit),
-
+            (
+                re.compile(r"^/(health|metrics).*$"),
+                self.settings.ratelimit.status_limit,
+            ),
             # Batch endpoints (medium limit)
             (re.compile(r"^/batch.*$"), self.settings.ratelimit.batch_limit),
-
             # Download endpoints (lower limit, resource-intensive)
-            (re.compile(r"^/[^/]+$"), self.settings.ratelimit.download_limit),  # /{url}
-
+            (
+                re.compile(r"^/[^/]+$"),
+                self.settings.ratelimit.download_limit,
+            ),  # /{url}
             # Default for everything else
             (re.compile(r".*"), self.settings.ratelimit.default_limit),
         ]

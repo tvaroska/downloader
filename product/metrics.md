@@ -12,7 +12,7 @@ This document defines the key performance indicators (KPIs) and success metrics 
 - **Mean Time Between Failures (MTBF)**: > 720 hours (30 days)
 - **Error Rate**: < 1% for valid requests under normal load
 
-**Measurement**: 
+**Measurement**:
 - Health check monitoring every 30 seconds
 - Synthetic transaction monitoring from multiple regions
 - Real user monitoring (RUM) for actual user experience

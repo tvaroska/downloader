@@ -57,10 +57,10 @@ def should_use_playwright_fallback(url: str, content: bytes, content_type: str) 
 
     # Fast content detection using BeautifulSoup
     try:
-        soup = BeautifulSoup(content, 'html.parser')
+        soup = BeautifulSoup(content, "html.parser")
 
         # Check for meaningful body content
-        body = soup.find('body')
+        body = soup.find("body")
         if not body:
             _empty_content_cache.add(url)
             return False
@@ -69,22 +69,16 @@ def should_use_playwright_fallback(url: str, content: bytes, content_type: str) 
         body_text = body.get_text(strip=True)
         if len(body_text) < 100:  # Less than 100 chars likely not useful
             _empty_content_cache.add(url)
-            logger.debug(
-                f"Caching empty content URL (body text: {len(body_text)} chars): {url}"
-            )
+            logger.debug(f"Caching empty content URL (body text: {len(body_text)} chars): {url}")
             return False
 
         # Check for common indicators of content-heavy pages
-        content_indicators = soup.select(
-            'main, article, .content, #content, .post, .article-body'
-        )
+        content_indicators = soup.select("main, article, .content, #content, .post, .article-body")
         if content_indicators:
             return True
 
         # Check for minimal content patterns that don't benefit from Playwright
-        minimal_indicators = soup.select(
-            '.error, .not-found, .404, .maintenance, .coming-soon'
-        )
+        minimal_indicators = soup.select(".error, .not-found, .404, .maintenance, .coming-soon")
         if minimal_indicators:
             _fallback_bypass_cache.add(url)
             logger.debug(f"Caching bypass for minimal content page: {url}")
@@ -164,9 +158,7 @@ async def convert_content_with_playwright_fallback(
                     for button in close_buttons:
                         try:
                             await button.click(timeout=1000)
-                            logger.debug(
-                                f"Closed modal/popup with selector: {selector}"
-                            )
+                            logger.debug(f"Closed modal/popup with selector: {selector}")
                             await page.wait_for_timeout(500)  # Brief wait after closing
                         except Exception:
                             pass  # Ignore if click fails
@@ -198,9 +190,7 @@ async def convert_content_with_playwright_fallback(
         raise
 
 
-def _convert_html_to_format(
-    html_content: str, output_format: Literal["text", "markdown"]
-) -> str:
+def _convert_html_to_format(html_content: str, output_format: Literal["text", "markdown"]) -> str:
     """
     Convert HTML content to specified format.
 
@@ -264,9 +254,7 @@ def _convert_to_markdown(main_content: BeautifulSoup | Tag) -> str:
     ):
         if element.name.startswith("h"):
             level = int(element.name[1])
-            markdown_parts.append(
-                "#" * level + " " + element.get_text(strip=True)
-            )
+            markdown_parts.append("#" * level + " " + element.get_text(strip=True))
         elif element.name == "p":
             text_content = element.get_text(strip=True)
             if text_content:
