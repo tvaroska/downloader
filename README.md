@@ -187,23 +187,38 @@ curl -H "Accept: text/html" \
 
 ## 🛡️ Security Features
 
-- **SSRF Protection**: Blocks localhost and private IP ranges
+- **SSRF Protection**: Blocks localhost and private IP ranges (configurable)
 - **URL Validation**: Comprehensive input sanitization
-- **Rate Limiting Ready**: Architecture supports rate limiting implementation
+- **Rate Limiting**: Multi-tier limits with Redis/in-memory storage (NEW)
+  - Download endpoints: 60 requests/minute
+  - Batch endpoints: 20 requests/minute
+  - Status endpoints: 200 requests/minute
+- **API Key Authentication**: Optional Bearer token or X-API-Key header
 - **Non-root Container**: Docker runs with dedicated user account
+- **DoS Protection**: Configurable concurrency limits and timeouts
 
 ## 🧪 Testing
 
-```bash
-# Run all tests
-uv run pytest tests/ -v
+The project uses a 3-tier test strategy for fast CI/CD:
 
-# Run with coverage
-uv run pytest tests/ --cov=src --cov-report=html
+```bash
+# Quick smoke tests (<3s) - for rapid feedback
+uv run pytest -m smoke -v
+
+# Integration tests (~15s) - for component testing
+uv run pytest -m integration -v
+
+# Full E2E tests (~60s) - for comprehensive validation
+uv run pytest -m e2e -v
+
+# Run all tests with coverage
+uv run pytest --cov=src --cov-report=html
 
 # Test specific functionality
-uv run pytest tests/test_api.py::TestDownloadEndpoint::test_download_text_format -v
+uv run pytest tests/api/test_download.py -v
 ```
+
+**Test Statistics**: 248 tests (80 smoke, organized into smoke/integration/e2e tiers)
 
 ## 🏗️ Architecture
 
@@ -222,26 +237,57 @@ uv run pytest tests/test_api.py::TestDownloadEndpoint::test_download_text_format
 
 ## 🔧 Configuration
 
-Environment variables:
-- `PYTHONUNBUFFERED=1`: Real-time logging output
-- `UV_CACHE_DIR`: Custom cache directory for uv
+The service is configured via environment variables with sensible defaults:
+
+### Core Settings
+- `DOWNLOADER_KEY`: API key for authentication (optional)
+- `REDIS_URI`: Redis connection string for job management and rate limiting
+- `ENVIRONMENT`: Runtime environment (development/staging/production)
+
+### HTTP Client
+- `HTTP_MAX_CONNECTIONS`: Max total connections (default: 200)
+- `HTTP_REQUEST_TIMEOUT`: Request timeout in seconds (default: 30)
+
+### Rate Limiting (NEW)
+- `RATELIMIT_ENABLED`: Enable rate limiting (default: true)
+- `RATELIMIT_DEFAULT_LIMIT`: Default limit (default: "100/minute")
+- `RATELIMIT_DOWNLOAD_LIMIT`: Download endpoint limit (default: "60/minute")
+- `RATELIMIT_BATCH_LIMIT`: Batch job limit (default: "20/minute")
+
+### Batch Processing
+- `BATCH_CONCURRENCY`: Max concurrent batch requests (default: CPU×8, max 50)
+- `BATCH_MAX_URLS_PER_BATCH`: Max URLs per batch (default: 50)
+
+### PDF Generation
+- `PDF_CONCURRENCY`: Max concurrent PDFs (default: CPU×2, max 12)
+- `PDF_PAGE_LOAD_TIMEOUT`: Playwright timeout in ms (default: 30000)
+
+### Security
+- `SSRF_BLOCK_PRIVATE_IPS`: Block private IPs (default: true)
+- `CORS_ALLOWED_ORIGINS`: Comma-separated origins (default: "*")
+
+See `.env.example` for complete configuration reference.
 
 ## 📦 Implementation Status
 
-**✅ Completed Features:**
-- Direct URL endpoint structure (`/{url}`)
-- Content negotiation via Accept headers
-- BeautifulSoup article extraction
-- Text, HTML, markdown, and JSON response formats
-- Comprehensive test suite (33 tests passing)
-- Production-ready Docker container
-- SSRF protection and security measures
-- Health check endpoint
-- Error handling with proper HTTP status codes
-
-**🚧 Roadmap:**
+**✅ Production Ready Features:**
+- ✅ Direct URL endpoint structure (`/{url}`)
+- ✅ Content negotiation via Accept headers (text, markdown, HTML, JSON, PDF)
 - ✅ Background batch processing with job tracking
-- Redis caching layer for improved performance
-- Rate limiting implementation
-- Advanced authentication
-- Webhook notifications for job completion
+- ✅ PDF generation with Playwright
+- ✅ **Rate limiting with DoS protection** (NEW)
+- ✅ Comprehensive test suite (248 tests: 80 smoke, 3-tier strategy)
+- ✅ SSRF protection and URL validation
+- ✅ Optional API key authentication
+- ✅ Production-ready Docker container
+- ✅ Structured logging with JSON support
+- ✅ Comprehensive configuration management (40+ settings)
+- ✅ Health check and metrics endpoints
+
+**🚧 Roadmap (Next Steps):**
+- 🟠 High Priority (7-11 hours): HTTP client simplification, memory leak fixes, Docker improvements
+- 🟡 Performance (2-4 weeks): Redis caching, webhook notifications, OpenTelemetry
+- 🟢 Advanced (1-2 months): Enhanced content preprocessing, SDK libraries, GraphQL API
+- 🔵 Enterprise (3-6 months): OAuth2/JWT, multi-region deployment, AI-powered extraction
+
+See `product/roadmap.md` for detailed implementation timeline.
