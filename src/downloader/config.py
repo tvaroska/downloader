@@ -400,7 +400,7 @@ class Settings(BaseSettings):
 
     # Application Metadata
     app_name: str = Field(default="REST API Downloader", description="Application name")
-    app_version: str = Field(default="0.0.1", description="Application version")
+    app_version: str = Field(default="0.1.5", description="Application version")
 
     # Environment
     environment: Literal["development", "staging", "production"] = Field(

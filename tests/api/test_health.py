@@ -11,7 +11,7 @@ class TestHealthEndpoint:
         assert response.status_code == 200
         data = response.json()
         assert data["status"] == "healthy"
-        assert data["version"] == "0.0.1"
+        assert data["version"] == "0.1.5"
 
         # Check service status
         assert "services" in data
@@ -36,7 +36,7 @@ class TestHealthEndpoint:
         assert response.status_code == 200
         data = response.json()
         assert data["status"] == "healthy"
-        assert data["version"] == "0.0.1"
+        assert data["version"] == "0.1.5"
 
         # Check batch processing service structure
         batch_service = data["services"]["batch_processing"]
