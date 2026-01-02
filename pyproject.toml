@@ -17,6 +17,7 @@ dependencies = [
     "playwright>=1.40.0",
     "redis>=5.0.0",
     "slowapi>=0.1.9",
+    "brotli>=1.2.0",
 ]
 
 [project.optional-dependencies]

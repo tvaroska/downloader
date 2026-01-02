@@ -21,8 +21,13 @@ dev:
 
 # Build and push Docker image
 docker:
-    docker build -t ghcr.io/tvaroska/downloader .
-    docker push ghcr.io/tvaroska/downloader
+    #!/usr/bin/env bash
+    set -e
+    VERSION=$(grep '^version = ' pyproject.toml | cut -d'"' -f2)
+    echo "Building version: $VERSION"
+    docker build -t ghcr.io/tvaroska/downloader:$VERSION -t ghcr.io/tvaroska/downloader:latest .
+    docker push ghcr.io/tvaroska/downloader:$VERSION
+    docker push ghcr.io/tvaroska/downloader:latest
 
 # Clean build artifacts
 clean:
