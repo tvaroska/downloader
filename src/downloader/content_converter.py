@@ -14,6 +14,8 @@ logger = logging.getLogger(__name__)
 # Global caches for fallback optimization (50-70% efficiency improvement)
 _empty_content_cache: set[str] = set()
 _fallback_bypass_cache: set[str] = set()
+_js_heavy_cache: set[str] = set()  # URLs needing JS rendering for HTML
+_static_html_cache: set[str] = set()  # URLs confirmed as static HTML
 _cache_cleanup_interval = 3600  # 1 hour
 _last_cache_cleanup = 0
 
@@ -27,6 +29,8 @@ def _cleanup_fallback_caches():
         # Keep only recent entries (last hour)
         _empty_content_cache.clear()
         _fallback_bypass_cache.clear()
+        _js_heavy_cache.clear()
+        _static_html_cache.clear()
         _last_cache_cleanup = current_time
         logger.debug("Cleaned up fallback optimization caches")
 
@@ -89,6 +93,155 @@ def should_use_playwright_fallback(url: str, content: bytes, content_type: str) 
     except Exception as e:
         logger.warning(f"Content detection failed for {url}: {e}")
         return True  # Default to fallback if detection fails
+
+
+def _has_missing_metadata(soup: BeautifulSoup) -> bool:
+    """
+    Check if HTML is missing expected metadata tags.
+
+    Args:
+        soup: BeautifulSoup parsed HTML
+
+    Returns:
+        True if critical metadata tags are missing
+    """
+    # Check for Open Graph tags
+    og_title = soup.find("meta", property="og:title")
+    og_description = soup.find("meta", property="og:description")
+
+    # Check for Twitter Card tags
+    twitter_title = soup.find("meta", attrs={"name": "twitter:title"})
+    twitter_description = soup.find("meta", attrs={"name": "twitter:description"})
+
+    # Missing metadata if we don't have at least one title and one description tag
+    has_title = og_title is not None or twitter_title is not None
+    has_description = og_description is not None or twitter_description is not None
+
+    return not (has_title and has_description)
+
+
+def _has_js_framework_markers(soup: BeautifulSoup, body_text: str) -> bool:
+    """
+    Check for JS framework indicators with minimal content.
+
+    Args:
+        soup: BeautifulSoup parsed HTML
+        body_text: Extracted body text
+
+    Returns:
+        True if JS framework markers detected with minimal content
+    """
+    # Check for common JS framework root elements
+    react_root = soup.find(id="root")
+    vue_app = soup.find(id="app")
+    angular_app = soup.find(attrs={"ng-app": True})
+
+    # If we have framework markers but minimal content, likely needs JS rendering
+    has_framework_marker = react_root is not None or vue_app is not None or angular_app is not None
+    has_minimal_content = len(body_text) < 200
+
+    return has_framework_marker and has_minimal_content
+
+
+def should_use_playwright_for_html(url: str, content: bytes, content_type: str) -> bool:
+    """
+    Detect if HTML content needs JavaScript rendering.
+
+    Detection criteria:
+    1. URL in known JS-heavy cache → return True
+    2. URL in static HTML cache → return False
+    3. Parse HTML and check:
+       - Content size < 50KB AND has React/Vue/Angular markers
+       - Missing critical <meta> tags (og:title, og:description)
+       - Has "enable JavaScript" or "loading..." placeholders
+       - Body text < 200 chars but has app containers (#root, #app, etc.)
+    4. Domain-based heuristics (substack.com, medium.com, etc.)
+    5. Cache result for future requests
+
+    Args:
+        url: URL being processed
+        content: Raw HTML content bytes
+        content_type: MIME type
+
+    Returns:
+        True if Playwright rendering recommended, False otherwise
+    """
+    # Periodic cache cleanup
+    _cleanup_fallback_caches()
+
+    # Check caches first (O(1) lookup)
+    if url in _js_heavy_cache:
+        logger.debug(f"Cache hit: {url} known to need JS rendering")
+        return True
+    if url in _static_html_cache:
+        logger.debug(f"Cache hit: {url} known to be static HTML")
+        return False
+
+    # Only check HTML content
+    if "html" not in content_type.lower():
+        return False
+
+    try:
+        # Parse HTML for analysis
+        soup = BeautifulSoup(content, "html.parser")
+        content_size = len(content)
+
+        # Check for explicit JS requirement messages
+        js_required_patterns = [
+            "please enable javascript",
+            "javascript is required",
+            "enable js",
+            "turn on javascript",
+            "javascript is disabled",
+            "requires javascript",
+        ]
+        text_lower = soup.get_text().lower()
+        if any(pattern in text_lower for pattern in js_required_patterns):
+            logger.info(f"Detected explicit JS requirement message in {url}")
+            _js_heavy_cache.add(url)
+            return True
+
+        # Get body content for analysis
+        body = soup.find("body")
+        if not body:
+            _static_html_cache.add(url)
+            return False
+
+        body_text = body.get_text(strip=True)
+
+        # Check for JS frameworks with minimal content
+        if _has_js_framework_markers(soup, body_text):
+            logger.info(f"Detected JS framework markers with minimal content in {url}")
+            _js_heavy_cache.add(url)
+            return True
+
+        # Check for missing metadata with small content size
+        if content_size < 50000 and _has_missing_metadata(soup):
+            logger.info(
+                f"Detected missing metadata with small content size in {url} ({content_size} bytes)"
+            )
+            _js_heavy_cache.add(url)
+            return True
+
+        # Known JS-heavy domains
+        js_heavy_domains = ["substack.com", "medium.com", "notion.so", "ghost.io"]
+        if any(domain in url for domain in js_heavy_domains):
+            logger.info(f"Detected known JS-heavy domain in {url}")
+            _js_heavy_cache.add(url)
+            return True
+
+        # If we got substantial content with metadata, cache as static
+        if len(body_text) > 500 and not _has_missing_metadata(soup):
+            logger.debug(f"Caching {url} as static HTML (substantial content with metadata)")
+            _static_html_cache.add(url)
+            return False
+
+        # Default to static (conservative approach)
+        return False
+
+    except Exception as e:
+        logger.warning(f"HTML detection failed for {url}: {e}")
+        return False  # Default to no rendering on error
 
 
 async def convert_content_with_playwright_fallback(
@@ -187,6 +340,100 @@ async def convert_content_with_playwright_fallback(
 
     except Exception as e:
         logger.error(f"Playwright {output_format} fallback failed for {url}: {e}")
+        raise
+
+
+async def render_html_with_playwright(url: str) -> bytes:
+    """
+    Fetch and render HTML using Playwright to execute JavaScript.
+
+    Similar to convert_content_with_playwright_fallback() but returns
+    raw HTML bytes instead of extracted text/markdown.
+
+    Args:
+        url: The URL to fetch and render
+
+    Returns:
+        Fully rendered HTML content as bytes
+
+    Raises:
+        Exception: If Playwright rendering fails
+    """
+    try:
+        logger.info(f"🔄 Starting Playwright HTML rendering for {url}")
+        generator = get_shared_pdf_generator()
+        if not generator or not generator.pool:
+            raise Exception("PDF generator pool not initialized")
+
+        browser = await generator.pool.get_browser()
+        context = None
+        page = None
+
+        try:
+            # Create isolated context (same pattern as convert_content_with_playwright_fallback)
+            context = await browser.new_context(
+                user_agent=(
+                    "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 "
+                    "(KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+                ),
+                viewport={"width": 1280, "height": 720},
+                ignore_https_errors=False,
+                java_script_enabled=True,
+                bypass_csp=False,
+            )
+
+            page = await context.new_page()
+
+            logger.info(f"🌐 Loading page with Playwright: {url}")
+            # Navigate with 10s timeout (same as existing code)
+            response = await page.goto(url, wait_until="networkidle", timeout=10000)
+
+            if not response or response.status >= 400:
+                raise Exception(
+                    f"Failed to load page: {url} (status: {response.status if response else 'no response'})"
+                )
+
+            logger.debug(f"Page loaded, waiting for network idle: {url}")
+            await page.wait_for_load_state("networkidle", timeout=10000)
+
+            # Close modals (reuse existing modal closing logic)
+            try:
+                close_selectors = [
+                    '[aria-label="close"]',
+                    '[title="Close"]',
+                    '[aria-label="Close"]',
+                    '[title="close"]',
+                ]
+                for selector in close_selectors:
+                    close_buttons = await page.query_selector_all(selector)
+                    for button in close_buttons:
+                        try:
+                            await button.click(timeout=1000)
+                            logger.debug(f"Closed modal/popup with selector: {selector}")
+                            await page.wait_for_timeout(500)
+                        except Exception:
+                            pass  # Ignore if click fails
+            except Exception:
+                pass  # Ignore any errors during modal closing
+
+            logger.debug(f"Extracting rendered HTML content: {url}")
+            # Get rendered HTML
+            html_content = await page.content()
+
+            logger.info(f"📄 Rendered HTML extracted ({len(html_content)} bytes) from {url}")
+
+            # Return as bytes (UTF-8 encoded)
+            return html_content.encode("utf-8")
+
+        finally:
+            # Cleanup (same pattern)
+            if context:
+                await context.close()
+            if generator.pool:
+                await generator.pool.release_browser(browser)
+
+    except Exception as e:
+        logger.error(f"Playwright HTML rendering failed for {url}: {e}")
         raise
 
 

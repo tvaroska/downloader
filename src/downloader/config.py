@@ -217,7 +217,39 @@ class ContentConfig(BaseSettings):
         description="Interval in seconds between cache cleanup runs",
     )
 
+    # HTML JavaScript Rendering Settings
+    # Why enabled by default? Solves GitHub Issue #1 - incomplete HTML for JS-heavy sites
+    # Performance impact: <5ms overhead for static sites, 2-10s for JS-heavy sites
+    enable_html_js_rendering: bool = Field(
+        default=True,
+        description="Enable Playwright rendering for JavaScript-heavy HTML pages",
+    )
+    html_js_rendering_timeout: int = Field(
+        default=10000,
+        ge=1000,
+        le=60000,
+        description="Playwright rendering timeout in milliseconds (default: 10s)",
+    )
+    html_js_rendering_cache_ttl: int = Field(
+        default=3600,
+        ge=60,
+        le=86400,
+        description="TTL for HTML rendering detection cache in seconds (default: 1 hour)",
+    )
+    html_js_heavy_domains: list[str] = Field(
+        default=["substack.com", "medium.com", "notion.so", "ghost.io"],
+        description="Known JS-heavy domains that always need rendering",
+    )
+
     model_config = SettingsConfigDict(env_prefix="CONTENT_")
+
+    @field_validator("html_js_heavy_domains", mode="before")
+    @classmethod
+    def parse_domains(cls, v):
+        """Parse comma-separated domains from environment variable."""
+        if isinstance(v, str):
+            return [domain.strip() for domain in v.split(",")]
+        return v
 
 
 class RedisConfig(BaseSettings):

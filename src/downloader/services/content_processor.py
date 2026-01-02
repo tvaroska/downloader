@@ -4,6 +4,7 @@ import asyncio
 import base64
 import json
 import logging
+import time
 
 from fastapi import HTTPException, Response
 
@@ -11,7 +12,15 @@ from ..content_converter import (
     convert_content_to_markdown,
     convert_content_to_text,
     convert_content_with_playwright_fallback,
+    render_html_with_playwright,
     should_use_playwright_fallback,
+    should_use_playwright_for_html,
+)
+from ..metrics import (
+    record_html_rendering_detection,
+    record_html_rendering_duration,
+    record_html_rendering_failure,
+    record_html_rendering_success,
 )
 from ..models.responses import ErrorResponse, ResponseMetadata
 from ..pdf_generator import generate_pdf_from_url
@@ -218,12 +227,62 @@ async def handle_pdf_response(
     )
 
 
-async def handle_html_response(content: bytes, metadata: ResponseMetadata) -> Response:
-    """Handle HTML format response."""
+async def handle_html_response(
+    validated_url: str, content: bytes, metadata: ResponseMetadata
+) -> Response:
+    """
+    Handle HTML format response with optional Playwright rendering.
+
+    Flow:
+    1. Check if HTML content needs JavaScript rendering
+    2. If yes, fetch rendered HTML using Playwright
+    3. Return HTML content with appropriate headers
+    """
+    rendered_with_js = False
+
     if "html" in metadata["content_type"].lower():
-        html_content = content
+        # Check if we need to render with Playwright
+        if should_use_playwright_for_html(validated_url, content, metadata["content_type"]):
+            logger.info(
+                f"Detected JS-heavy HTML for {validated_url}, triggering Playwright rendering"
+            )
+            record_html_rendering_detection()
+
+            try:
+                # Render HTML with Playwright
+                start_time = time.time()
+                rendered_html = await render_html_with_playwright(validated_url)
+                duration = time.time() - start_time
+
+                logger.info(
+                    f"✅ Playwright HTML rendering successful: "
+                    f"{len(content)} bytes → {len(rendered_html)} bytes "
+                    f"({(len(rendered_html) / len(content) * 100):.1f}% size increase) "
+                    f"in {duration:.2f}s"
+                )
+
+                # Record metrics
+                record_html_rendering_duration(duration)
+                record_html_rendering_success(len(content), len(rendered_html))
+
+                # Use rendered HTML instead of raw
+                html_content = rendered_html
+                rendered_with_js = True
+
+            except Exception as e:
+                # Graceful degradation - log error and use raw HTML
+                logger.error(f"❌ Playwright HTML rendering failed for {validated_url}: {str(e)}")
+                logger.info(f"Falling back to raw HTML for {validated_url}")
+                record_html_rendering_failure()
+                html_content = content
+        else:
+            # Use raw HTML for static pages
+            logger.debug(f"Using raw HTML (no JS rendering needed) for {validated_url}")
+            html_content = content
+
         response_content_type = metadata["content_type"]
     else:
+        # Non-HTML content - convert to HTML
         html_content = content.decode("utf-8", errors="ignore")
         response_content_type = "text/html; charset=utf-8"
 
@@ -234,6 +293,7 @@ async def handle_html_response(content: bytes, metadata: ResponseMetadata) -> Re
             "X-Original-URL": metadata["url"],
             "X-Original-Content-Type": metadata["content_type"],
             "X-Content-Length": str(metadata["size"]),
+            "X-Rendered-With-JS": "true" if rendered_with_js else "false",
         },
     )
 

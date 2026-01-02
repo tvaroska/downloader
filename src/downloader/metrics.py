@@ -319,3 +319,50 @@ def set_gauge(name: str, value: float):
 def increment_counter(name: str, value: float = 1.0):
     """Increment a counter metric."""
     get_metrics_collector().increment_counter(name, value)
+
+
+# HTML rendering metrics
+
+
+def record_html_rendering_detection():
+    """Record that a JS-heavy HTML page was detected."""
+    increment_counter("html_rendering_detections_total")
+
+
+def record_html_rendering_cache_hit():
+    """Record a cache hit for HTML rendering detection."""
+    increment_counter("html_rendering_cache_hits_total")
+
+
+def record_html_rendering_duration(duration_seconds: float):
+    """Record the duration of a Playwright HTML rendering operation."""
+    collector = get_metrics_collector()
+
+    # Update histogram
+    for bucket in collector._histogram_buckets:
+        if duration_seconds <= bucket:
+            collector._histograms["html_rendering_duration_seconds"][bucket] += 1
+
+    # Track as gauge for latest value
+    set_gauge("html_rendering_latest_duration_seconds", duration_seconds)
+
+
+def record_html_rendering_failure():
+    """Record a failed Playwright HTML rendering attempt."""
+    increment_counter("html_rendering_failures_total")
+
+
+def record_html_rendering_success(original_size: int, rendered_size: int):
+    """
+    Record a successful HTML rendering.
+
+    Args:
+        original_size: Size of original HTML in bytes
+        rendered_size: Size of rendered HTML in bytes
+    """
+    increment_counter("html_rendering_successes_total")
+
+    # Calculate and record size increase ratio
+    if original_size > 0:
+        size_ratio = rendered_size / original_size
+        set_gauge("html_rendering_latest_size_ratio", size_ratio)

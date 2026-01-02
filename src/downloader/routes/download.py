@@ -79,7 +79,7 @@ async def download_url(
         elif format_type == "pdf":
             return await handle_pdf_response(validated_url, metadata, pdf_semaphore)
         elif format_type == "html":
-            return await handle_html_response(content, metadata)
+            return await handle_html_response(validated_url, content, metadata)
         else:
             return await handle_raw_response(content, metadata)
 
