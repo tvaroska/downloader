@@ -28,6 +28,26 @@ from ..pdf_generator import generate_pdf_from_url
 logger = logging.getLogger(__name__)
 
 
+def _format_to_mime_type(format_type: str) -> str:
+    """
+    Convert internal format string to MIME type.
+
+    Args:
+        format_type: Internal format string ('text', 'html', etc.)
+
+    Returns:
+        MIME type string
+    """
+    mapping = {
+        "text": "text/plain",
+        "html": "text/html",
+        "markdown": "text/markdown",
+        "pdf": "application/pdf",
+        "json": "application/json",
+    }
+    return mapping.get(format_type, "application/octet-stream")
+
+
 def parse_accept_header(accept_header: str | None) -> str:
     """
     Parse Accept header to determine response format.
@@ -55,6 +75,68 @@ def parse_accept_header(accept_header: str | None) -> str:
         return "json"
     else:
         return "raw"
+
+
+def parse_accept_headers(accept_headers: str | list[str] | None) -> list[str]:
+    """
+    Parse Accept header(s) to determine all requested response formats.
+
+    Supports:
+    - Single Accept header with comma-separated values: "text/html, text/markdown"
+    - Multiple Accept header values
+    - Quality parameters (ignored but parsed for compatibility)
+
+    Args:
+        accept_headers: Accept header value(s) from FastAPI
+
+    Returns:
+        List of format strings: ['html', 'markdown', 'pdf', etc.]
+        Empty list if no valid formats found
+    """
+    if not accept_headers:
+        return []
+
+    # Normalize input to list
+    if isinstance(accept_headers, str):
+        header_list = [accept_headers]
+    else:
+        header_list = accept_headers
+
+    # Parse all media types
+    media_types = []
+    for header in header_list:
+        # Split by comma for comma-separated values
+        parts = header.split(",")
+        for part in parts:
+            # Strip whitespace and quality parameters
+            media_type = part.strip().split(";")[0].strip().lower()
+            if media_type:
+                media_types.append(media_type)
+
+    # Map media types to internal format strings
+    formats = []
+    for media_type in media_types:
+        if media_type == "text/plain":
+            formats.append("text")
+        elif media_type == "text/html":
+            formats.append("html")
+        elif media_type in ("text/markdown", "text/x-markdown"):
+            formats.append("markdown")
+        elif media_type == "application/pdf":
+            formats.append("pdf")
+        elif media_type == "application/json":
+            formats.append("json")
+        # Ignore unsupported formats
+
+    # Deduplicate while preserving order
+    seen = set()
+    unique_formats = []
+    for fmt in formats:
+        if fmt not in seen:
+            seen.add(fmt)
+            unique_formats.append(fmt)
+
+    return unique_formats
 
 
 async def _playwright_fallback_for_content(
@@ -306,5 +388,165 @@ async def handle_raw_response(content: bytes, metadata: ResponseMetadata) -> Res
         headers={
             "X-Original-URL": metadata["url"],
             "Content-Length": str(metadata["size"]),
+        },
+    )
+
+
+async def _process_single_format_for_multi(
+    format_type: str,
+    url: str,
+    content: bytes,
+    metadata: ResponseMetadata,
+    pdf_semaphore: asyncio.Semaphore,
+) -> tuple[str, str]:
+    """
+    Process a single format for multi-format response.
+
+    Args:
+        format_type: Internal format string ('text', 'html', etc.)
+        url: URL being processed
+        content: Downloaded content bytes
+        metadata: Response metadata
+        pdf_semaphore: Semaphore for PDF generation
+
+    Returns:
+        Tuple of (mime_type, processed_content)
+
+    Raises:
+        Exception with descriptive error message on failure
+    """
+    try:
+        if format_type == "json":
+            response = await handle_json_response(content, metadata)
+            content_str = response.body.decode("utf-8")
+            return ("application/json", content_str)
+
+        elif format_type == "text":
+            response = await handle_text_response(url, content, metadata)
+            content_str = response.body.decode("utf-8")
+            return ("text/plain", content_str)
+
+        elif format_type == "markdown":
+            response = await handle_markdown_response(url, content, metadata)
+            content_str = response.body.decode("utf-8")
+            return ("text/markdown", content_str)
+
+        elif format_type == "pdf":
+            # Check semaphore availability
+            if pdf_semaphore.locked():
+                raise Exception("PDF service at capacity")
+            response = await handle_pdf_response(url, metadata, pdf_semaphore)
+            # Base64 encode for JSON
+            pdf_bytes = response.body
+            pdf_base64 = base64.b64encode(pdf_bytes).decode("utf-8")
+            return ("application/pdf", pdf_base64)
+
+        elif format_type == "html":
+            response = await handle_html_response(url, content, metadata)
+            if isinstance(response.body, bytes):
+                content_str = response.body.decode("utf-8", errors="ignore")
+            else:
+                content_str = response.body
+            return ("text/html", content_str)
+
+        else:
+            raise Exception(f"Unsupported format: {format_type}")
+
+    except Exception as e:
+        # Re-raise with format context
+        raise Exception(f"{format_type} processing failed: {str(e)}")
+
+
+async def process_multiple_formats(
+    url: str,
+    content: bytes,
+    metadata: ResponseMetadata,
+    formats: list[str],
+    pdf_semaphore: asyncio.Semaphore,
+) -> dict[str, str]:
+    """
+    Process content into multiple formats in parallel.
+
+    Args:
+        url: URL being processed
+        content: Downloaded content bytes
+        metadata: Response metadata
+        formats: List of format strings to generate
+        pdf_semaphore: Semaphore for PDF generation
+
+    Returns:
+        Dict structure:
+        {
+            "text/html": "<html content>",
+            "text/markdown": "# markdown",
+            "errors": {
+                "application/pdf": "Error message"
+            }
+        }
+    """
+    # Create tasks for each format
+    tasks = []
+    format_types = []
+
+    for format_type in formats:
+        task = asyncio.create_task(
+            _process_single_format_for_multi(format_type, url, content, metadata, pdf_semaphore)
+        )
+        tasks.append(task)
+        format_types.append(format_type)
+
+    # Execute in parallel
+    results = await asyncio.gather(*tasks, return_exceptions=True)
+
+    # Build response dict
+    response_dict = {}
+    errors = {}
+
+    for format_type, result in zip(format_types, results, strict=False):
+        if isinstance(result, Exception):
+            # Format failed - add to errors
+            mime_type = _format_to_mime_type(format_type)
+            errors[mime_type] = str(result)
+        else:
+            # Format succeeded - add to results
+            mime_type, content_str = result
+            response_dict[mime_type] = content_str
+
+    # Add errors dict if any errors occurred
+    if errors:
+        response_dict["errors"] = errors
+
+    return response_dict
+
+
+async def handle_multi_format_response(
+    url: str,
+    content: bytes,
+    metadata: ResponseMetadata,
+    formats: list[str],
+    pdf_semaphore: asyncio.Semaphore,
+) -> Response:
+    """
+    Create multi-format JSON response.
+
+    Args:
+        url: URL being processed
+        content: Downloaded content bytes
+        metadata: Response metadata
+        formats: List of format strings to generate
+        pdf_semaphore: Semaphore for PDF generation
+
+    Returns:
+        JSON Response with all requested formats
+    """
+    results_dict = await process_multiple_formats(url, content, metadata, formats, pdf_semaphore)
+
+    return Response(
+        content=json.dumps(results_dict),
+        media_type="application/json",
+        headers={
+            "X-Original-URL": metadata["url"],
+            "X-Multi-Format": "true",
+            "X-Requested-Formats": ",".join(formats),
         },
     )

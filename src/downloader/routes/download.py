@@ -18,10 +18,12 @@ from ..services.content_processor import (
     handle_html_response,
     handle_json_response,
     handle_markdown_response,
+    handle_multi_format_response,
     handle_pdf_response,
     handle_raw_response,
     handle_text_response,
     parse_accept_header,
+    parse_accept_headers,
 )
 from ..validation import URLValidationError, validate_url
 
@@ -42,21 +44,39 @@ async def download_url(
     """
     Download content from a single URL with content negotiation.
 
-    Supports multiple output formats via Accept header:
+    Supports both single-format and multi-format requests:
+
+    **Single Format (existing behavior):**
     - text/plain: Plain text extraction
     - text/html: Original HTML
     - text/markdown: Markdown conversion
     - application/pdf: PDF generation
     - application/json: JSON with base64 content
 
+    **Multi-Format (new feature):**
+    - Accept: text/html, text/markdown → Returns JSON with both formats
+    - Accept: text/plain, application/pdf → Returns JSON with text and base64 PDF
+    - Multiple Accept headers → Combines all requested formats
+
+    **Multi-Format Response Structure:**
+    {
+        "text/html": "<html content>",
+        "text/markdown": "# markdown content",
+        "application/pdf": "base64encodedpdf...",
+        "errors": {
+            "application/pdf": "Error message if failed"
+        }
+    }
+
     Args:
         url: URL to download
         accept: Accept header for format selection
-        request: FastAPI request object
+        request: FastAPI request object (for accessing Accept headers)
         api_key: API key for authentication (if enabled)
 
     Returns:
-        Response in requested format
+        Single format: Response in requested format with appropriate media type
+        Multi-format: JSON response with all requested formats
 
     Raises:
         HTTPException: For validation, timeout, or download errors
@@ -67,21 +87,32 @@ async def download_url(
 
         content, metadata = await http_client.download(validated_url, RequestPriority.HIGH)
 
-        format_type = parse_accept_header(accept)
-        logger.info(f"Requested format: {format_type} (Accept: {accept})")
+        # Check for multi-format request
+        formats = parse_accept_headers(request.headers.getlist("accept"))
 
-        if format_type == "json":
-            return await handle_json_response(content, metadata)
-        elif format_type == "text":
-            return await handle_text_response(validated_url, content, metadata)
-        elif format_type == "markdown":
-            return await handle_markdown_response(validated_url, content, metadata)
-        elif format_type == "pdf":
-            return await handle_pdf_response(validated_url, metadata, pdf_semaphore)
-        elif format_type == "html":
-            return await handle_html_response(validated_url, content, metadata)
+        if len(formats) > 1:
+            # Multi-format request
+            logger.info(f"Multi-format request: {formats} (Accept: {accept})")
+            return await handle_multi_format_response(
+                validated_url, content, metadata, formats, pdf_semaphore
+            )
         else:
-            return await handle_raw_response(content, metadata)
+            # Single format request (backward compatible)
+            format_type = parse_accept_header(accept)
+            logger.info(f"Requested format: {format_type} (Accept: {accept})")
+
+            if format_type == "json":
+                return await handle_json_response(content, metadata)
+            elif format_type == "text":
+                return await handle_text_response(validated_url, content, metadata)
+            elif format_type == "markdown":
+                return await handle_markdown_response(validated_url, content, metadata)
+            elif format_type == "pdf":
+                return await handle_pdf_response(validated_url, metadata, pdf_semaphore)
+            elif format_type == "html":
+                return await handle_html_response(validated_url, content, metadata)
+            else:
+                return await handle_raw_response(content, metadata)
 
     except URLValidationError as e:
         logger.warning(f"URL validation failed for {url}: {e}")
