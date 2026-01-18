@@ -46,7 +46,7 @@ async def lifespan(app: FastAPI):
     app.state.settings = current_settings
 
     # Log configuration validation messages
-    logger.info(f"Starting {current_settings.app_name} v{current_settings.app_version}")
+    logger.info(f"Starting {current_settings.app_name} v{__version__}")
     logger.info(f"Environment: {current_settings.environment}")
     for message in current_settings.validate_settings():
         if "WARNING" in message:

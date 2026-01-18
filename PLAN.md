@@ -37,15 +37,16 @@
 
 ### 2. Memory & Stability (P0 - Critical)
 
-2.1. **S0-BUG-1: Fix unbounded caches in content_converter.py**
+2.1. ~~**S0-BUG-1: Fix unbounded caches in content_converter.py**~~ ✅
    - File: `src/downloader/content_converter.py:15-20`
    - Issue: 4 global caches (`_empty_content_cache`, `_fallback_bypass_cache`, `_js_heavy_cache`, `_static_html_cache`) grow indefinitely
    - Fix: Use `functools.lru_cache` or `cachetools.TTLCache` with max size
    - Effort: 1-2 hours
 
-2.2. **S0-BUG-2: Consolidate version to single source of truth**
+2.2. ~~**S0-BUG-2: Consolidate version to single source of truth**~~ ✅
    - Issue: Version in `__init__.py`, `config.py`, and tests all differ
-   - Fix: Import from `__init__.py` everywhere, or use `importlib.metadata`
+   - Fix: Use `importlib.metadata.version()` in `__init__.py`, import `__version__` in `config.py`
+   - Plan: `.claude/plans/generic-moseying-fairy.md`
    - Effort: 30 minutes
 
 ### 3. Documentation (P1 - High)

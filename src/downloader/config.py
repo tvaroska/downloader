@@ -10,6 +10,8 @@ from typing import Literal
 from pydantic import Field, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
+from . import __version__
+
 
 class HTTPClientConfig(BaseSettings):
     """HTTP client configuration settings.
@@ -432,7 +434,7 @@ class Settings(BaseSettings):
 
     # Application Metadata
     app_name: str = Field(default="REST API Downloader", description="Application name")
-    app_version: str = Field(default="0.1.5", description="Application version")
+    app_version: str = Field(default=__version__, description="Application version")
 
     # Environment
     environment: Literal["development", "staging", "production"] = Field(
