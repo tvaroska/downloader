@@ -2,6 +2,8 @@
 
 import pytest
 
+from src.downloader import __version__
+
 
 @pytest.mark.smoke
 class TestHealthEndpoint:
@@ -11,7 +13,7 @@ class TestHealthEndpoint:
         assert response.status_code == 200
         data = response.json()
         assert data["status"] == "healthy"
-        assert data["version"] == "0.2.0"
+        assert data["version"] == __version__
         assert "services" in data
 
     def test_health_endpoint_shows_auth_disabled(self, api_client, env_no_auth):

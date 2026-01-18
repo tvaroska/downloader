@@ -1,5 +1,7 @@
 import pytest
 
+from src.downloader import __version__
+
 
 @pytest.mark.integration
 class TestHealthEndpoint:
@@ -11,7 +13,7 @@ class TestHealthEndpoint:
         assert response.status_code == 200
         data = response.json()
         assert data["status"] == "healthy"
-        assert data["version"] == "0.1.5"
+        assert data["version"] == __version__
 
         # Check service status
         assert "services" in data
@@ -36,7 +38,7 @@ class TestHealthEndpoint:
         assert response.status_code == 200
         data = response.json()
         assert data["status"] == "healthy"
-        assert data["version"] == "0.1.5"
+        assert data["version"] == __version__
 
         # Check batch processing service structure
         batch_service = data["services"]["batch_processing"]
