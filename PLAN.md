@@ -60,10 +60,11 @@
    - Plan: `.claude/plans/rustling-tinkering-sutherland.md`
    - Effort: 1 hour
 
-3.2. **S0-DOC-2: Update PRD.md roadmap section**
+3.2. ~~**S0-DOC-2: Update PRD.md roadmap section**~~ ✅
    - File: `product/PRD.md:248-276`
    - Issue: Shows Phase 1-4 items as incomplete that are actually done
    - Fix: Mark completed items, update dates
+   - Plan: `.claude/plans/recursive-puzzling-leaf.md`
    - Effort: 30 minutes
 
 3.3. **S0-DOC-3: Create deployment runbook**
