@@ -75,16 +75,18 @@
 
 ### 4. Docker & Infrastructure (P1 - High)
 
-4.1. **S0-INFRA-1: Fix Dockerfile Python version**
+4.1. ~~**S0-INFRA-1: Fix Dockerfile Python version**~~ ✅
    - File: `Dockerfile:2`
    - Issue: Uses Python 3.11, but dev uses 3.13 and pyproject.toml allows 3.10+
    - Fix: Match development version (3.13) or pin to tested version
+   - Plan: `.claude/plans/cheerful-jingling-lamport.md`
    - Effort: 30 minutes
 
-4.2. **S0-INFRA-2: Remove editable install from production**
+4.2. ~~**S0-INFRA-2: Remove editable install from production**~~ ✅
    - File: `Dockerfile:29`
    - Issue: `pip install -e .` is for development
    - Fix: Use `pip install .` or build wheel first
+   - Plan: `.claude/plans/cheerful-jingling-lamport.md`
    - Effort: 15 minutes
 
 4.3. **S0-INFRA-3: Add docker-compose for local development**

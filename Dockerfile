@@ -1,5 +1,5 @@
 # Optimized production image
-FROM python:3.11-slim
+FROM python:3.13-slim
 
 # Set environment variables
 ENV PYTHONUNBUFFERED=1 \
@@ -26,7 +26,7 @@ COPY pyproject.toml README.md ./
 COPY src/ ./src/
 
 # Install Python dependencies from pyproject.toml (cleaner than hardcoded versions)
-RUN pip install --no-cache-dir -e . \
+RUN pip install --no-cache-dir . \
     && playwright install chromium \
     && playwright install-deps chromium \
     && apt-get update \
