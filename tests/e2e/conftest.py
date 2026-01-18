@@ -12,46 +12,56 @@ def docker_services():
     """Start docker-compose services for E2E tests."""
     compose_file = os.path.join(os.path.dirname(__file__), "docker-compose.yml")
 
-    # Start services
-    subprocess.run(
-        ["docker-compose", "-f", compose_file, "up", "-d"],
-        check=True,
-        cwd=os.path.dirname(__file__),
-    )
+    # Start services with timeout
+    try:
+        subprocess.run(
+            ["docker-compose", "-f", compose_file, "up", "-d"],
+            check=True,
+            cwd=os.path.dirname(__file__),
+            timeout=60,
+        )
+    except subprocess.TimeoutExpired:
+        pytest.skip("Docker services failed to start within timeout")
 
     # Wait for services to be healthy (check healthcheck status)
-    max_attempts = 60  # 60 attempts * 2s = 2 minutes max wait
+    max_attempts = 30  # 30 attempts * 1s = 30 seconds max wait
     attempt = 0
     while attempt < max_attempts:
-        result = subprocess.run(
-            ["docker-compose", "-f", compose_file, "ps", "--format", "json"],
-            capture_output=True,
-            text=True,
-            cwd=os.path.dirname(__file__),
-        )
-        if result.returncode == 0 and "healthy" in result.stdout:
-            break
+        try:
+            result = subprocess.run(
+                ["docker-compose", "-f", compose_file, "ps", "--format", "json"],
+                capture_output=True,
+                text=True,
+                cwd=os.path.dirname(__file__),
+                timeout=5,
+            )
+            if result.returncode == 0 and "healthy" in result.stdout:
+                break
+        except subprocess.TimeoutExpired:
+            pass  # Continue trying
         attempt += 1
-        time.sleep(2)
+        time.sleep(1)
 
     if attempt >= max_attempts:
         # Log container status before failing
         subprocess.run(
             ["docker-compose", "-f", compose_file, "logs"],
             cwd=os.path.dirname(__file__),
+            timeout=10,
         )
         raise RuntimeError("Services failed to become healthy within timeout")
 
     # Extra grace period after health check passes
-    time.sleep(3)
+    time.sleep(1)
 
     yield
 
-    # Cleanup
+    # Cleanup with timeout
     subprocess.run(
         ["docker-compose", "-f", compose_file, "down", "-v"],
         check=False,
         cwd=os.path.dirname(__file__),
+        timeout=60,
     )
 
 

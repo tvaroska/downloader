@@ -18,11 +18,12 @@
    - Fix: Use dynamic version import or fixture
    - Effort: 15 minutes
 
-1.2. **S0-TEST-2: Fix test timeouts**
+1.2. ~~**S0-TEST-2: Fix test timeouts**~~ ✅
    - Issue: Full test suite hangs during coverage collection
    - Files: Various integration/e2e tests
    - Fix: Add proper timeouts, fix async cleanup, mock Playwright in unit tests
    - Effort: 2-3 hours
+   - Plan: `.claude/plans/moonlit-coalescing-crane.md`
 
 1.3. **S0-CICD-1: Add GitHub Actions CI pipeline**
    - Create: `.github/workflows/ci.yml`

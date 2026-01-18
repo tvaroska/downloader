@@ -238,7 +238,7 @@ class TestBatchProcessing:
         async def mock_download(url):
             start_time = asyncio.get_event_loop().time()
             download_times.append(("start", start_time, url))
-            await asyncio.sleep(0.1)
+            await asyncio.sleep(0.01)
             end_time = asyncio.get_event_loop().time()
             download_times.append(("end", end_time, url))
 

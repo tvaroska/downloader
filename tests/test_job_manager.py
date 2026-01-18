@@ -109,9 +109,13 @@ class TestJobManager:
     async def test_cancel_job(self, job_manager):
         """Test cancelling a running job."""
         job_id = "test_job_id"
+        cancel_event = asyncio.Event()
 
         async def dummy_task():
-            await asyncio.sleep(1)
+            try:
+                await asyncio.wait_for(cancel_event.wait(), timeout=10)
+            except asyncio.CancelledError:
+                raise
 
         # Use a real task that can be cancelled
         task = asyncio.create_task(dummy_task())
