@@ -89,39 +89,27 @@
    - Plan: `.claude/plans/cheerful-jingling-lamport.md`
    - Effort: 15 minutes
 
-4.3. **S0-INFRA-3: Add docker-compose for local development**
-   - Create: `docker-compose.dev.yml`
-   - Include: App + Redis for full-stack local testing
-   - Effort: 1 hour
+4.3. ~~**S0-INFRA-3: Add docker-compose for local development**~~ ✅
+   - Already satisfied by existing `docker-compose.yml` (App + Redis)
+   - Plan: `.claude/plans/sprightly-whistling-scone.md`
+   - Effort: N/A (already existed)
 
-### 5. Security (P1 - High)
+### 5. Code Quality (P2 - Medium)
 
-5.1. **S0-SEC-1: Add security headers middleware**
-   - File: `src/downloader/main.py`
-   - Add: X-Content-Type-Options, X-Frame-Options, Referrer-Policy
-   - Consider: Starlette's `SecureHeadersMiddleware` or custom
-   - Effort: 1 hour
-
-5.2. **S0-SEC-2: Document CORS production configuration**
-   - Issue: Default CORS is `*` (wildcard)
-   - Add: Warning in deployment docs, example restricted config
-   - Effort: 30 minutes
-
-### 6. Code Quality (P2 - Medium)
-
-6.1. **S0-REFACTOR-1: Simplify HTTP client**
+5.1. ~~**S0-REFACTOR-1: Simplify HTTP client**~~ ✅
    - File: `src/downloader/http_client.py`
    - Issue: Over-engineered with priority queue and circuit breaker (per agency roadmap R3)
    - Fix: Remove priority queue, simplify to basic httpx client
+   - Plan: `.claude/plans/precious-greeting-hopper.md`
    - Effort: 4-6 hours
 
-6.2. **S0-REFACTOR-2: Extract Playwright context creation**
+5.2. **S0-REFACTOR-2: Extract Playwright context creation**
    - File: `src/downloader/content_converter.py`
    - Issue: Context creation duplicated in `render_html_with_playwright()` and `convert_content_with_playwright_fallback()`
    - Fix: Extract to shared helper function
    - Effort: 1 hour
 
-6.3. **S0-REFACTOR-3: Replace magic numbers with config**
+5.3. **S0-REFACTOR-3: Replace magic numbers with config**
    - File: `src/downloader/content_converter.py:74,141`
    - Issue: Hardcoded `< 100` and `< 200` character thresholds
    - Fix: Add to ContentConfig
@@ -137,9 +125,8 @@
 | Memory & Stability | 2 | 2-3 hours |
 | Documentation | 3 | 4-5 hours |
 | Docker & Infrastructure | 3 | 2 hours |
-| Security | 2 | 1.5 hours |
 | Code Quality | 3 | 6-8 hours |
-| **Total** | **17** | **20-25 hours** |
+| **Total** | **15** | **19-24 hours** |
 
 ---
 
@@ -158,18 +145,22 @@
 
 ## Future Sprints (Backlog)
 
-### Sprint 1 - Performance & Reliability
+### Sprint 1 - Security & Hardening
+- Add security headers middleware (X-Content-Type-Options, X-Frame-Options, Referrer-Policy)
+- Document CORS production configuration (warning for wildcard, example restricted config)
+
+### Sprint 2 - Performance & Reliability
 - Content caching layer (Redis)
 - Enhanced retry policies
 - Webhook notifications
 - OpenTelemetry integration
 
-### Sprint 2 - Advanced Features
+### Sprint 3 - Advanced Features
 - Content preprocessing pipeline
 - Multi-format transformation
 - SDK/Client libraries
 
-### Sprint 3 - Enterprise
+### Sprint 4 - Enterprise
 - OAuth2/JWT authentication
 - Usage analytics
 - Multi-region deployment
