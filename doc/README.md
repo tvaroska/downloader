@@ -8,6 +8,7 @@ Technical documentation for the REST API Downloader.
 - **[API Reference](./api-reference.md)** - Complete API documentation with endpoints, schemas, and examples
 
 ### Implementation Guides
+- **[Deployment Guide](./DEPLOYMENT.md)** - Production deployment runbook with Docker, configuration, and security
 - **[Configuration Management](./CONFIGURATION_MANAGEMENT.md)** - Comprehensive guide to Pydantic Settings-based configuration system
 - **[Monitoring Implementation](./MONITORING_IMPLEMENTATION.md)** - Production monitoring setup with Prometheus and Grafana
 
@@ -22,6 +23,7 @@ Technical documentation for the REST API Downloader.
 doc/
 ├── README.md                        # This file - documentation index
 ├── api-reference.md                 # API endpoints and schemas
+├── DEPLOYMENT.md                    # Production deployment guide
 ├── CONFIGURATION_MANAGEMENT.md      # Configuration system guide
 └── MONITORING_IMPLEMENTATION.md     # Monitoring setup guide
 

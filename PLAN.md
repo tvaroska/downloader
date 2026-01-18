@@ -67,9 +67,10 @@
    - Plan: `.claude/plans/recursive-puzzling-leaf.md`
    - Effort: 30 minutes
 
-3.3. **S0-DOC-3: Create deployment runbook**
+3.3. ~~**S0-DOC-3: Create deployment runbook**~~ ✅
    - Create: `doc/DEPLOYMENT.md`
    - Include: Prerequisites, environment setup, Docker deployment, health verification
+   - Plan: `.claude/plans/shimmering-wobbling-crane.md`
    - Effort: 2-3 hours
 
 ### 4. Docker & Infrastructure (P1 - High)
