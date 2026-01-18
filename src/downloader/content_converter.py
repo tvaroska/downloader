@@ -47,6 +47,42 @@ _js_heavy_cache = BoundedCache(maxsize=1000)  # URLs needing JS rendering for HT
 _static_html_cache = BoundedCache(maxsize=1000)  # URLs confirmed as static HTML
 
 
+async def _create_playwright_context(browser):
+    """Create an isolated Playwright browser context with standard settings."""
+    return await browser.new_context(
+        user_agent=(
+            "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 "
+            "(KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+        ),
+        viewport={"width": 1280, "height": 720},
+        ignore_https_errors=False,
+        java_script_enabled=True,
+        bypass_csp=False,
+    )
+
+
+async def _close_page_modals(page) -> None:
+    """Attempt to close common signup boxes and modals."""
+    close_selectors = [
+        '[aria-label="close"]',
+        '[title="Close"]',
+        '[aria-label="Close"]',
+        '[title="close"]',
+    ]
+    for selector in close_selectors:
+        try:
+            close_buttons = await page.query_selector_all(selector)
+            for button in close_buttons:
+                try:
+                    await button.click(timeout=1000)
+                    logger.debug(f"Closed modal/popup with selector: {selector}")
+                    await page.wait_for_timeout(500)
+                except Exception:
+                    pass
+        except Exception:
+            pass
+
+
 def should_use_playwright_fallback(url: str, content: bytes, content_type: str) -> bool:
     """
     Smart content detection to avoid unnecessary Playwright fallbacks.
@@ -279,18 +315,7 @@ async def convert_content_with_playwright_fallback(
 
         try:
             # Create isolated context for this request
-            context = await browser.new_context(
-                user_agent=(
-                    "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 "
-                    "(KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
-                ),
-                viewport={"width": 1280, "height": 720},
-                ignore_https_errors=False,
-                java_script_enabled=True,
-                bypass_csp=False,
-            )
-
-            # Create page in isolated context
+            context = await _create_playwright_context(browser)
             page = await context.new_page()
 
             logger.info(f"🌐 Loading page with Playwright: {url}")
@@ -305,24 +330,7 @@ async def convert_content_with_playwright_fallback(
             await page.wait_for_load_state("networkidle", timeout=10000)
 
             # Try to close any signup boxes/modals
-            try:
-                close_selectors = [
-                    '[aria-label="close"]',
-                    '[title="Close"]',
-                    '[aria-label="Close"]',
-                    '[title="close"]',
-                ]
-                for selector in close_selectors:
-                    close_buttons = await page.query_selector_all(selector)
-                    for button in close_buttons:
-                        try:
-                            await button.click(timeout=1000)
-                            logger.debug(f"Closed modal/popup with selector: {selector}")
-                            await page.wait_for_timeout(500)  # Brief wait after closing
-                        except Exception:
-                            pass  # Ignore if click fails
-            except Exception:
-                pass  # Ignore any errors during modal closing
+            await _close_page_modals(page)
 
             logger.debug(f"Extracting rendered HTML content for {output_format}: {url}")
             # Get the rendered HTML content
@@ -376,22 +384,12 @@ async def render_html_with_playwright(url: str) -> bytes:
         page = None
 
         try:
-            # Create isolated context (same pattern as convert_content_with_playwright_fallback)
-            context = await browser.new_context(
-                user_agent=(
-                    "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 "
-                    "(KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
-                ),
-                viewport={"width": 1280, "height": 720},
-                ignore_https_errors=False,
-                java_script_enabled=True,
-                bypass_csp=False,
-            )
-
+            # Create isolated context
+            context = await _create_playwright_context(browser)
             page = await context.new_page()
 
             logger.info(f"🌐 Loading page with Playwright: {url}")
-            # Navigate with 10s timeout (same as existing code)
+            # Navigate with 10s timeout
             response = await page.goto(url, wait_until="networkidle", timeout=10000)
 
             if not response or response.status >= 400:
@@ -402,25 +400,8 @@ async def render_html_with_playwright(url: str) -> bytes:
             logger.debug(f"Page loaded, waiting for network idle: {url}")
             await page.wait_for_load_state("networkidle", timeout=10000)
 
-            # Close modals (reuse existing modal closing logic)
-            try:
-                close_selectors = [
-                    '[aria-label="close"]',
-                    '[title="Close"]',
-                    '[aria-label="Close"]',
-                    '[title="close"]',
-                ]
-                for selector in close_selectors:
-                    close_buttons = await page.query_selector_all(selector)
-                    for button in close_buttons:
-                        try:
-                            await button.click(timeout=1000)
-                            logger.debug(f"Closed modal/popup with selector: {selector}")
-                            await page.wait_for_timeout(500)
-                        except Exception:
-                            pass  # Ignore if click fails
-            except Exception:
-                pass  # Ignore any errors during modal closing
+            # Close modals
+            await _close_page_modals(page)
 
             logger.debug(f"Extracting rendered HTML content: {url}")
             # Get rendered HTML

@@ -103,10 +103,11 @@
    - Plan: `.claude/plans/precious-greeting-hopper.md`
    - Effort: 4-6 hours
 
-5.2. **S0-REFACTOR-2: Extract Playwright context creation**
+5.2. ~~**S0-REFACTOR-2: Extract Playwright context creation**~~ ✅
    - File: `src/downloader/content_converter.py`
    - Issue: Context creation duplicated in `render_html_with_playwright()` and `convert_content_with_playwright_fallback()`
-   - Fix: Extract to shared helper function
+   - Fix: Extract to shared helper functions `_create_playwright_context()` and `_close_page_modals()`
+   - Plan: `.claude/plans/atomic-baking-conway.md`
    - Effort: 1 hour
 
 5.3. **S0-REFACTOR-3: Replace magic numbers with config**
