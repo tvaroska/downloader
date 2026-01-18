@@ -1,8 +1,8 @@
 """Content conversion utilities with DRY implementation."""
 
-import asyncio
 import logging
 import re
+from collections import OrderedDict
 from typing import Literal
 
 from bs4 import BeautifulSoup, Tag
@@ -11,28 +11,40 @@ from .pdf_generator import get_shared_pdf_generator
 
 logger = logging.getLogger(__name__)
 
-# Global caches for fallback optimization (50-70% efficiency improvement)
-_empty_content_cache: set[str] = set()
-_fallback_bypass_cache: set[str] = set()
-_js_heavy_cache: set[str] = set()  # URLs needing JS rendering for HTML
-_static_html_cache: set[str] = set()  # URLs confirmed as static HTML
-_cache_cleanup_interval = 3600  # 1 hour
-_last_cache_cleanup = 0
+
+class BoundedCache:
+    """A bounded set-like cache with LRU eviction."""
+
+    def __init__(self, maxsize: int = 1000):
+        self._maxsize = maxsize
+        self._cache: OrderedDict[str, None] = OrderedDict()
+
+    def __contains__(self, key: str) -> bool:
+        if key in self._cache:
+            self._cache.move_to_end(key)  # Mark as recently used
+            return True
+        return False
+
+    def add(self, key: str) -> None:
+        if key in self._cache:
+            self._cache.move_to_end(key)
+        else:
+            if len(self._cache) >= self._maxsize:
+                self._cache.popitem(last=False)  # Remove oldest
+            self._cache[key] = None
+
+    def clear(self) -> None:
+        self._cache.clear()
+
+    def __len__(self) -> int:
+        return len(self._cache)
 
 
-def _cleanup_fallback_caches():
-    """Periodic cleanup of fallback caches to prevent unlimited growth."""
-    global _last_cache_cleanup
-    current_time = asyncio.get_event_loop().time()
-
-    if current_time - _last_cache_cleanup > _cache_cleanup_interval:
-        # Keep only recent entries (last hour)
-        _empty_content_cache.clear()
-        _fallback_bypass_cache.clear()
-        _js_heavy_cache.clear()
-        _static_html_cache.clear()
-        _last_cache_cleanup = current_time
-        logger.debug("Cleaned up fallback optimization caches")
+# Bounded caches with LRU eviction (max 1000 entries each)
+_empty_content_cache = BoundedCache(maxsize=1000)
+_fallback_bypass_cache = BoundedCache(maxsize=1000)
+_js_heavy_cache = BoundedCache(maxsize=1000)  # URLs needing JS rendering for HTML
+_static_html_cache = BoundedCache(maxsize=1000)  # URLs confirmed as static HTML
 
 
 def should_use_playwright_fallback(url: str, content: bytes, content_type: str) -> bool:
@@ -42,9 +54,6 @@ def should_use_playwright_fallback(url: str, content: bytes, content_type: str) 
     Implements fast HTML content detection using CSS selectors and caching.
     Expected 50-70% reduction in unnecessary Playwright usage.
     """
-    # Periodic cache cleanup
-    _cleanup_fallback_caches()
-
     # Check if URL is known to produce empty content
     if url in _empty_content_cache:
         logger.debug(f"Skipping Playwright fallback for known empty URL: {url}")
@@ -166,9 +175,6 @@ def should_use_playwright_for_html(url: str, content: bytes, content_type: str) 
     Returns:
         True if Playwright rendering recommended, False otherwise
     """
-    # Periodic cache cleanup
-    _cleanup_fallback_caches()
-
     # Check caches first (O(1) lookup)
     if url in _js_heavy_cache:
         logger.debug(f"Cache hit: {url} known to need JS rendering")
