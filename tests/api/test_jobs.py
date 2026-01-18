@@ -1,28 +1,14 @@
 """Tests for the job-related API endpoints."""
 
 from datetime import datetime, timezone
-from unittest.mock import AsyncMock, patch
 
-import pytest
-from fastapi.testclient import TestClient
-
+from src.downloader.dependencies import get_job_manager_dependency
 from src.downloader.job_manager import JobInfo, JobResult, JobStatus
 from src.downloader.main import app
 
-client = TestClient(app)
-
-
-@pytest.fixture
-def local_mock_job_manager():
-    """Fixture to mock the get_job_manager function."""
-    with patch("src.downloader.api.get_job_manager") as mock_get_manager:
-        mock_manager = AsyncMock()
-        mock_get_manager.return_value = mock_manager
-        yield mock_manager
-
 
 class TestJobEndpoints:
-    def test_get_job_status_found(self, local_mock_job_manager):
+    def test_get_job_status_found(self, api_client, mock_job_manager):
         """Test getting the status of an existing job."""
         job_id = "test-job-id"
         job_info = JobInfo(
@@ -32,25 +18,39 @@ class TestJobEndpoints:
             created_at=datetime.now(timezone.utc),
             request_data={},
         )
-        local_mock_job_manager.get_job_info.return_value = job_info
+        mock_job_manager.get_job_info.return_value = job_info
 
-        response = client.get(f"/jobs/{job_id}/status")
-        assert response.status_code == 200
-        data = response.json()
-        assert data["job_id"] == job_id
-        assert data["status"] == "running"
-        assert data["progress"] == 50
+        async def mock_get_job_manager():
+            return mock_job_manager
 
-    def test_get_job_status_not_found(self, local_mock_job_manager):
+        app.dependency_overrides[get_job_manager_dependency] = mock_get_job_manager
+        try:
+            response = api_client.get(f"/jobs/{job_id}/status")
+            assert response.status_code == 200
+            data = response.json()
+            assert data["job_id"] == job_id
+            assert data["status"] == "running"
+            assert data["progress"] == 50
+        finally:
+            app.dependency_overrides.pop(get_job_manager_dependency, None)
+
+    def test_get_job_status_not_found(self, api_client, mock_job_manager):
         """Test getting the status of a non-existent job."""
         job_id = "not-found-id"
-        local_mock_job_manager.get_job_info.return_value = None
+        mock_job_manager.get_job_info.return_value = None
 
-        response = client.get(f"/jobs/{job_id}/status")
-        assert response.status_code == 404
-        assert "Job not-found-id not found" in response.text
+        async def mock_get_job_manager():
+            return mock_job_manager
 
-    def test_get_job_results_found(self, local_mock_job_manager):
+        app.dependency_overrides[get_job_manager_dependency] = mock_get_job_manager
+        try:
+            response = api_client.get(f"/jobs/{job_id}/status")
+            assert response.status_code == 404
+            assert "Job not-found-id not found" in response.text
+        finally:
+            app.dependency_overrides.pop(get_job_manager_dependency, None)
+
+    def test_get_job_results_found(self, api_client, mock_job_manager):
         """Test getting the results of a completed job."""
         job_id = "test-job-id"
         job_info = JobInfo(
@@ -69,16 +69,23 @@ class TestJobEndpoints:
             created_at=datetime.now(timezone.utc),
             completed_at=datetime.now(timezone.utc),
         )
-        local_mock_job_manager.get_job_info.return_value = job_info
-        local_mock_job_manager.get_job_results.return_value = job_result
+        mock_job_manager.get_job_info.return_value = job_info
+        mock_job_manager.get_job_results.return_value = job_result
 
-        response = client.get(f"/jobs/{job_id}/results")
-        assert response.status_code == 200
-        data = response.json()
-        assert data["job_id"] == job_id
-        assert len(data["results"]) == 1
+        async def mock_get_job_manager():
+            return mock_job_manager
 
-    def test_get_job_results_not_available(self, local_mock_job_manager):
+        app.dependency_overrides[get_job_manager_dependency] = mock_get_job_manager
+        try:
+            response = api_client.get(f"/jobs/{job_id}/results")
+            assert response.status_code == 200
+            data = response.json()
+            assert data["job_id"] == job_id
+            assert len(data["results"]) == 1
+        finally:
+            app.dependency_overrides.pop(get_job_manager_dependency, None)
+
+    def test_get_job_results_not_available(self, api_client, mock_job_manager):
         """Test getting results for a job that is not finished."""
         job_id = "test-job-id"
         job_info = JobInfo(
@@ -88,13 +95,20 @@ class TestJobEndpoints:
             created_at=datetime.now(timezone.utc),
             request_data={},
         )
-        local_mock_job_manager.get_job_info.return_value = job_info
+        mock_job_manager.get_job_info.return_value = job_info
 
-        response = client.get(f"/jobs/{job_id}/results")
-        assert response.status_code == 400
-        assert "is still running" in response.text
+        async def mock_get_job_manager():
+            return mock_job_manager
 
-    def test_cancel_job_success(self, local_mock_job_manager):
+        app.dependency_overrides[get_job_manager_dependency] = mock_get_job_manager
+        try:
+            response = api_client.get(f"/jobs/{job_id}/results")
+            assert response.status_code == 400
+            assert "is still running" in response.text
+        finally:
+            app.dependency_overrides.pop(get_job_manager_dependency, None)
+
+    def test_cancel_job_success(self, api_client, mock_job_manager):
         """Test cancelling a job successfully."""
         job_id = "test-job-id"
         job_info = JobInfo(
@@ -103,17 +117,31 @@ class TestJobEndpoints:
             created_at=datetime.now(timezone.utc),
             request_data={},
         )
-        local_mock_job_manager.get_job_info.return_value = job_info
-        local_mock_job_manager.cancel_job.return_value = True
+        mock_job_manager.get_job_info.return_value = job_info
+        mock_job_manager.cancel_job.return_value = True
 
-        response = client.delete(f"/jobs/{job_id}")
-        assert response.status_code == 200
-        assert response.json()["success"] is True
+        async def mock_get_job_manager():
+            return mock_job_manager
 
-    def test_cancel_job_not_found(self, local_mock_job_manager):
+        app.dependency_overrides[get_job_manager_dependency] = mock_get_job_manager
+        try:
+            response = api_client.delete(f"/jobs/{job_id}")
+            assert response.status_code == 200
+            assert response.json()["success"] is True
+        finally:
+            app.dependency_overrides.pop(get_job_manager_dependency, None)
+
+    def test_cancel_job_not_found(self, api_client, mock_job_manager):
         """Test cancelling a non-existent job."""
         job_id = "not-found-id"
-        local_mock_job_manager.get_job_info.return_value = None
+        mock_job_manager.get_job_info.return_value = None
 
-        response = client.delete(f"/jobs/{job_id}")
-        assert response.status_code == 404
+        async def mock_get_job_manager():
+            return mock_job_manager
+
+        app.dependency_overrides[get_job_manager_dependency] = mock_get_job_manager
+        try:
+            response = api_client.delete(f"/jobs/{job_id}")
+            assert response.status_code == 404
+        finally:
+            app.dependency_overrides.pop(get_job_manager_dependency, None)

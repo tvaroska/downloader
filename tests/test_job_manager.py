@@ -11,8 +11,28 @@ from src.downloader.job_manager import JobInfo, JobManager, JobStatus
 
 @pytest.fixture
 def mock_redis_client():
-    """Fixture to mock the Redis client."""
-    return AsyncMock()
+    """Fixture to mock the Redis client with proper pipeline support."""
+    from unittest.mock import MagicMock
+
+    mock_client = AsyncMock()
+
+    # Create a proper async context manager for pipeline
+    class MockPipeline:
+        def __init__(self):
+            self.watch = AsyncMock()
+            self.multi = MagicMock()  # multi() is not async
+            self.execute = AsyncMock(return_value=[True, True])
+            self.setex = AsyncMock()  # In pipeline with transaction, setex is awaited
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, exc_type, exc_val, exc_tb):
+            pass
+
+    # Use MagicMock for pipeline to return non-coroutine
+    mock_client.pipeline = MagicMock(return_value=MockPipeline())
+    return mock_client
 
 
 @pytest.fixture
@@ -79,8 +99,13 @@ class TestJobManager:
 
         await job_manager.update_job_status(job_id, JobStatus.COMPLETED, progress=100)
 
-        mock_redis_client.setex.assert_called_once()
-        args, _ = mock_redis_client.setex.call_args
+        # The update_job_status now uses pipeline transactions
+        # Verify pipeline was used
+        mock_redis_client.pipeline.assert_called_once_with(transaction=True)
+        # Get the pipeline mock to check its calls
+        pipeline = mock_redis_client.pipeline.return_value
+        pipeline.setex.assert_called_once()
+        args, _ = pipeline.setex.call_args
         updated_info = JobInfo.model_validate_json(args[2])
         assert updated_info.status == JobStatus.COMPLETED
         assert updated_info.progress == 100

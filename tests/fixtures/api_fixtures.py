@@ -14,9 +14,15 @@ def api_client(request):
     This creates a TestClient that properly handles app startup/shutdown,
     making it suitable for integration tests that need full app context.
 
-    NOTE: Settings are reloaded by env fixtures (env_with_auth, etc) before
-    this fixture is used, so we don't need to reload here.
+    NOTE: Settings are reloaded here to ensure test isolation. Previous tests
+    may have modified settings (e.g., setting REDIS_URI), and we need a clean
+    state before starting the app lifespan.
     """
+    # Reload settings to ensure test isolation
+    from src.downloader.config import reload_settings
+
+    reload_settings()
+
     with TestClient(app, raise_server_exceptions=False) as client:
         yield client
 

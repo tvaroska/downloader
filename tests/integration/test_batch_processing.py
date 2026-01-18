@@ -1,66 +1,70 @@
 """Integration tests for batch processing core functionality."""
 
 import asyncio
-from unittest.mock import AsyncMock, patch
+from unittest.mock import AsyncMock
 
 import pytest
-from fastapi.testclient import TestClient
 
+from src.downloader.dependencies import (
+    get_http_client,
+    get_job_manager_dependency,
+)
 from src.downloader.main import app
-
-client = TestClient(app)
 
 
 @pytest.mark.integration
 class TestBatchProcessing:
     """Test core batch processing functionality."""
 
-    @patch(
-        "src.downloader.api.process_background_batch_job",
-        new_callable=AsyncMock,
-    )
-    @patch("src.downloader.api.get_client")
     def test_batch_available_with_redis(
         self,
-        mock_get_client,
-        mock_process_job,
-        env_with_redis,
+        api_client,
         mock_job_manager,
         mock_http_client,
     ):
-        """Test that batch endpoint works when REDIS_URI is set."""
-        mock_get_client.return_value = mock_http_client
+        """Test that batch endpoint works when job_manager is available."""
 
-        with patch("src.downloader.api.get_job_manager", return_value=mock_job_manager):
+        async def mock_get_http_client():
+            return mock_http_client
+
+        async def mock_get_job_manager():
+            return mock_job_manager
+
+        app.dependency_overrides[get_http_client] = mock_get_http_client
+        app.dependency_overrides[get_job_manager_dependency] = mock_get_job_manager
+        try:
             batch_request = {
                 "urls": [{"url": "https://example.com"}],
                 "default_format": "text",
             }
 
-            response = client.post("/batch", json=batch_request)
+            response = api_client.post("/batch", json=batch_request)
             assert response.status_code == 200
 
             data = response.json()
             assert data["job_id"] == "test_job_id"
             assert data["status"] == "pending"
+        finally:
+            app.dependency_overrides.pop(get_http_client, None)
+            app.dependency_overrides.pop(get_job_manager_dependency, None)
 
-    @patch(
-        "src.downloader.api.process_background_batch_job",
-        new_callable=AsyncMock,
-    )
-    @patch("src.downloader.api.get_client")
     def test_batch_basic_success(
         self,
-        mock_get_client,
-        mock_process_job,
-        env_with_redis,
+        api_client,
         mock_job_manager,
         mock_http_client,
     ):
         """Test basic batch processing with successful URLs."""
-        mock_get_client.return_value = mock_http_client
 
-        with patch("src.downloader.api.get_job_manager", return_value=mock_job_manager):
+        async def mock_get_http_client():
+            return mock_http_client
+
+        async def mock_get_job_manager():
+            return mock_job_manager
+
+        app.dependency_overrides[get_http_client] = mock_get_http_client
+        app.dependency_overrides[get_job_manager_dependency] = mock_get_job_manager
+        try:
             batch_request = {
                 "urls": [
                     {"url": "https://example.com"},
@@ -71,28 +75,24 @@ class TestBatchProcessing:
                 "timeout_per_url": 30,
             }
 
-            response = client.post("/batch", json=batch_request)
+            response = api_client.post("/batch", json=batch_request)
             assert response.status_code == 200
 
             data = response.json()
             assert data["job_id"] is not None
+        finally:
+            app.dependency_overrides.pop(get_http_client, None)
+            app.dependency_overrides.pop(get_job_manager_dependency, None)
 
-    @patch(
-        "src.downloader.api.process_background_batch_job",
-        new_callable=AsyncMock,
-    )
-    @patch("src.downloader.api.get_client")
     def test_batch_mixed_success_failure(
         self,
-        mock_get_client,
-        mock_process_job,
-        env_with_redis,
+        api_client,
         mock_job_manager,
     ):
         """Test batch processing with mix of successful and failed URLs."""
         from src.downloader.http_client import HTTPClientError
 
-        def mock_download_side_effect(url):
+        def mock_download_side_effect(url, priority=None):
             if "fail.com" in url:
                 raise HTTPClientError("HTTP 404: Not Found", status_code=404)
             return (
@@ -108,9 +108,16 @@ class TestBatchProcessing:
 
         mock_client = AsyncMock()
         mock_client.download.side_effect = mock_download_side_effect
-        mock_get_client.return_value = mock_client
 
-        with patch("src.downloader.api.get_job_manager", return_value=mock_job_manager):
+        async def mock_get_http_client():
+            return mock_client
+
+        async def mock_get_job_manager():
+            return mock_job_manager
+
+        app.dependency_overrides[get_http_client] = mock_get_http_client
+        app.dependency_overrides[get_job_manager_dependency] = mock_get_job_manager
+        try:
             batch_request = {
                 "urls": [
                     {"url": "https://success.com"},
@@ -120,20 +127,16 @@ class TestBatchProcessing:
                 "default_format": "text",
             }
 
-            response = client.post("/batch", json=batch_request)
+            response = api_client.post("/batch", json=batch_request)
             assert response.status_code == 200
             assert response.json()["job_id"] is not None
+        finally:
+            app.dependency_overrides.pop(get_http_client, None)
+            app.dependency_overrides.pop(get_job_manager_dependency, None)
 
-    @patch(
-        "src.downloader.api.process_background_batch_job",
-        new_callable=AsyncMock,
-    )
-    @patch("src.downloader.api.get_client")
     def test_batch_different_formats(
         self,
-        mock_get_client,
-        mock_process_job,
-        env_with_redis,
+        api_client,
         mock_job_manager,
         sample_html_content,
         sample_metadata,
@@ -144,9 +147,16 @@ class TestBatchProcessing:
             sample_html_content,
             sample_metadata,
         )
-        mock_get_client.return_value = mock_client
 
-        with patch("src.downloader.api.get_job_manager", return_value=mock_job_manager):
+        async def mock_get_http_client():
+            return mock_client
+
+        async def mock_get_job_manager():
+            return mock_job_manager
+
+        app.dependency_overrides[get_http_client] = mock_get_http_client
+        app.dependency_overrides[get_job_manager_dependency] = mock_get_job_manager
+        try:
             batch_request = {
                 "urls": [
                     {"url": "https://example.com", "format": "text"},
@@ -157,51 +167,45 @@ class TestBatchProcessing:
                 "default_format": "text",
             }
 
-            response = client.post("/batch", json=batch_request)
+            response = api_client.post("/batch", json=batch_request)
             assert response.status_code == 200
             assert response.json()["job_id"] is not None
+        finally:
+            app.dependency_overrides.pop(get_http_client, None)
+            app.dependency_overrides.pop(get_job_manager_dependency, None)
 
-    @patch(
-        "src.downloader.api.process_background_batch_job",
-        new_callable=AsyncMock,
-    )
-    @patch("src.downloader.api.get_client")
-    @patch("src.downloader.api.generate_pdf_from_url")
     def test_batch_pdf_format(
         self,
-        mock_generate_pdf,
-        mock_get_client,
-        mock_process_job,
-        env_with_redis,
+        api_client,
         mock_job_manager,
         mock_http_client,
     ):
         """Test batch processing with PDF format."""
-        mock_get_client.return_value = mock_http_client
 
-        pdf_content = b"%PDF-1.4 fake pdf content"
-        mock_generate_pdf.return_value = pdf_content
+        async def mock_get_http_client():
+            return mock_http_client
 
-        with patch("src.downloader.api.get_job_manager", return_value=mock_job_manager):
+        async def mock_get_job_manager():
+            return mock_job_manager
+
+        app.dependency_overrides[get_http_client] = mock_get_http_client
+        app.dependency_overrides[get_job_manager_dependency] = mock_get_job_manager
+        try:
             batch_request = {
                 "urls": [{"url": "https://example.com", "format": "pdf"}],
                 "default_format": "text",
             }
 
-            response = client.post("/batch", json=batch_request)
+            response = api_client.post("/batch", json=batch_request)
             assert response.status_code == 200
             assert response.json()["job_id"] is not None
+        finally:
+            app.dependency_overrides.pop(get_http_client, None)
+            app.dependency_overrides.pop(get_job_manager_dependency, None)
 
-    @patch(
-        "src.downloader.api.process_background_batch_job",
-        new_callable=AsyncMock,
-    )
-    @patch("src.downloader.api.get_client")
     def test_batch_timeout_handling(
         self,
-        mock_get_client,
-        mock_process_job,
-        env_with_redis,
+        api_client,
         mock_job_manager,
     ):
         """Test batch processing with timeout scenarios."""
@@ -209,41 +213,38 @@ class TestBatchProcessing:
 
         mock_client = AsyncMock()
         mock_client.download.side_effect = HTTPTimeoutError("Request timed out")
-        mock_get_client.return_value = mock_client
 
-        with patch("src.downloader.api.get_job_manager", return_value=mock_job_manager):
+        async def mock_get_http_client():
+            return mock_client
+
+        async def mock_get_job_manager():
+            return mock_job_manager
+
+        app.dependency_overrides[get_http_client] = mock_get_http_client
+        app.dependency_overrides[get_job_manager_dependency] = mock_get_job_manager
+        try:
             batch_request = {
                 "urls": [{"url": "https://slow.com"}],
                 "default_format": "text",
                 "timeout_per_url": 5,
             }
 
-            response = client.post("/batch", json=batch_request)
+            response = api_client.post("/batch", json=batch_request)
             assert response.status_code == 200
             assert response.json()["job_id"] is not None
+        finally:
+            app.dependency_overrides.pop(get_http_client, None)
+            app.dependency_overrides.pop(get_job_manager_dependency, None)
 
-    @patch(
-        "src.downloader.api.process_background_batch_job",
-        new_callable=AsyncMock,
-    )
-    @patch("src.downloader.api.get_client")
     def test_batch_concurrency_control(
         self,
-        mock_get_client,
-        mock_process_job,
-        env_with_redis,
+        api_client,
         mock_job_manager,
     ):
         """Test batch processing respects concurrency limits."""
-        download_times = []
 
-        async def mock_download(url):
-            start_time = asyncio.get_event_loop().time()
-            download_times.append(("start", start_time, url))
+        async def mock_download(url, priority=None):
             await asyncio.sleep(0.01)
-            end_time = asyncio.get_event_loop().time()
-            download_times.append(("end", end_time, url))
-
             return (
                 b"<html>Content</html>",
                 {
@@ -257,29 +258,32 @@ class TestBatchProcessing:
 
         mock_client = AsyncMock()
         mock_client.download.side_effect = mock_download
-        mock_get_client.return_value = mock_client
 
-        with patch("src.downloader.api.get_job_manager", return_value=mock_job_manager):
+        async def mock_get_http_client():
+            return mock_client
+
+        async def mock_get_job_manager():
+            return mock_job_manager
+
+        app.dependency_overrides[get_http_client] = mock_get_http_client
+        app.dependency_overrides[get_job_manager_dependency] = mock_get_job_manager
+        try:
             batch_request = {
                 "urls": [{"url": f"https://example{i}.com"} for i in range(5)],
                 "default_format": "text",
                 "concurrency_limit": 2,
             }
 
-            response = client.post("/batch", json=batch_request)
+            response = api_client.post("/batch", json=batch_request)
             assert response.status_code == 200
             assert response.json()["job_id"] is not None
+        finally:
+            app.dependency_overrides.pop(get_http_client, None)
+            app.dependency_overrides.pop(get_job_manager_dependency, None)
 
-    @patch(
-        "src.downloader.api.process_background_batch_job",
-        new_callable=AsyncMock,
-    )
-    @patch("src.downloader.api.get_client")
     def test_batch_large_content_handling(
         self,
-        mock_get_client,
-        mock_process_job,
-        env_with_redis,
+        api_client,
         mock_job_manager,
     ):
         """Test batch processing handles large content properly."""
@@ -296,14 +300,24 @@ class TestBatchProcessing:
                 "headers": {"content-type": "text/html"},
             },
         )
-        mock_get_client.return_value = mock_client
 
-        with patch("src.downloader.api.get_job_manager", return_value=mock_job_manager):
+        async def mock_get_http_client():
+            return mock_client
+
+        async def mock_get_job_manager():
+            return mock_job_manager
+
+        app.dependency_overrides[get_http_client] = mock_get_http_client
+        app.dependency_overrides[get_job_manager_dependency] = mock_get_job_manager
+        try:
             batch_request = {
                 "urls": [{"url": "https://large.com"}],
                 "default_format": "text",
             }
 
-            response = client.post("/batch", json=batch_request)
+            response = api_client.post("/batch", json=batch_request)
             assert response.status_code == 200
             assert response.json()["job_id"] is not None
+        finally:
+            app.dependency_overrides.pop(get_http_client, None)
+            app.dependency_overrides.pop(get_job_manager_dependency, None)

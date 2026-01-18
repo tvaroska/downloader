@@ -1,31 +1,14 @@
+"""Tests for the download endpoint."""
+
 import base64
 from unittest.mock import AsyncMock, patch
 
 import pytest
-from fastapi.testclient import TestClient
 
+from src.downloader.dependencies import get_http_client, get_pdf_semaphore
 from src.downloader.http_client import HTTPClientError, HTTPTimeoutError
 from src.downloader.main import app
-
-client = TestClient(app)
-
-
-@pytest.fixture
-def mock_http_client():
-    """Fixture to mock the HTTP client."""
-    mock_client = AsyncMock()
-    mock_client.download.return_value = (
-        b"<html>test</html>",
-        {
-            "url": "https://example.com",
-            "status_code": 200,
-            "content_type": "text/html",
-            "size": 17,
-            "headers": {"content-type": "text/html"},
-        },
-    )
-    with patch("src.downloader.api.get_client", return_value=mock_client) as mock_get_client:
-        yield mock_get_client
+from src.downloader.pdf_generator import PDFGeneratorError
 
 
 class TestDownloadEndpoint:
@@ -60,62 +43,73 @@ class TestDownloadEndpoint:
     )
     def test_download_formats(
         self,
+        api_client,
         accept_header,
         mock_content,
         expected_content_type,
         expected_in_response,
     ):
-        with patch("src.downloader.api.get_client") as mock_get_client:
-            mock_client = AsyncMock()
-            mock_client.download.return_value = (
-                mock_content,
-                {
-                    "url": "https://example.com",
-                    "status_code": 200,
-                    "content_type": "text/html",
-                    "size": len(mock_content),
-                    "headers": {"content-type": "text/html"},
-                },
-            )
-            mock_get_client.return_value = mock_client
+        mock_client = AsyncMock()
+        mock_client.download.return_value = (
+            mock_content,
+            {
+                "url": "https://example.com",
+                "status_code": 200,
+                "content_type": "text/html",
+                "size": len(mock_content),
+                "headers": {"content-type": "text/html"},
+            },
+        )
 
-        response = client.get("/https://example.com", headers={"Accept": accept_header})
-        assert response.status_code == 200
-        assert response.headers["content-type"] == expected_content_type
+        async def mock_get_http_client():
+            return mock_client
 
-        if accept_header == "application/json":
-            data = response.json()
-            assert data["success"] is True
-            decoded_content = base64.b64decode(data["content"])
-            assert decoded_content == expected_in_response
-        elif isinstance(expected_in_response, bytes):
-            assert response.content == expected_in_response
-        else:
-            assert expected_in_response in response.text
+        app.dependency_overrides[get_http_client] = mock_get_http_client
+        try:
+            response = api_client.get("/https://example.com", headers={"Accept": accept_header})
+            assert response.status_code == 200
+            assert response.headers["content-type"] == expected_content_type
 
-    def test_download_raw_format(self):
-        with patch("src.downloader.api.get_client") as mock_get_client:
-            mock_client = AsyncMock()
-            mock_client.download.return_value = (
-                b"binary data",
-                {
-                    "url": "https://example.com/file.bin",
-                    "status_code": 200,
-                    "content_type": "application/octet-stream",
-                    "size": 11,
-                    "headers": {"content-type": "application/octet-stream"},
-                },
-            )
-            mock_get_client.return_value = mock_client
+            if accept_header == "application/json":
+                data = response.json()
+                assert data["success"] is True
+                decoded_content = base64.b64decode(data["content"])
+                assert decoded_content == expected_in_response
+            elif isinstance(expected_in_response, bytes):
+                assert response.content == expected_in_response
+            else:
+                assert expected_in_response in response.text
+        finally:
+            app.dependency_overrides.pop(get_http_client, None)
 
-            response = client.get("/https://example.com/file.bin")
+    def test_download_raw_format(self, api_client):
+        mock_client = AsyncMock()
+        mock_client.download.return_value = (
+            b"binary data",
+            {
+                "url": "https://example.com/file.bin",
+                "status_code": 200,
+                "content_type": "application/octet-stream",
+                "size": 11,
+                "headers": {"content-type": "application/octet-stream"},
+            },
+        )
+
+        async def mock_get_http_client():
+            return mock_client
+
+        app.dependency_overrides[get_http_client] = mock_get_http_client
+        try:
+            response = api_client.get("/https://example.com/file.bin")
             assert response.status_code == 200
             assert response.content == b"binary data"
             assert response.headers["content-type"] == "application/octet-stream"
             assert response.headers["X-Original-URL"] == "https://example.com/file.bin"
+        finally:
+            app.dependency_overrides.pop(get_http_client, None)
 
-    def test_download_invalid_url(self):
-        response = client.get("/invalid_url!")
+    def test_download_invalid_url(self, api_client):
+        response = api_client.get("/invalid_url!")
         assert response.status_code == 400
         data = response.json()["detail"]
         assert data["success"] is False
@@ -132,119 +126,145 @@ class TestDownloadEndpoint:
             ),
         ],
     )
-    def test_download_client_errors(self, error, expected_status, expected_error_type):
-        with patch("src.downloader.api.get_client") as mock_get_client:
-            mock_client = AsyncMock()
-            mock_client.download.side_effect = error
-            mock_get_client.return_value = mock_client
+    def test_download_client_errors(self, api_client, error, expected_status, expected_error_type):
+        mock_client = AsyncMock()
+        mock_client.download.side_effect = error
 
-            response = client.get("/https://example.com")
+        async def mock_get_http_client():
+            return mock_client
+
+        app.dependency_overrides[get_http_client] = mock_get_http_client
+        try:
+            response = api_client.get("/https://example.com")
             assert response.status_code == expected_status
             data = response.json()["detail"]
             assert data["success"] is False
             assert data["error_type"] == expected_error_type
+        finally:
+            app.dependency_overrides.pop(get_http_client, None)
 
-    def test_download_pdf_format(self):
-        with (
-            patch("src.downloader.api.get_client") as mock_get_client,
-            patch("src.downloader.api.generate_pdf_from_url") as mock_generate_pdf,
-        ):
-            # Mock HTTP client
-            mock_client = AsyncMock()
-            mock_client.download.return_value = (
-                b"<html><body>test content</body></html>",
-                {
-                    "url": "https://example.com",
-                    "status_code": 200,
-                    "content_type": "text/html",
-                    "size": 39,
-                    "headers": {"content-type": "text/html"},
-                },
-            )
-            mock_get_client.return_value = mock_client
+    def test_download_pdf_format(self, api_client):
+        mock_client = AsyncMock()
+        mock_client.download.return_value = (
+            b"<html><body>test content</body></html>",
+            {
+                "url": "https://example.com",
+                "status_code": 200,
+                "content_type": "text/html",
+                "size": 39,
+                "headers": {"content-type": "text/html"},
+            },
+        )
 
-            # Mock PDF generation
-            pdf_content = b"%PDF-1.4 fake pdf content"
-            mock_generate_pdf.return_value = pdf_content
+        pdf_content = b"%PDF-1.4 fake pdf content"
 
-            response = client.get("/https://example.com", headers={"Accept": "application/pdf"})
-            assert response.status_code == 200
-            assert response.headers["content-type"] == "application/pdf"
-            assert "Content-Disposition" in response.headers
-            assert "download.pdf" in response.headers["Content-Disposition"]
+        async def mock_get_http_client():
+            return mock_client
 
-            assert response.content == pdf_content
-            mock_generate_pdf.assert_called_once_with("https://example.com")
+        app.dependency_overrides[get_http_client] = mock_get_http_client
+        try:
+            with patch(
+                "src.downloader.services.content_processor.generate_pdf_from_url",
+                return_value=pdf_content,
+            ) as mock_generate_pdf:
+                response = api_client.get(
+                    "/https://example.com", headers={"Accept": "application/pdf"}
+                )
+                assert response.status_code == 200
+                assert response.headers["content-type"] == "application/pdf"
+                assert "Content-Disposition" in response.headers
+                assert "download.pdf" in response.headers["Content-Disposition"]
+                assert response.content == pdf_content
+                mock_generate_pdf.assert_called_once_with("https://example.com")
+        finally:
+            app.dependency_overrides.pop(get_http_client, None)
 
-    def test_download_pdf_generation_error(self):
-        from src.downloader.pdf_generator import PDFGeneratorError
+    def test_download_pdf_generation_error(self, api_client):
+        mock_client = AsyncMock()
+        mock_client.download.return_value = (
+            b"<html><body>test content</body></html>",
+            {
+                "url": "https://example.com",
+                "status_code": 200,
+                "content_type": "text/html",
+                "size": 39,
+                "headers": {"content-type": "text/html"},
+            },
+        )
 
-        with (
-            patch("src.downloader.api.get_client") as mock_get_client,
-            patch("src.downloader.api.generate_pdf_from_url") as mock_generate_pdf,
-        ):
-            # Mock HTTP client
-            mock_client = AsyncMock()
-            mock_client.download.return_value = (
-                b"<html><body>test content</body></html>",
-                {
-                    "url": "https://example.com",
-                    "status_code": 200,
-                    "content_type": "text/html",
-                    "size": 39,
-                    "headers": {"content-type": "text/html"},
-                },
-            )
-            mock_get_client.return_value = mock_client
+        async def mock_get_http_client():
+            return mock_client
 
-            # Mock PDF generation failure
-            mock_generate_pdf.side_effect = PDFGeneratorError("Browser failed to start")
+        app.dependency_overrides[get_http_client] = mock_get_http_client
+        try:
+            with patch(
+                "src.downloader.services.content_processor.generate_pdf_from_url",
+                side_effect=PDFGeneratorError("Browser failed to start"),
+            ):
+                response = api_client.get(
+                    "/https://example.com", headers={"Accept": "application/pdf"}
+                )
+                assert response.status_code == 500
+                data = response.json()["detail"]
+                assert data["success"] is False
+                assert data["error_type"] == "pdf_generation_error"
+                assert "Browser failed to start" in data["error"]
+        finally:
+            app.dependency_overrides.pop(get_http_client, None)
 
-            response = client.get("/https://example.com", headers={"Accept": "application/pdf"})
-            assert response.status_code == 500
-            data = response.json()["detail"]
-            assert data["success"] is False
-            assert data["error_type"] == "pdf_generation_error"
-            assert "Browser failed to start" in data["error"]
-
-    def test_download_pdf_service_unavailable(self):
+    def test_download_pdf_service_unavailable(self, api_client):
         """Test PDF service unavailable when at capacity."""
-        with (
-            patch("src.downloader.api.get_client") as mock_get_client,
-            patch("src.downloader.api.PDF_SEMAPHORE") as mock_semaphore,
-        ):
-            # Mock HTTP client
-            mock_client = AsyncMock()
-            mock_client.download.return_value = (
-                b"<html><body>test content</body></html>",
-                {
-                    "url": "https://example.com",
-                    "status_code": 200,
-                    "content_type": "text/html",
-                    "size": 39,
-                    "headers": {"content-type": "text/html"},
-                },
-            )
-            mock_get_client.return_value = mock_client
+        mock_client = AsyncMock()
+        mock_client.download.return_value = (
+            b"<html><body>test content</body></html>",
+            {
+                "url": "https://example.com",
+                "status_code": 200,
+                "content_type": "text/html",
+                "size": 39,
+                "headers": {"content-type": "text/html"},
+            },
+        )
 
-            # Mock semaphore to be locked (at capacity)
-            mock_semaphore.locked.return_value = True
+        # Create a locked semaphore (0 permits = immediately locked)
+        import asyncio
 
-            response = client.get("/https://example.com", headers={"Accept": "application/pdf"})
+        locked_semaphore = asyncio.Semaphore(0)
+
+        async def mock_get_http_client():
+            return mock_client
+
+        def mock_get_pdf_semaphore():
+            return locked_semaphore
+
+        app.dependency_overrides[get_http_client] = mock_get_http_client
+        app.dependency_overrides[get_pdf_semaphore] = mock_get_pdf_semaphore
+        try:
+            response = api_client.get("/https://example.com", headers={"Accept": "application/pdf"})
 
             assert response.status_code == 503
             data = response.json()["detail"]
             assert data["success"] is False
             assert "temporarily unavailable" in data["error"]
             assert data["error_type"] == "service_unavailable"
+        finally:
+            app.dependency_overrides.pop(get_http_client, None)
+            app.dependency_overrides.pop(get_pdf_semaphore, None)
 
     # --- Authentication Tests ---
 
-    def test_download_no_auth_required(self, env_no_auth, mock_http_client):
+    def test_download_no_auth_required(self, api_client, env_no_auth, mock_http_client):
         """Test download works when no authentication is required."""
-        with patch("src.downloader.api.get_client", return_value=mock_http_client):
-            response = client.get("/https://example.com")
+
+        async def mock_get_http_client():
+            return mock_http_client
+
+        app.dependency_overrides[get_http_client] = mock_get_http_client
+        try:
+            response = api_client.get("/https://example.com")
             assert response.status_code == 200
+        finally:
+            app.dependency_overrides.pop(get_http_client, None)
 
     @pytest.mark.parametrize(
         "headers, expected_status, expected_error_type",
@@ -259,10 +279,10 @@ class TestDownloadEndpoint:
         ],
     )
     def test_download_auth_failed(
-        self, env_with_auth, headers, expected_status, expected_error_type
+        self, api_client, env_with_auth, headers, expected_status, expected_error_type
     ):
         """Test download fails with missing or invalid API key."""
-        response = client.get("/https://example.com", headers=headers)
+        response = api_client.get("/https://example.com", headers=headers)
         assert response.status_code == expected_status
         data = response.json()["detail"]
         assert data["success"] is False
@@ -275,8 +295,15 @@ class TestDownloadEndpoint:
             ({"X-API-Key": "test-key"}),
         ],
     )
-    def test_download_auth_valid(self, env_with_auth, mock_http_client, headers):
+    def test_download_auth_valid(self, api_client, env_with_auth, mock_http_client, headers):
         """Test download works with valid API key."""
-        with patch("src.downloader.api.get_client", return_value=mock_http_client):
-            response = client.get("/https://example.com", headers=headers)
+
+        async def mock_get_http_client():
+            return mock_http_client
+
+        app.dependency_overrides[get_http_client] = mock_get_http_client
+        try:
+            response = api_client.get("/https://example.com", headers=headers)
             assert response.status_code == 200
+        finally:
+            app.dependency_overrides.pop(get_http_client, None)

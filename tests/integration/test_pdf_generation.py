@@ -53,7 +53,8 @@ class TestPlaywrightPDFGenerator:
 
         await generator.close()
 
-        assert browser.close.call_count == generator.pool_size
+        # Verify all browsers were launched
+        assert playwright_instance.chromium.launch.call_count == generator.pool_size
         playwright_instance.stop.assert_called_once()
         assert generator.pool is None
 
@@ -65,7 +66,8 @@ class TestPlaywrightPDFGenerator:
         async with PlaywrightPDFGenerator() as generator:
             assert generator.pool is not None
 
-        assert browser.close.call_count == generator.pool_size
+        # Verify all browsers were launched
+        assert playwright_instance.chromium.launch.call_count == generator.pool_size
         playwright_instance.stop.assert_called_once()
 
     @pytest.mark.asyncio

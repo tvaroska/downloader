@@ -19,9 +19,14 @@ def env_no_auth():
 
 @pytest.fixture(autouse=False)
 def env_with_auth():
-    """Fixture to set authentication environment variables."""
+    """Fixture to set authentication environment variables.
+
+    Also clears REDIS_URI to prevent lifespan from trying to connect to Redis.
+    """
     # Use patch.dict as context manager so it's active during test
-    with patch.dict(os.environ, {"DOWNLOADER_KEY": "test-key"}, clear=True):
+    # Clear REDIS_URI to prevent Redis connection attempts during lifespan
+    env_vars = {"DOWNLOADER_KEY": "test-key"}
+    with patch.dict(os.environ, env_vars, clear=True):
         # Need to reload settings here while env is patched
         from src.downloader.config import reload_settings
 
