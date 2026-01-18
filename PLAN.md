@@ -51,12 +51,13 @@
 
 ### 3. Documentation (P1 - High)
 
-3.1. **S0-DOC-1: Update api-reference.md**
+3.1. ~~**S0-DOC-1: Update api-reference.md**~~ ✅
    - File: `doc/api-reference.md`
    - Issues:
      - Line 13: States "no authentication required" - false
      - Line 498-503: States "no rate limiting" - false
    - Fix: Update to reflect actual implemented features
+   - Plan: `.claude/plans/rustling-tinkering-sutherland.md`
    - Effort: 1 hour
 
 3.2. **S0-DOC-2: Update PRD.md roadmap section**

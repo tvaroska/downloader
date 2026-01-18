@@ -10,7 +10,55 @@ http://localhost:8000
 
 ## Authentication
 
-Currently, no authentication is required. Future versions will support API key authentication.
+API key authentication is supported and can be enabled by setting the `DOWNLOADER_KEY` environment variable.
+
+### Configuration
+
+| Environment Variable | Description |
+|---------------------|-------------|
+| `DOWNLOADER_KEY` | API key for authentication. When set, all requests must include a valid API key. |
+
+### Authentication Methods
+
+When authentication is enabled, provide your API key using one of these methods:
+
+**Method 1: Bearer Token (Authorization header)**
+```http
+Authorization: Bearer your-api-key
+```
+
+**Method 2: X-API-Key Header**
+```http
+X-API-Key: your-api-key
+```
+
+### Authentication Errors
+
+**401 Unauthorized - Missing API Key:**
+```json
+{
+  "detail": {
+    "success": false,
+    "error": "API key required. Provide via Authorization header or X-API-Key header",
+    "error_type": "authentication_required"
+  }
+}
+```
+
+**401 Unauthorized - Invalid API Key:**
+```json
+{
+  "detail": {
+    "success": false,
+    "error": "Invalid API key",
+    "error_type": "authentication_failed"
+  }
+}
+```
+
+### Disabling Authentication
+
+To run the API without authentication (development/testing only), simply do not set the `DOWNLOADER_KEY` environment variable.
 
 ## Content Negotiation
 
@@ -497,10 +545,62 @@ All errors return JSON responses with structured error information.
 
 ## Rate Limiting
 
-Currently, no rate limiting is implemented. Future versions will include:
-- Per-IP rate limiting
-- API key-based rate limiting
-- Configurable rate limits
+Rate limiting is enabled by default to prevent abuse and ensure fair resource allocation.
+
+### Default Rate Limits
+
+| Endpoint Pattern | Limit | Description |
+|-----------------|-------|-------------|
+| `/health`, `/metrics` | 200/minute | Lightweight status endpoints |
+| `/{url}` (download) | 60/minute | Resource-intensive download operations |
+| `/batch` | 20/minute | Async batch job creation |
+| All other endpoints | 100/minute | Default limit |
+
+### Storage Backend
+
+Rate limiting supports two storage backends:
+
+| Backend | Configuration | Use Case |
+|---------|---------------|----------|
+| Redis | Set `RATELIMIT_STORAGE_URI` or `REDIS_URI` | Distributed rate limiting across multiple instances |
+| In-memory | Default (no config needed) | Single instance deployments |
+
+### Rate Limit Headers
+
+When rate limiting is enabled, responses include the following headers:
+
+| Header | Description |
+|--------|-------------|
+| `X-RateLimit-Limit` | Maximum requests allowed in the time window |
+| `X-RateLimit-Remaining` | Requests remaining in current window |
+| `X-RateLimit-Reset` | Unix timestamp when the rate limit resets |
+
+### Rate Limit Exceeded Response
+
+**429 Too Many Requests:**
+```json
+{
+  "detail": {
+    "success": false,
+    "error": "Rate limit exceeded. Try again later.",
+    "error_type": "rate_limit_exceeded"
+  }
+}
+```
+
+### Configuration
+
+Rate limits can be customized via environment variables:
+
+| Environment Variable | Default | Description |
+|---------------------|---------|-------------|
+| `RATELIMIT_ENABLED` | `true` | Enable/disable rate limiting |
+| `RATELIMIT_DEFAULT_LIMIT` | `100/minute` | Default rate limit |
+| `RATELIMIT_DOWNLOAD_LIMIT` | `60/minute` | Download endpoint limit |
+| `RATELIMIT_BATCH_LIMIT` | `20/minute` | Batch endpoint limit |
+| `RATELIMIT_STATUS_LIMIT` | `200/minute` | Status endpoint limit |
+| `RATELIMIT_STORAGE_URI` | None | Redis URI for distributed limiting |
+| `RATELIMIT_HEADERS_ENABLED` | `true` | Include rate limit headers |
 
 ## Security Features
 
@@ -543,35 +643,53 @@ Automatically removes:
 ### cURL Examples
 
 ```bash
-# Get article text
-curl -H "Accept: text/plain" "http://localhost:8000/https://news.ycombinator.com"
+# Get article text (with authentication)
+curl -H "Accept: text/plain" \
+     -H "Authorization: Bearer your-api-key" \
+     "http://localhost:8000/https://news.ycombinator.com"
 
-# Get markdown format
-curl -H "Accept: text/markdown" "http://localhost:8000/https://github.com/python/cpython"
+# Get markdown format (using X-API-Key header)
+curl -H "Accept: text/markdown" \
+     -H "X-API-Key: your-api-key" \
+     "http://localhost:8000/https://github.com/python/cpython"
 
 # Get JSON with metadata
-curl -H "Accept: application/json" "http://localhost:8000/https://httpbin.org/json"
+curl -H "Accept: application/json" \
+     -H "Authorization: Bearer your-api-key" \
+     "http://localhost:8000/https://httpbin.org/json"
 
 # Get original HTML
-curl -H "Accept: text/html" "http://localhost:8000/https://example.com"
+curl -H "Accept: text/html" \
+     -H "Authorization: Bearer your-api-key" \
+     "http://localhost:8000/https://example.com"
 ```
 
 ### Python Example
 
 ```python
 import requests
+import base64
+
+API_KEY = "your-api-key"
+BASE_URL = "http://localhost:8000"
 
 # Get article text
 response = requests.get(
-    "http://localhost:8000/https://example.com",
-    headers={"Accept": "text/plain"}
+    f"{BASE_URL}/https://example.com",
+    headers={
+        "Accept": "text/plain",
+        "Authorization": f"Bearer {API_KEY}"
+    }
 )
 article_text = response.text
 
 # Get JSON with metadata
 response = requests.get(
-    "http://localhost:8000/https://example.com",
-    headers={"Accept": "application/json"}
+    f"{BASE_URL}/https://example.com",
+    headers={
+        "Accept": "application/json",
+        "X-API-Key": API_KEY
+    }
 )
 data = response.json()
 content = base64.b64decode(data["content"])
@@ -580,15 +698,24 @@ content = base64.b64decode(data["content"])
 ### JavaScript Example
 
 ```javascript
+const API_KEY = "your-api-key";
+const BASE_URL = "http://localhost:8000";
+
 // Get article text
-const response = await fetch("http://localhost:8000/https://example.com", {
-  headers: { "Accept": "text/plain" }
+const response = await fetch(`${BASE_URL}/https://example.com`, {
+  headers: {
+    "Accept": "text/plain",
+    "Authorization": `Bearer ${API_KEY}`
+  }
 });
 const articleText = await response.text();
 
 // Get JSON with metadata
-const jsonResponse = await fetch("http://localhost:8000/https://example.com", {
-  headers: { "Accept": "application/json" }
+const jsonResponse = await fetch(`${BASE_URL}/https://example.com`, {
+  headers: {
+    "Accept": "application/json",
+    "X-API-Key": API_KEY
+  }
 });
 const data = await jsonResponse.json();
 const content = atob(data.content); // Decode base64
