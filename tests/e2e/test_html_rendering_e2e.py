@@ -49,9 +49,9 @@ class TestHTMLRenderingE2E:
 
         # Verify X-Rendered-With-JS header
         rendered_with_js = response.headers.get("X-Rendered-With-JS", "false")
-        assert (
-            rendered_with_js == "true"
-        ), f"Expected JS rendering to be triggered, got X-Rendered-With-JS: {rendered_with_js}"
+        assert rendered_with_js == "true", (
+            f"Expected JS rendering to be triggered, got X-Rendered-With-JS: {rendered_with_js}"
+        )
 
         # Parse HTML
         soup = BeautifulSoup(response.text, "html.parser")
@@ -61,18 +61,18 @@ class TestHTMLRenderingE2E:
         assert title_tag is not None, "Missing <title> tag"
         title_text = title_tag.get_text(strip=True)
         assert len(title_text) > 0, "Title tag is empty"
-        assert (
-            "SHACL" in title_text or "Understanding" in title_text
-        ), f"Unexpected title: {title_text}"
+        assert "SHACL" in title_text or "Understanding" in title_text, (
+            f"Unexpected title: {title_text}"
+        )
 
         # Verify OpenGraph title
         og_title = soup.find("meta", property="og:title")
         assert og_title is not None, "Missing <meta property='og:title'>"
         og_title_content = og_title.get("content", "")
         assert len(og_title_content) > 0, "og:title content is empty"
-        assert (
-            "SHACL" in og_title_content or "Understanding" in og_title_content
-        ), f"Unexpected og:title: {og_title_content}"
+        assert "SHACL" in og_title_content or "Understanding" in og_title_content, (
+            f"Unexpected og:title: {og_title_content}"
+        )
 
         # Verify OpenGraph description
         og_description = soup.find("meta", property="og:description")
@@ -89,9 +89,9 @@ class TestHTMLRenderingE2E:
 
         # Verify response size is substantial (should be >100KB for fully rendered Substack)
         response_size = len(response.content)
-        assert (
-            response_size > 100_000
-        ), f"Response too small ({response_size} bytes), expected >100KB for rendered Substack"
+        assert response_size > 100_000, (
+            f"Response too small ({response_size} bytes), expected >100KB for rendered Substack"
+        )
 
         # Log metadata for verification
         print("\n✅ Substack E2E Test Results:")
@@ -198,15 +198,15 @@ class TestHTMLRenderingE2E:
         print(f"  Size increase: {size_increase_ratio:.1f}x")
 
         # Assertions
-        assert (
-            downloader_has_og_title
-        ), "Downloader service should return HTML with og:title metadata"
-        assert (
-            downloader_size > raw_size
-        ), f"Downloader service response ({downloader_size}) should be larger than raw fetch ({raw_size})"
-        assert (
-            size_increase_ratio > 2.0
-        ), f"Expected at least 2x size increase, got {size_increase_ratio:.1f}x"
+        assert downloader_has_og_title, (
+            "Downloader service should return HTML with og:title metadata"
+        )
+        assert downloader_size > raw_size, (
+            f"Downloader service response ({downloader_size}) should be larger than raw fetch ({raw_size})"
+        )
+        assert size_increase_ratio > 2.0, (
+            f"Expected at least 2x size increase, got {size_increase_ratio:.1f}x"
+        )
 
     @pytest.mark.asyncio
     async def test_headers_indicate_rendering_status(self):
@@ -240,9 +240,9 @@ class TestHTMLRenderingE2E:
 
                 # For Substack, we expect rendering to be triggered
                 if test_case["expected_rendering"]:
-                    assert (
-                        rendered_with_js == "true"
-                    ), f"{test_case['description']}: Expected X-Rendered-With-JS: true, got {rendered_with_js}"
+                    assert rendered_with_js == "true", (
+                        f"{test_case['description']}: Expected X-Rendered-With-JS: true, got {rendered_with_js}"
+                    )
 
                 print(f"\n  {test_case['description']}: X-Rendered-With-JS = {rendered_with_js} ✓")
 

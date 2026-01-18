@@ -120,9 +120,9 @@ class TestJSFrameworkMarkers:
         soup = BeautifulSoup(html, "html.parser")
         body_text = soup.find("body").get_text(strip=True)
 
-        assert not _has_js_framework_markers(
-            soup, body_text
-        ), "Substantial content should not trigger"
+        assert not _has_js_framework_markers(soup, body_text), (
+            "Substantial content should not trigger"
+        )
 
     def test_no_detection_without_framework_markers(self):
         """Test that pages without framework markers aren't flagged."""
