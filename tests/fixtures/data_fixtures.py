@@ -6,9 +6,7 @@ import pytest
 @pytest.fixture
 def sample_html_content():
     """Fixture providing sample HTML content for tests."""
-    return (
-        b"<html><head><title>Test</title></head>" b"<body><h1>Hello</h1><p>World</p></body></html>"
-    )
+    return b"<html><head><title>Test</title></head><body><h1>Hello</h1><p>World</p></body></html>"
 
 
 @pytest.fixture

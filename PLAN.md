@@ -25,15 +25,15 @@
    - Effort: 2-3 hours
    - Plan: `.claude/plans/moonlit-coalescing-crane.md`
 
-1.3. **S0-CICD-1: Add GitHub Actions CI pipeline**
+1.3. ~~**S0-CICD-1: Add GitHub Actions CI pipeline**~~ ✅
    - Create: `.github/workflows/ci.yml`
-   - Include: lint, type-check, smoke tests, build verification
-   - Effort: 2 hours
+   - Trunk-based: lint+smoke on push, full tests+coverage on PRs/tags
+   - Plan: `.claude/plans/magical-whistling-beacon.md`
+   - Effort: 1.5 hours
 
-1.4. **S0-CICD-2: Add test coverage reporting**
-   - Add coverage threshold gate (target: 80%)
-   - Upload to Codecov or similar
-   - Effort: 1 hour
+1.4. ~~**S0-CICD-2: Add test coverage reporting**~~ ✅
+   - Merged into S0-CICD-1: 80% threshold + Codecov upload on PRs/tags
+   - Effort: (included above)
 
 ### 2. Memory & Stability (P0 - Critical)
 
