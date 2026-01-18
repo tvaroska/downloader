@@ -180,7 +180,7 @@ async def main():
             content_preview = result.get("error", "Unknown error")
 
         print(f"   {i}. {status_icon} {result['url']}")
-        print(f"      Format: {result['format']}, " f"Duration: {result.get('duration', 0):.2f}s")
+        print(f"      Format: {result['format']}, Duration: {result.get('duration', 0):.2f}s")
         print(f"      Content: {content_preview}")
         print()
 

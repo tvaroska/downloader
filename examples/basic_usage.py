@@ -123,7 +123,7 @@ async def demo_markdown_format():
 
             if response.status_code == 200:
                 markdown_content = response.text
-                print(f"✅ Success! Generated {len(markdown_content)} characters of " f"markdown")
+                print(f"✅ Success! Generated {len(markdown_content)} characters of markdown")
 
                 # Show preview
                 lines = markdown_content.split("\n")
@@ -222,7 +222,7 @@ async def demo_pdf_format():
                 print("📊 Response headers:")
                 print(f"   Content-Type: {response.headers.get('content-type')}")
                 print(f"   Content-Length: {response.headers.get('content-length')}")
-                print(f"   Content-Disposition: " f"{response.headers.get('content-disposition')}")
+                print(f"   Content-Disposition: {response.headers.get('content-disposition')}")
 
                 # Save to file
                 OUTPUT_DIR.mkdir(exist_ok=True)

@@ -325,18 +325,14 @@ async def main():
         print("\n🎯 Examples Summary:")
         print("   All batch processing examples completed!")
         print(f"   Check the '{OUTPUT_DIR}' directory for saved results.")
-        print("   Each batch creates both detailed JSON logs and individual " "content files.")
+        print("   Each batch creates both detailed JSON logs and individual content files.")
 
         print("\n💡 Tips for using batch processing:")
         print("   • Use appropriate concurrency limits based on your server resources")
-        print("   • Set reasonable timeouts for different content types " "(PDF takes longer)")
+        print("   • Set reasonable timeouts for different content types (PDF takes longer)")
         print("   • Monitor the batch_id for tracking specific batch operations")
-        print(
-            "   • Handle partial failures gracefully - some URLs may fail " "while others succeed"
-        )
-        print(
-            "   • Use different formats in the same batch for efficient " "multi-format processing"
-        )
+        print("   • Handle partial failures gracefully - some URLs may fail while others succeed")
+        print("   • Use different formats in the same batch for efficient multi-format processing")
 
         print("\n🏁 Examples completed successfully!")
 

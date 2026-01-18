@@ -30,10 +30,10 @@ jobs:
         run: uv sync --frozen
 
       - name: Run ruff linting
-        run: uv run ruff check src/ tests/
+        run: uv run ruff check src/ tests/ examples/
 
       - name: Run ruff format check
-        run: uv run ruff format --check src/ tests/
+        run: uv run ruff format --check src/ tests/ examples/
 
       - name: Run smoke tests
         run: uv run pytest tests/ -m smoke -v --timeout=30
