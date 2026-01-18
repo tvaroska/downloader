@@ -110,10 +110,11 @@
    - Plan: `.claude/plans/atomic-baking-conway.md`
    - Effort: 1 hour
 
-5.3. **S0-REFACTOR-3: Replace magic numbers with config**
-   - File: `src/downloader/content_converter.py:74,141`
+5.3. ~~**S0-REFACTOR-3: Replace magic numbers with config**~~ ✅
+   - File: `src/downloader/content_converter.py:119,186`
    - Issue: Hardcoded `< 100` and `< 200` character thresholds
-   - Fix: Add to ContentConfig
+   - Fix: Added `min_body_text_threshold` and `min_js_framework_content_threshold` to ContentConfig
+   - Plan: `.claude/plans/sparkling-churning-hedgehog.md`
    - Effort: 30 minutes
 
 ---

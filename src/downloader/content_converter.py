@@ -7,6 +7,7 @@ from typing import Literal
 
 from bs4 import BeautifulSoup, Tag
 
+from .config import get_settings
 from .pdf_generator import get_shared_pdf_generator
 
 logger = logging.getLogger(__name__)
@@ -116,7 +117,8 @@ def should_use_playwright_fallback(url: str, content: bytes, content_type: str) 
 
         # Get text content and check if substantial
         body_text = body.get_text(strip=True)
-        if len(body_text) < 100:  # Less than 100 chars likely not useful
+        settings = get_settings()
+        if len(body_text) < settings.content.min_body_text_threshold:
             _empty_content_cache.add(url)
             logger.debug(f"Caching empty content URL (body text: {len(body_text)} chars): {url}")
             return False
@@ -183,7 +185,8 @@ def _has_js_framework_markers(soup: BeautifulSoup, body_text: str) -> bool:
 
     # If we have framework markers but minimal content, likely needs JS rendering
     has_framework_marker = react_root is not None or vue_app is not None or angular_app is not None
-    has_minimal_content = len(body_text) < 200
+    settings = get_settings()
+    has_minimal_content = len(body_text) < settings.content.min_js_framework_content_threshold
 
     return has_framework_marker and has_minimal_content
 

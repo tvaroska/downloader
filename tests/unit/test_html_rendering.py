@@ -369,3 +369,85 @@ class TestPlaywrightDetection:
             assert isinstance(result, bool)
         except Exception as e:
             pytest.fail(f"Malformed HTML should be handled gracefully, but raised: {e}")
+
+
+@pytest.mark.unit
+class TestConfigurableThresholds:
+    """Test configurable content detection thresholds."""
+
+    def test_default_body_text_threshold_is_100(self):
+        """Test that default min_body_text_threshold is 100."""
+        from src.downloader.config import ContentConfig
+
+        config = ContentConfig()
+        assert config.min_body_text_threshold == 100
+
+    def test_default_js_framework_threshold_is_200(self):
+        """Test that default min_js_framework_content_threshold is 200."""
+        from src.downloader.config import ContentConfig
+
+        config = ContentConfig()
+        assert config.min_js_framework_content_threshold == 200
+
+    def test_js_framework_markers_uses_config_threshold(self, monkeypatch):
+        """Test that _has_js_framework_markers respects config threshold."""
+        # Set a custom threshold via environment variable
+        monkeypatch.setenv("CONTENT_MIN_JS_FRAMEWORK_CONTENT_THRESHOLD", "150")
+
+        # Reload settings to pick up new env var
+        from src.downloader import config
+
+        config._settings = None  # Reset singleton
+
+        # HTML with 175 chars of body text (between 150 and 200)
+        body_content = "x" * 175
+        html = f"""<html><body>
+            <div id="root">
+                <p>{body_content}</p>
+            </div>
+        </body></html>"""
+        soup = BeautifulSoup(html, "html.parser")
+        body_text = soup.find("body").get_text(strip=True)
+
+        # With default threshold (200): 175 < 200 = True (would trigger)
+        # With custom threshold (150): 175 >= 150 = False (should NOT trigger)
+        result = _has_js_framework_markers(soup, body_text)
+
+        # Cleanup: reset settings
+        config._settings = None
+
+        assert not result, "175 chars should not trigger with threshold=150"
+
+    def test_playwright_fallback_uses_config_threshold(self, monkeypatch):
+        """Test that should_use_playwright_fallback respects config threshold."""
+        from src.downloader import config, content_converter
+
+        # Set a custom threshold via environment variable
+        monkeypatch.setenv("CONTENT_MIN_BODY_TEXT_THRESHOLD", "50")
+        config._settings = None  # Reset singleton
+
+        # Clear caches
+        content_converter._empty_content_cache.clear()
+        content_converter._fallback_bypass_cache.clear()
+
+        # HTML with 75 chars of body text (between 50 and 100)
+        body_content = "x" * 75
+        html = f"""<html><body>
+            <article>
+                <p>{body_content}</p>
+            </article>
+        </body></html>""".encode()
+
+        url = "https://example.com/test-threshold"
+        content_type = "text/html"
+
+        # With default threshold (100): 75 < 100 = False (caches as empty)
+        # With custom threshold (50): 75 >= 50 = True (allows fallback)
+        from src.downloader.content_converter import should_use_playwright_fallback
+
+        result = should_use_playwright_fallback(url, html, content_type)
+
+        # Cleanup
+        config._settings = None
+
+        assert result, "75 chars should allow fallback with threshold=50"

@@ -243,6 +243,20 @@ class ContentConfig(BaseSettings):
         description="Known JS-heavy domains that always need rendering",
     )
 
+    # Content Detection Thresholds
+    min_body_text_threshold: int = Field(
+        default=100,
+        ge=10,
+        le=1000,
+        description="Minimum body text chars to consider content useful (default: 100)",
+    )
+    min_js_framework_content_threshold: int = Field(
+        default=200,
+        ge=50,
+        le=2000,
+        description="Minimum body text chars for JS framework detection (default: 200)",
+    )
+
     model_config = SettingsConfigDict(env_prefix="CONTENT_")
 
     @field_validator("html_js_heavy_domains", mode="before")
