@@ -47,13 +47,14 @@
    - [ ] Add explicit zombie process cleanup on timeout
    - Files: `src/downloader/browser/manager.py`
 
-2.2. **S2-SEC-2: Add browser security hardening** ✅ PARTIALLY DONE
+2.2. **S2-SEC-2: Add browser security hardening** ✅ DONE
    - [x] `--disable-extensions`, `--disable-plugins` already set
    - [x] `--no-sandbox`, `--disable-dev-shm-usage` for container safety
-   - [ ] Remove `--disable-web-security` flag (currently enabled, insecure)
-   - [ ] Add `--disable-webgl` flag
-   - [ ] Add file:// URL blocking in validation layer
-   - Files: `src/downloader/pdf_generator.py`, `src/downloader/validation.py`
+   - [x] Remove `--disable-web-security` flag (currently enabled, insecure)
+   - [x] Add `--disable-webgl` flag
+   - [x] Add file:// URL blocking in validation layer
+   - Files: `src/downloader/browser/manager.py`, `src/downloader/validation.py`
+   - Plan: `.claude/plans/keen-booping-beaver.md`
 
 ### 3. Testing (P1 - Required)
 
@@ -105,7 +106,7 @@
 - [x] `?wait_for=<selector>` waits for element before returning
 - [x] Browser sessions timeout after 30 seconds (already implemented)
 - [x] Memory usage limited to 512MB per session (via `--js-flags=--max-old-space-size`)
-- [ ] `--disable-web-security` removed, file:// URLs blocked
+- [x] `--disable-web-security` removed, file:// URLs blocked
 - [x] Dockerfile builds with Playwright support (already done)
 - [ ] All browser rendering tests pass
 - [ ] API documentation updated with new parameters

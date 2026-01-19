@@ -49,7 +49,7 @@ class BrowserConfig:
             "--disable-plugins",
             "--disable-default-apps",
             "--disable-remote-fonts",
-            "--disable-web-security",  # TODO: Remove in S2-SEC-2
+            "--disable-webgl",
         ]
     )
 

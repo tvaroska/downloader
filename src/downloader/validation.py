@@ -66,7 +66,9 @@ def validate_url(url: str, settings: Settings | None = None) -> str:
     except Exception as e:
         raise URLValidationError(f"Invalid URL format: {e}")
 
-    # Validate scheme
+    # Validate scheme - block file:// URLs explicitly for security
+    if parsed.scheme == "file":
+        raise URLValidationError("Access to local file system via file:// URLs is not allowed")
     if parsed.scheme not in ("http", "https"):
         raise URLValidationError("URL must use http or https scheme")
 
