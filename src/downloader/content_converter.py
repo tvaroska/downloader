@@ -503,12 +503,13 @@ def _convert_to_markdown(main_content: BeautifulSoup | Tag) -> str:
 
 def _convert_to_text(main_content: BeautifulSoup | Tag) -> str:
     """Convert soup element to plain text format."""
-    # Extract text with proper spacing
-    text = main_content.get_text(separator=" ", strip=True)
+    from .transformers.plaintext import html_to_plaintext
 
-    # Clean up excessive whitespace
-    text = re.sub(r"\s+", " ", text).strip()
-    return text
+    # Convert soup back to HTML string for the transformer
+    html_str = str(main_content)
+
+    # Use the transformer (extract_main_content=False since already extracted)
+    return html_to_plaintext(html_str, extract_main_content=False)
 
 
 def convert_content(

@@ -42,11 +42,12 @@
 
 ### 2. Plain Text Extraction (P2 - Core)
 
-2.1. **S1-BE-4: Implement plain text extractor**
-   - Create `src/downloader/transformers/text.py`
-   - Use BeautifulSoup to strip tags and extract clean text
-   - Handle whitespace normalization
-   - Effort: 1-2 hours
+2.1. **S1-BE-4: Implement plain text extractor** ✅
+   - [x] Create `src/downloader/transformers/plaintext.py`
+   - [x] Use BeautifulSoup to strip tags and extract clean text
+   - [x] Handle whitespace normalization
+   - Completed: 2026-01-18
+   - Plan: .claude/plans/fancy-popping-origami.md
 
 2.2. **S1-TEST-2: Add text extraction tests**
    - Create `tests/lib/test_text_transformer.py`
