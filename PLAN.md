@@ -82,11 +82,11 @@
    - [x] Container builds and runs with Chromium
    - Files: `Dockerfile`
 
-4.2. **S2-DOC-1: Document browser rendering feature**
+4.2. **S2-DOC-1: Document browser rendering feature** ✅ DONE
    - [x] Auto-rendering behavior documented (implicit)
-   - [ ] Add `?render=true` parameter to API reference
-   - [ ] Add `?wait_for=<selector>` parameter to API reference
-   - [ ] Add examples for SPA scraping
+   - [x] Add `?render=true` parameter to API reference
+   - [x] Add `?wait_for=<selector>` parameter to API reference
+   - [x] Add examples for SPA scraping
    - Files: `docs/api/api-reference.md`
 
 ---
@@ -99,7 +99,7 @@
 | Security | — | ✅ Done |
 | Testing | — | ✅ Done |
 | Infrastructure | — | ✅ Done |
-| Documentation | Document new params | 1 task partial |
+| Documentation | — | ✅ Done |
 
 ---
 
@@ -112,7 +112,7 @@
 - [x] `--disable-web-security` removed, file:// URLs blocked
 - [x] Dockerfile builds with Playwright support (already done)
 - [x] All browser rendering tests pass
-- [ ] API documentation updated with new parameters
+- [x] API documentation updated with new parameters
 
 ---
 

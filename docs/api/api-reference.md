@@ -129,6 +129,13 @@ Download and process content from any public URL with intelligent content extrac
 **Headers:**
 - `Accept` (optional) - Content format preference
 
+**Query Parameters:**
+
+| Parameter | Type | Default | Description |
+|-----------|------|---------|-------------|
+| `render` | boolean | `false` | Force JavaScript rendering with Playwright. Bypasses auto-detection and renders the page in a headless browser. |
+| `wait_for` | string | `null` | CSS selector to wait for before returning content. Implies `render=true`. Times out after 10 seconds with 408 error. Max 500 characters. |
+
 **Supported Accept Header Values:**
 
 #### Plain Text Response (`text/plain`)
@@ -773,6 +780,137 @@ Currently no caching is implemented. Future versions will include:
 - Redis-based response caching
 - TTL-based cache invalidation
 - Cache-Control header support
+
+## Browser Rendering (JavaScript/SPA Support)
+
+The API supports rendering JavaScript-heavy pages using Playwright with headless Chromium. This enables scraping of Single Page Applications (SPAs), React/Vue/Angular sites, and any page that requires JavaScript execution.
+
+### Auto-Detection
+
+By default, the API attempts to auto-detect pages that require JavaScript rendering. However, for reliable results with SPAs, use explicit rendering parameters.
+
+### Force Rendering with `?render=true`
+
+Use `?render=true` to force JavaScript rendering, bypassing auto-detection:
+
+```bash
+# Render a React application
+curl -H "Accept: text/markdown" \
+     "http://localhost:8000/https://react-app.example.com?render=true"
+
+# Get rendered HTML from a Vue.js SPA
+curl -H "Accept: text/html" \
+     "http://localhost:8000/https://vuejs-app.example.com?render=true"
+```
+
+### Wait for Dynamic Content with `?wait_for=<selector>`
+
+For SPAs that load content dynamically after initial page load, use `?wait_for=` to wait for a specific CSS selector before extracting content:
+
+```bash
+# Wait for main content container to appear
+curl -H "Accept: text/plain" \
+     "http://localhost:8000/https://spa.example.com?wait_for=.main-content"
+
+# Wait for article to load in a news site
+curl -H "Accept: text/markdown" \
+     "http://localhost:8000/https://news.example.com/article?wait_for=article"
+
+# Wait for data table to populate
+curl -H "Accept: text/html" \
+     "http://localhost:8000/https://dashboard.example.com?wait_for=#data-table"
+```
+
+**Note:** When `wait_for` is specified, `render=true` is automatically enabled.
+
+### SPA Scraping Examples
+
+#### React Application
+
+```bash
+# Get content from a React app after hydration
+curl -H "Accept: text/markdown" \
+     "http://localhost:8000/https://reactjs.org/docs?render=true&wait_for=.docs-content"
+```
+
+#### Vue.js Application
+
+```bash
+# Wait for Vue component to mount
+curl -H "Accept: text/plain" \
+     "http://localhost:8000/https://vuejs.org/guide?wait_for=#main-content"
+```
+
+#### Angular Application
+
+```bash
+# Wait for Angular app to bootstrap
+curl -H "Accept: text/html" \
+     "http://localhost:8000/https://angular.io/docs?wait_for=app-root"
+```
+
+#### Infinite Scroll / Lazy Loading
+
+```bash
+# Wait for initial items to load
+curl -H "Accept: text/markdown" \
+     "http://localhost:8000/https://infinite-scroll.example.com?wait_for=.item-list"
+```
+
+### Timeout Handling
+
+The `wait_for` parameter has a 10-second timeout. If the selector is not found within this time, the API returns a 408 Request Timeout error:
+
+```json
+{
+  "detail": {
+    "success": false,
+    "error": "Timeout waiting for selector '.non-existent-element' after 10s",
+    "error_type": "timeout_error"
+  }
+}
+```
+
+### Browser Session Limits
+
+- **Timeout:** 30 seconds per browser session
+- **Memory limit:** 512MB per browser context
+- **Concurrency:** Managed via internal browser pool
+
+### Python Example with Rendering
+
+```python
+import requests
+
+BASE_URL = "http://localhost:8000"
+
+# Scrape a React SPA
+response = requests.get(
+    f"{BASE_URL}/https://react-app.example.com",
+    params={
+        "render": "true",
+        "wait_for": ".app-container"
+    },
+    headers={"Accept": "text/markdown"}
+)
+content = response.text
+```
+
+### JavaScript Example with Rendering
+
+```javascript
+const BASE_URL = "http://localhost:8000";
+
+// Scrape a Vue.js SPA
+const url = new URL(`${BASE_URL}/https://vuejs-app.example.com`);
+url.searchParams.set("render", "true");
+url.searchParams.set("wait_for", "#app");
+
+const response = await fetch(url, {
+  headers: { "Accept": "text/markdown" }
+});
+const content = await response.text();
+```
 
 ## Versioning
 
