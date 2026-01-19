@@ -64,6 +64,38 @@ To run the API without authentication (development/testing only), simply do not 
 
 The API uses HTTP Accept headers to determine response format. This allows the same endpoint to return different content types based on client preferences.
 
+### Supported Formats
+
+| Accept Header | Format | Description |
+|--------------|--------|-------------|
+| `text/plain` | Plain Text | Clean text with HTML tags stripped |
+| `text/markdown` | Markdown | HTML converted to Markdown format |
+| `text/html` | HTML | Original or rendered HTML content |
+| `application/json` | JSON | Base64-encoded content with metadata |
+| `application/pdf` | PDF | Page rendered as PDF document |
+| (none/other) | Plain Text | Default fallback format |
+
+### Multi-Format Requests
+
+Request multiple formats in a single request by specifying comma-separated Accept values:
+
+**Request:**
+```http
+GET /https://example.com
+Accept: text/html, text/markdown
+```
+
+**Response:**
+```json
+{
+  "text/html": "<!doctype html>...",
+  "text/markdown": "# Example Domain\n\n...",
+  "errors": {}
+}
+```
+
+When multiple formats are requested, the response is always JSON containing all requested formats.
+
 ## Endpoints
 
 ### Health Check

@@ -57,12 +57,14 @@
 
 ### 3. API Documentation (P1 - Required)
 
-3.1. **S1-DOC-1: Update API reference for content negotiation**
-   - File: `docs/api/api-reference.md`
-   - Document `Accept` header support (`text/markdown`, `text/plain`, `text/html`)
-   - Add batch request format option
-   - Include example responses
-   - Effort: 1 hour
+3.1. **S1-DOC-1: Update API reference for content negotiation** ✅
+   - [x] Document `Accept` header support (`text/markdown`, `text/plain`, `text/html`)
+   - [x] Add batch request format option
+   - [x] Include example responses
+   - [x] Add supported formats summary table
+   - [x] Document multi-format requests
+   - Completed: 2026-01-18
+   - Plan: .claude/plans/synchronous-sniffing-ullman.md
 
 ---
 
@@ -85,7 +87,7 @@
 - [ ] Batch endpoint supports `format` option
 - [ ] Markdown preserves headings, lists, links, and code blocks
 - [ ] All transformation tests pass
-- [ ] API documentation updated
+- [x] API documentation updated
 - [ ] Transformation adds < 500ms to response time
 
 ---
