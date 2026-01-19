@@ -1,176 +1,121 @@
 # REST API Downloader - Sprint Plan
 
-## Current Sprint: Sprint 0 (Production Readiness)
+**Last Updated:** 2026-01-18
 
-**Priority:** Critical - Block production deployment until complete
-**Estimated Effort:** 20-30 hours
-**Focus:** Fix gaps identified in agency code review (FEEDBACK.md)
+## Current Sprint: Sprint 1 (Content Transformation)
+
+**Priority:** High - Core feature for LLM use cases
+**Estimated Effort:** 1 week (senior engineer)
+**Focus:** Transform downloaded content into formats optimized for LLM consumption
 
 ---
 
-## Sprint 0 - Production Readiness
+## Sprint 1 - Content Transformation
 
-### 1. Testing & CI/CD (P0 - Critical)
+### 1. HTML to Markdown (P1 - Core)
 
-1.1. ~~**S0-TEST-1: Fix version mismatch in tests**~~ ✅
-   - Files: `tests/smoke/test_server_startup.py:14`, `tests/api/test_health.py:14,39`
-   - Issue: Tests hardcode version `0.2.0` but actual version is `0.2.1`
-   - Fix: Use dynamic version import or fixture
-   - Effort: 15 minutes
+1.1. **S1-BE-1: Add markdownify dependency and core converter** ✅
+   - [x] Add `markdownify>=0.11.0` to pyproject.toml
+   - [x] Create `src/downloader/transformers/markdown.py`
+   - [x] Implement `html_to_markdown()` with heading, list, link, code block preservation
+   - Completed: 2026-01-18
+   - Plan: .claude/plans/imperative-sauteeing-cook.md
 
-1.2. ~~**S0-TEST-2: Fix test timeouts**~~ ✅
-   - Issue: Full test suite hangs during coverage collection
-   - Files: Various integration/e2e tests
-   - Fix: Add proper timeouts, fix async cleanup, mock Playwright in unit tests
-   - Effort: 2-3 hours
-   - Plan: `.claude/plans/moonlit-coalescing-crane.md`
-
-1.3. ~~**S0-CICD-1: Add GitHub Actions CI pipeline**~~ ✅
-   - Create: `.github/workflows/ci.yml`
-   - Trunk-based: lint+smoke on push, full tests+coverage on PRs/tags
-   - Plan: `.claude/plans/magical-whistling-beacon.md`
-   - Effort: 1.5 hours
-
-1.4. ~~**S0-CICD-2: Add test coverage reporting**~~ ✅
-   - Merged into S0-CICD-1: 80% threshold + Codecov upload on PRs/tags
-   - Effort: (included above)
-
-### 2. Memory & Stability (P0 - Critical)
-
-2.1. ~~**S0-BUG-1: Fix unbounded caches in content_converter.py**~~ ✅
-   - File: `src/downloader/content_converter.py:15-20`
-   - Issue: 4 global caches (`_empty_content_cache`, `_fallback_bypass_cache`, `_js_heavy_cache`, `_static_html_cache`) grow indefinitely
-   - Fix: Use `functools.lru_cache` or `cachetools.TTLCache` with max size
+1.2. **S1-BE-2: Add format query parameter to download endpoint**
+   - File: `src/downloader/api/routes.py`
+   - Add `?format=markdown|text|html` query parameter
+   - Default to `html` (current behavior)
    - Effort: 1-2 hours
 
-2.2. ~~**S0-BUG-2: Consolidate version to single source of truth**~~ ✅
-   - Issue: Version in `__init__.py`, `config.py`, and tests all differ
-   - Fix: Use `importlib.metadata.version()` in `__init__.py`, import `__version__` in `config.py`
-   - Plan: `.claude/plans/generic-moseying-fairy.md`
-   - Effort: 30 minutes
+1.3. **S1-BE-3: Add format option to batch endpoint**
+   - File: `src/downloader/api/routes.py`
+   - Add `format` field to batch request body schema
+   - Apply transformation per-URL in batch processing
+   - Effort: 1-2 hours
 
-### 3. Documentation (P1 - High)
+1.4. **S1-TEST-1: Add markdown transformation tests**
+   - Create `tests/lib/test_markdown_transformer.py`
+   - Test structure preservation (headings, lists, links, code blocks)
+   - Test edge cases (malformed HTML, empty content, nested structures)
+   - Effort: 2 hours
 
-3.1. ~~**S0-DOC-1: Update api-reference.md**~~ ✅
+### 2. Plain Text Extraction (P2 - Core)
+
+2.1. **S1-BE-4: Implement plain text extractor**
+   - Create `src/downloader/transformers/text.py`
+   - Use BeautifulSoup to strip tags and extract clean text
+   - Handle whitespace normalization
+   - Effort: 1-2 hours
+
+2.2. **S1-TEST-2: Add text extraction tests**
+   - Create `tests/lib/test_text_transformer.py`
+   - Test tag stripping, whitespace handling, Unicode support
+   - Effort: 1 hour
+
+### 3. API Documentation (P1 - Required)
+
+3.1. **S1-DOC-1: Update API reference for format parameter**
    - File: `docs/api/api-reference.md`
-   - Issues:
-     - Line 13: States "no authentication required" - false
-     - Line 498-503: States "no rate limiting" - false
-   - Fix: Update to reflect actual implemented features
-   - Plan: `.claude/plans/rustling-tinkering-sutherland.md`
+   - Document `?format` query parameter
+   - Add batch request format option
+   - Include example responses
    - Effort: 1 hour
-
-3.2. ~~**S0-DOC-2: Update PRD.md roadmap section**~~ ✅
-   - File: `product/PRD.md:248-276`
-   - Issue: Shows Phase 1-4 items as incomplete that are actually done
-   - Fix: Mark completed items, update dates
-   - Plan: `.claude/plans/recursive-puzzling-leaf.md`
-   - Effort: 30 minutes
-
-3.3. ~~**S0-DOC-3: Create deployment runbook**~~ ✅
-   - Create: `docs/guides/deployment.md`
-   - Include: Prerequisites, environment setup, Docker deployment, health verification
-   - Plan: `.claude/plans/shimmering-wobbling-crane.md`
-   - Effort: 2-3 hours
-
-### 4. Docker & Infrastructure (P1 - High)
-
-4.1. ~~**S0-INFRA-1: Fix Dockerfile Python version**~~ ✅
-   - File: `Dockerfile:2`
-   - Issue: Uses Python 3.11, but dev uses 3.13 and pyproject.toml allows 3.10+
-   - Fix: Match development version (3.13) or pin to tested version
-   - Plan: `.claude/plans/cheerful-jingling-lamport.md`
-   - Effort: 30 minutes
-
-4.2. ~~**S0-INFRA-2: Remove editable install from production**~~ ✅
-   - File: `Dockerfile:29`
-   - Issue: `pip install -e .` is for development
-   - Fix: Use `pip install .` or build wheel first
-   - Plan: `.claude/plans/cheerful-jingling-lamport.md`
-   - Effort: 15 minutes
-
-4.3. ~~**S0-INFRA-3: Add docker-compose for local development**~~ ✅
-   - Already satisfied by existing `docker-compose.yml` (App + Redis)
-   - Plan: `.claude/plans/sprightly-whistling-scone.md`
-   - Effort: N/A (already existed)
-
-### 5. Code Quality (P2 - Medium)
-
-5.1. ~~**S0-REFACTOR-1: Simplify HTTP client**~~ ✅
-   - File: `src/downloader/http_client.py`
-   - Issue: Over-engineered with priority queue and circuit breaker (per agency roadmap R3)
-   - Fix: Remove priority queue, simplify to basic httpx client
-   - Plan: `.claude/plans/precious-greeting-hopper.md`
-   - Effort: 4-6 hours
-
-5.2. ~~**S0-REFACTOR-2: Extract Playwright context creation**~~ ✅
-   - File: `src/downloader/content_converter.py`
-   - Issue: Context creation duplicated in `render_html_with_playwright()` and `convert_content_with_playwright_fallback()`
-   - Fix: Extract to shared helper functions `_create_playwright_context()` and `_close_page_modals()`
-   - Plan: `.claude/plans/atomic-baking-conway.md`
-   - Effort: 1 hour
-
-5.3. ~~**S0-REFACTOR-3: Replace magic numbers with config**~~ ✅
-   - File: `src/downloader/content_converter.py:119,186`
-   - Issue: Hardcoded `< 100` and `< 200` character thresholds
-   - Fix: Added `min_body_text_threshold` and `min_js_framework_content_threshold` to ContentConfig
-   - Plan: `.claude/plans/sparkling-churning-hedgehog.md`
-   - Effort: 30 minutes
 
 ---
 
-## Sprint 0 Summary
+## Sprint 1 Summary
 
-| Category | Items | Estimated Hours |
+| Category | Tasks | Estimated Hours |
 |----------|-------|-----------------|
-| Testing & CI/CD | 4 | 5-6 hours |
-| Memory & Stability | 2 | 2-3 hours |
-| Documentation | 3 | 4-5 hours |
-| Docker & Infrastructure | 3 | 2 hours |
-| Code Quality | 3 | 6-8 hours |
-| **Total** | **15** | **19-24 hours** |
+| Backend (Markdown) | 3 | 4-7 hours |
+| Backend (Text) | 1 | 1-2 hours |
+| Testing | 2 | 3 hours |
+| Documentation | 1 | 1 hour |
+| **Total** | **7** | **9-13 hours** |
 
 ---
 
-## Acceptance Criteria for Sprint 0 Completion
+## Acceptance Criteria for Sprint 1 Completion
 
-- [ ] All smoke tests pass
-- [ ] Full test suite completes without timeout
-- [ ] CI pipeline runs on every PR
-- [ ] Coverage report shows >80%
-- [ ] No unbounded caches in codebase
-- [ ] Documentation matches implemented features
-- [ ] Dockerfile builds and runs correctly
-- [ ] Deployment runbook tested and complete
+- [ ] `?format=markdown` returns clean markdown from HTML pages
+- [ ] `?format=text` returns plain text with no HTML tags
+- [ ] Batch endpoint supports `format` option
+- [ ] Markdown preserves headings, lists, links, and code blocks
+- [ ] All transformation tests pass
+- [ ] API documentation updated
+- [ ] Transformation adds < 500ms to response time
 
 ---
 
-## Future Sprints (Backlog)
+## Sprint 2 Preview - OCR & Advanced Transformation
 
-### Sprint 1 - Security & Hardening
-- Add security headers middleware (X-Content-Type-Options, X-Frame-Options, Referrer-Policy)
-- Document CORS production configuration (warning for wildcard, example restricted config)
+**Focus:** Image to text extraction and advanced content handling
 
-### Sprint 2 - Performance & Reliability
-- Content caching layer (Redis)
-- Enhanced retry policies
-- Webhook notifications
-- OpenTelemetry integration
+| Task ID | Description | Priority |
+|---------|-------------|----------|
+| S2-BE-1 | Add pytesseract and Tesseract dependency | P1 |
+| S2-BE-2 | Implement OCR transformer for images | P1 |
+| S2-BE-3 | Add `?format=ocr` parameter support | P1 |
+| S2-BE-4 | Handle mixed content (HTML with embedded images) | P2 |
+| S2-TEST-1 | OCR accuracy tests (>90% target) | P1 |
+| S2-DOC-1 | Document OCR feature and system requirements | P1 |
 
-### Sprint 3 - Advanced Features
-- Content preprocessing pipeline
-- Multi-format transformation
-- SDK/Client libraries
+---
 
-### Sprint 4 - Enterprise
-- OAuth2/JWT authentication
-- Usage analytics
-- Multi-region deployment
+## Completed Sprints
+
+### Sprint 0 - Production Readiness ✅
+
+**Completed:** 2026-01-18
+**Archive:** [docs/features/production-readiness.md](docs/features/production-readiness.md)
+
+15 tasks completed across Testing/CI, Memory/Stability, Documentation, Infrastructure, and Code Quality.
 
 ---
 
 ## Notes
 
-- This Sprint 0 represents remediation work that should have been delivered by the agency
-- Priority order: P0 items block deployment, P1 items should be fixed within 1 week
-- See FEEDBACK.md for detailed technical review findings
+- Sprint 0 remediation is complete; project is production-ready
+- Content Transformation (Phase 5) is the current strategic priority
+- See docs/roadmap.md for full feature roadmap
+- See docs/features/ for completed work history

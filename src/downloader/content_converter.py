@@ -483,43 +483,22 @@ def _convert_html_to_format(html_content: str, output_format: Literal["text", "m
 
 
 def _convert_to_markdown(main_content: BeautifulSoup | Tag) -> str:
-    """Convert soup element to markdown format."""
-    markdown_parts = []
+    """Convert soup element to markdown format using markdownify."""
+    from .transformers.markdown import html_to_markdown
 
-    for element in main_content.find_all(
-        ["h1", "h2", "h3", "h4", "h5", "h6", "p", "a", "ul", "ol", "li"]
-    ):
-        if element.name.startswith("h"):
-            level = int(element.name[1])
-            markdown_parts.append("#" * level + " " + element.get_text(strip=True))
-        elif element.name == "p":
-            text_content = element.get_text(strip=True)
-            if text_content:
-                markdown_parts.append(text_content)
-        elif element.name == "a" and element.get("href"):
-            link_text = element.get_text(strip=True)
-            href = element.get("href")
-            if link_text and href:
-                markdown_parts.append(f"[{link_text}]({href})")
-        elif element.name in ["ul", "ol"]:
-            for li in element.find_all("li", recursive=False):
-                li_text = li.get_text(strip=True)
-                if li_text:
-                    prefix = "- " if element.name == "ul" else "1. "
-                    markdown_parts.append(prefix + li_text)
+    # Convert soup back to HTML string for markdownify
+    html_str = str(main_content)
+
+    # Use the new transformer (extract_main_content=False since already extracted)
+    markdown = html_to_markdown(html_str, extract_main_content=False)
 
     # If no structured content found, fall back to simple text extraction
-    if not markdown_parts:
+    if not markdown.strip():
         text = main_content.get_text(separator="\n", strip=True)
         text = re.sub(r"\n\s*\n+", "\n\n", text)
         return text.strip()
 
-    # Join markdown parts with appropriate spacing
-    text = "\n\n".join(markdown_parts)
-
-    # Clean up excessive whitespace
-    text = re.sub(r"\n\s*\n\s*\n+", "\n\n", text)
-    return text.strip()
+    return markdown
 
 
 def _convert_to_text(main_content: BeautifulSoup | Tag) -> str:
