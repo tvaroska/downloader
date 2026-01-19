@@ -52,7 +52,7 @@
 ### 3. Documentation (P1 - High)
 
 3.1. ~~**S0-DOC-1: Update api-reference.md**~~ ✅
-   - File: `doc/api-reference.md`
+   - File: `docs/api/api-reference.md`
    - Issues:
      - Line 13: States "no authentication required" - false
      - Line 498-503: States "no rate limiting" - false
@@ -68,7 +68,7 @@
    - Effort: 30 minutes
 
 3.3. ~~**S0-DOC-3: Create deployment runbook**~~ ✅
-   - Create: `doc/DEPLOYMENT.md`
+   - Create: `docs/guides/deployment.md`
    - Include: Prerequisites, environment setup, Docker deployment, health verification
    - Plan: `.claude/plans/shimmering-wobbling-crane.md`
    - Effort: 2-3 hours

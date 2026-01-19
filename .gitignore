@@ -5,6 +5,11 @@ examples/basic_outputs/*
 examples/format_comparison/*
 examples/pdf_outputs/*
 
+# Generated files
+batch_results_*.json
+llms.txt
+logs/
+
 # Byte-compiled / optimized / DLL files
 __pycache__/
 *.py[codz]

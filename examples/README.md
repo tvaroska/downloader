@@ -186,6 +186,6 @@ When adding new examples:
 
 ## Support
 
-- **Documentation**: See [API Reference](../doc/api-reference.md)
+- **Documentation**: See [API Reference](../docs/api/api-reference.md)
 - **Issues**: Report problems via GitHub issues
 - **Architecture**: Review [Technical Architecture](../product/architecture.md)

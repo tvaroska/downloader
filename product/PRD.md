@@ -117,6 +117,13 @@ Client → Load Balancer → API Gateway → Downloader Service → Redis Cache
 - **Caching**: Redis
 - **Process Management**: uv for dependency management
 - **Monitoring**: Structured logging with correlation IDs
+- **Content Transformation** (Phase 5):
+  - `markdownify` / BeautifulSoup for HTML→Markdown
+  - `pytesseract` + Tesseract OCR for image→text
+- **Browser Rendering** (Phase 6):
+  - Playwright for headless browser automation
+- **Scheduling** (Phase 7):
+  - APScheduler or Celery Beat for cron jobs
 
 ### Component Architecture
 
@@ -270,19 +277,69 @@ GET /https%3A%2F%2Fexample.com%2Fapi%2Fdata
 - [ ] Production deployment guide (see S0-DOC-3)
 - [x] Monitoring and alerting setup (Prometheus metrics, health checks)
 
+### Phase 5: Content Transformation - PLANNED
+Transform downloaded content into different formats for downstream consumption.
+
+- [ ] HTML → Markdown conversion
+  - Clean extraction optimized for LLM consumption
+  - Preserve document structure (headings, lists, links)
+  - Libraries: `markdownify` or custom BeautifulSoup pipeline
+- [ ] Image → Text (OCR)
+  - Extract text from images (PNG, JPG, TIFF)
+  - Support for `pytesseract` (local) or cloud OCR APIs
+  - Configurable language detection
+- [ ] API endpoint: `GET /{url}?format=markdown|text|ocr`
+- [ ] Batch support: `format` option in batch requests
+- [ ] Unit and integration tests for transformations
+
+### Phase 6: Browser Rendering - PLANNED
+Capture JavaScript-rendered content using headless browser automation.
+
+- [ ] Playwright integration for headless Chrome/Firefox
+  - Full page rendering with JavaScript execution
+  - Wait for specific selectors/network idle
+- [ ] Interaction scripting
+  - Click, scroll, form filling before capture
+  - Script-based workflows (JSON or simple DSL)
+- [ ] API endpoint: `GET /{url}?render=true&script=<encoded-script>`
+- [ ] Screenshot/PDF generation mode
+- [ ] Resource limits (max execution time, memory caps)
+- [ ] Sandbox security considerations
+
+### Phase 7: Scheduling & Quotas - PLANNED
+Enable recurring downloads and per-key usage management.
+
+- [ ] Cron-based scheduling
+  - Standard cron expression syntax
+  - Job storage in Redis
+  - APScheduler or Celery Beat integration
+- [ ] Schedule management API
+  - `POST /schedules` - Create scheduled job
+  - `GET /schedules` - List scheduled jobs
+  - `DELETE /schedules/{id}` - Remove scheduled job
+- [ ] Per-API-key quotas
+  - Request count limits (daily/monthly)
+  - Usage tracking in Redis
+  - Middleware enforcement with 429 responses
+  - `GET /usage` - Current usage stats per key
+
 ### Future Enhancements
-- Webhook notifications for batch completion
-- Content transformation capabilities
-- Advanced caching strategies
+- Webhook notifications for batch/schedule completion
+- Advanced caching strategies (content-aware TTLs, pre-warming)
 - Multi-region deployment support
 - GraphQL API option
+- Content diffing (track changes between downloads)
+- Bandwidth-based quotas and tier-based plans
 
 ## Risk Assessment
 
 ### Technical Risks
 - **High**: External URL reliability and performance variability
+- **High**: Browser rendering resource consumption (CPU, memory per session)
 - **Medium**: Memory usage with large file downloads
-- **Low**: Redis dependency for caching
+- **Medium**: OCR accuracy varies by image quality and language
+- **Medium**: Playwright browser binary management and updates
+- **Low**: Redis dependency for caching and scheduling
 
 ### Business Risks
 - **Medium**: Potential misuse for web scraping
@@ -295,6 +352,9 @@ GET /https%3A%2F%2Fexample.com%2Fapi%2Fdata
 - Establish clear usage policies and rate limits
 - Regular security audits and updates
 - Backup strategies for critical dependencies
+- Browser rendering: strict resource limits, process isolation, timeout enforcement
+- OCR: offer cloud API fallback for high-accuracy requirements
+- Scheduling: dead-letter queue for failed jobs, retry policies
 
 ## Success Criteria & Acceptance
 
