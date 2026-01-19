@@ -30,12 +30,13 @@
    - Files: `src/downloader/routes/download.py`, `src/downloader/services/content_processor.py`
    - Plan: `.claude/plans/groovy-snacking-pudding.md`
 
-1.3. **S2-BE-3: Add wait_for selector support**
+1.3. **S2-BE-3: Add wait_for selector support** ✅ DONE
    - [x] Basic `wait_for_load_state("networkidle")` exists
-   - [ ] Add `?wait_for=<selector>` query parameter
-   - [ ] Implement `page.wait_for_selector()` with configurable timeout
-   - [ ] Handle selector not found gracefully (timeout error)
+   - [x] Add `?wait_for=<selector>` query parameter
+   - [x] Implement `page.wait_for_selector()` with configurable timeout
+   - [x] Handle selector not found gracefully (timeout error → 408)
    - Files: `src/downloader/routes/download.py`, `src/downloader/content_converter.py`
+   - Plan: `.claude/plans/peppy-kindling-piglet.md`
 
 ### 2. Process Isolation & Security (P1 - Required)
 
@@ -90,7 +91,7 @@
 
 | Category | Remaining Work | Status |
 |----------|----------------|--------|
-| Backend (Core) | `?wait_for` | 1 task open |
+| Backend (Core) | — | ✅ Done |
 | Security | Remove `--disable-web-security`, file:// blocking | 1 task partial |
 | Testing | Integration tests for new params | 2 tasks open |
 | Infrastructure | — | ✅ Done |
@@ -101,7 +102,7 @@
 ## Acceptance Criteria for Sprint 2 Completion
 
 - [x] `?render=true` returns JavaScript-rendered HTML (forces rendering)
-- [ ] `?wait_for=<selector>` waits for element before returning
+- [x] `?wait_for=<selector>` waits for element before returning
 - [x] Browser sessions timeout after 30 seconds (already implemented)
 - [x] Memory usage limited to 512MB per session (via `--js-flags=--max-old-space-size`)
 - [ ] `--disable-web-security` removed, file:// URLs blocked

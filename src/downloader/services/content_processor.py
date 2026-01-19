@@ -9,6 +9,7 @@ import time
 from fastapi import HTTPException, Response
 
 from ..content_converter import (
+    SelectorTimeoutError,
     convert_content_to_markdown,
     convert_content_to_text,
     convert_content_with_playwright_fallback,
@@ -314,6 +315,7 @@ async def handle_html_response(
     content: bytes,
     metadata: ResponseMetadata,
     force_render: bool = False,
+    wait_for_selector: str | None = None,
 ) -> Response:
     """
     Handle HTML format response with optional Playwright rendering.
@@ -328,6 +330,7 @@ async def handle_html_response(
         content: Raw HTML content bytes
         metadata: Response metadata
         force_render: If True, bypass auto-detection and force Playwright rendering
+        wait_for_selector: Optional CSS selector to wait for after page load
     """
     rendered_with_js = False
 
@@ -344,7 +347,7 @@ async def handle_html_response(
             try:
                 # Render HTML with Playwright
                 start_time = time.time()
-                rendered_html = await render_html_with_playwright(validated_url)
+                rendered_html = await render_html_with_playwright(validated_url, wait_for_selector)
                 duration = time.time() - start_time
 
                 logger.info(
@@ -362,6 +365,9 @@ async def handle_html_response(
                 html_content = rendered_html
                 rendered_with_js = True
 
+            except SelectorTimeoutError:
+                # Selector timeout should not degrade gracefully - re-raise
+                raise
             except Exception as e:
                 # Graceful degradation - log error and use raw HTML
                 logger.error(f"❌ Playwright HTML rendering failed for {validated_url}: {str(e)}")
@@ -410,6 +416,7 @@ async def _process_single_format_for_multi(
     metadata: ResponseMetadata,
     pdf_semaphore: asyncio.Semaphore,
     force_render: bool = False,
+    wait_for_selector: str | None = None,
 ) -> tuple[str, str]:
     """
     Process a single format for multi-format response.
@@ -421,6 +428,7 @@ async def _process_single_format_for_multi(
         metadata: Response metadata
         pdf_semaphore: Semaphore for PDF generation
         force_render: If True, force Playwright rendering for HTML
+        wait_for_selector: Optional CSS selector to wait for after page load
 
     Returns:
         Tuple of (mime_type, processed_content)
@@ -455,7 +463,9 @@ async def _process_single_format_for_multi(
             return ("application/pdf", pdf_base64)
 
         elif format_type == "html":
-            response = await handle_html_response(url, content, metadata, force_render)
+            response = await handle_html_response(
+                url, content, metadata, force_render, wait_for_selector
+            )
             if isinstance(response.body, bytes):
                 content_str = response.body.decode("utf-8", errors="ignore")
             else:
@@ -477,6 +487,7 @@ async def process_multiple_formats(
     formats: list[str],
     pdf_semaphore: asyncio.Semaphore,
     force_render: bool = False,
+    wait_for_selector: str | None = None,
 ) -> dict[str, str]:
     """
     Process content into multiple formats in parallel.
@@ -488,6 +499,7 @@ async def process_multiple_formats(
         formats: List of format strings to generate
         pdf_semaphore: Semaphore for PDF generation
         force_render: If True, force Playwright rendering for HTML
+        wait_for_selector: Optional CSS selector to wait for after page load
 
     Returns:
         Dict structure:
@@ -506,7 +518,7 @@ async def process_multiple_formats(
     for format_type in formats:
         task = asyncio.create_task(
             _process_single_format_for_multi(
-                format_type, url, content, metadata, pdf_semaphore, force_render
+                format_type, url, content, metadata, pdf_semaphore, force_render, wait_for_selector
             )
         )
         tasks.append(task)
@@ -543,6 +555,7 @@ async def handle_multi_format_response(
     formats: list[str],
     pdf_semaphore: asyncio.Semaphore,
     force_render: bool = False,
+    wait_for_selector: str | None = None,
 ) -> Response:
     """
     Create multi-format JSON response.
@@ -554,12 +567,13 @@ async def handle_multi_format_response(
         formats: List of format strings to generate
         pdf_semaphore: Semaphore for PDF generation
         force_render: If True, force Playwright rendering for HTML
+        wait_for_selector: Optional CSS selector to wait for after page load
 
     Returns:
         JSON Response with all requested formats
     """
     results_dict = await process_multiple_formats(
-        url, content, metadata, formats, pdf_semaphore, force_render
+        url, content, metadata, formats, pdf_semaphore, force_render, wait_for_selector
     )
 
     return Response(

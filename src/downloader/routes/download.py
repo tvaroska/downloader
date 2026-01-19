@@ -5,6 +5,7 @@ import logging
 from fastapi import APIRouter, Depends, Header, HTTPException, Path, Query, Request, Response
 
 from ..auth import get_api_key
+from ..content_converter import SelectorTimeoutError
 from ..dependencies import HTTPClientDep, PDFSemaphoreDep
 from ..http_client import (
     DownloadError,
@@ -38,6 +39,11 @@ async def download_url(
     url: str = Path(..., description="The URL to download"),
     accept: str | None = Header(None, description="Accept header for content negotiation"),
     render: bool = Query(False, description="Force Playwright rendering, bypass auto-detection"),
+    wait_for: str | None = Query(
+        None,
+        description="CSS selector to wait for before returning. Implies render=true.",
+        max_length=500,
+    ),
     http_client: HTTPClientDep = None,
     pdf_semaphore: PDFSemaphoreDep = None,
     api_key: str | None = Depends(get_api_key),
@@ -72,11 +78,14 @@ async def download_url(
     **Query Parameters:**
         render: Force Playwright browser rendering (default: false).
                 When true, bypasses auto-detection and renders with JavaScript.
+        wait_for: CSS selector to wait for before returning (default: null).
+                  When specified, implies render=true. Times out after 10 seconds.
 
     Args:
         url: URL to download
         accept: Accept header for format selection
         render: Force Playwright rendering, bypass auto-detection
+        wait_for: CSS selector to wait for before returning (implies render=true)
         request: FastAPI request object (for accessing Accept headers)
         api_key: API key for authentication (if enabled)
 
@@ -93,6 +102,9 @@ async def download_url(
 
         content, metadata = await http_client.download(validated_url, RequestPriority.HIGH)
 
+        # If wait_for is specified, it implies render=true
+        effective_render = render or (wait_for is not None)
+
         # Check for multi-format request
         formats = parse_accept_headers(request.headers.getlist("accept"))
 
@@ -100,7 +112,7 @@ async def download_url(
             # Multi-format request
             logger.info(f"Multi-format request: {formats} (Accept: {accept})")
             return await handle_multi_format_response(
-                validated_url, content, metadata, formats, pdf_semaphore, render
+                validated_url, content, metadata, formats, pdf_semaphore, effective_render, wait_for
             )
         else:
             # Single format request (backward compatible)
@@ -116,7 +128,9 @@ async def download_url(
             elif format_type == "pdf":
                 return await handle_pdf_response(validated_url, metadata, pdf_semaphore)
             elif format_type == "html":
-                return await handle_html_response(validated_url, content, metadata, render)
+                return await handle_html_response(
+                    validated_url, content, metadata, effective_render, wait_for
+                )
             else:
                 return await handle_raw_response(content, metadata)
 
@@ -158,6 +172,13 @@ async def download_url(
                 error=f"PDF generation failed: {e}",
                 error_type="pdf_generation_error",
             ).model_dump(),
+        )
+
+    except SelectorTimeoutError as e:
+        logger.warning(f"Selector timeout for {url}: {e}")
+        raise HTTPException(
+            status_code=408,
+            detail=ErrorResponse(error=str(e), error_type="selector_timeout_error").model_dump(),
         )
 
     except HTTPException:

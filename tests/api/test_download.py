@@ -345,7 +345,7 @@ class TestRenderParameter:
                 assert response.status_code == 200
                 assert response.headers["X-Rendered-With-JS"] == "true"
                 assert response.content == rendered_content
-                mock_render.assert_called_once_with("https://example.com")
+                mock_render.assert_called_once_with("https://example.com", None)
         finally:
             app.dependency_overrides.pop(get_http_client, None)
 
@@ -452,3 +452,127 @@ class TestRenderParameter:
                 assert response.content == mock_content
         finally:
             app.dependency_overrides.pop(get_http_client, None)
+
+
+class TestWaitForParameter:
+    """Tests for the ?wait_for=<selector> query parameter."""
+
+    def test_wait_for_implies_render(self, api_client):
+        """Test that ?wait_for automatically enables rendering."""
+        mock_content = b"<html><body><h1>Static Page</h1></body></html>"
+        mock_client = AsyncMock()
+        mock_client.download.return_value = (
+            mock_content,
+            {
+                "url": "https://example.com",
+                "status_code": 200,
+                "content_type": "text/html; charset=utf-8",
+                "size": len(mock_content),
+                "headers": {"content-type": "text/html; charset=utf-8"},
+            },
+        )
+
+        rendered_content = b"<html><body><h1>Rendered</h1></body></html>"
+
+        async def mock_get_http_client():
+            return mock_client
+
+        app.dependency_overrides[get_http_client] = mock_get_http_client
+        try:
+            with patch(
+                "src.downloader.services.content_processor.render_html_with_playwright",
+                return_value=rendered_content,
+            ) as mock_render:
+                response = api_client.get(
+                    "/https://example.com?wait_for=.content",
+                    headers={"Accept": "text/html"},
+                )
+                assert response.status_code == 200
+                assert response.headers["X-Rendered-With-JS"] == "true"
+                # Verify render was called with the selector
+                mock_render.assert_called_once_with("https://example.com", ".content")
+        finally:
+            app.dependency_overrides.pop(get_http_client, None)
+
+    def test_wait_for_selector_timeout(self, api_client):
+        """Test that selector timeout returns 408."""
+        from src.downloader.content_converter import SelectorTimeoutError
+
+        mock_content = b"<html><body><h1>Page</h1></body></html>"
+        mock_client = AsyncMock()
+        mock_client.download.return_value = (
+            mock_content,
+            {
+                "url": "https://example.com",
+                "status_code": 200,
+                "content_type": "text/html; charset=utf-8",
+                "size": len(mock_content),
+                "headers": {"content-type": "text/html; charset=utf-8"},
+            },
+        )
+
+        async def mock_get_http_client():
+            return mock_client
+
+        app.dependency_overrides[get_http_client] = mock_get_http_client
+        try:
+            with patch(
+                "src.downloader.services.content_processor.render_html_with_playwright",
+                side_effect=SelectorTimeoutError(".nonexistent", 10000),
+            ):
+                response = api_client.get(
+                    "/https://example.com?wait_for=.nonexistent",
+                    headers={"Accept": "text/html"},
+                )
+                assert response.status_code == 408
+                data = response.json()
+                assert data["detail"]["error_type"] == "selector_timeout_error"
+                assert ".nonexistent" in data["detail"]["error"]
+        finally:
+            app.dependency_overrides.pop(get_http_client, None)
+
+    def test_wait_for_with_render_true(self, api_client):
+        """Test ?wait_for=.foo&render=true works correctly."""
+        mock_content = b"<html><body><h1>Page</h1></body></html>"
+        mock_client = AsyncMock()
+        mock_client.download.return_value = (
+            mock_content,
+            {
+                "url": "https://example.com",
+                "status_code": 200,
+                "content_type": "text/html; charset=utf-8",
+                "size": len(mock_content),
+                "headers": {"content-type": "text/html; charset=utf-8"},
+            },
+        )
+
+        rendered_content = b"<html><body><h1>Rendered</h1></body></html>"
+
+        async def mock_get_http_client():
+            return mock_client
+
+        app.dependency_overrides[get_http_client] = mock_get_http_client
+        try:
+            with patch(
+                "src.downloader.services.content_processor.render_html_with_playwright",
+                return_value=rendered_content,
+            ) as mock_render:
+                response = api_client.get(
+                    "/https://example.com?render=true&wait_for=article",
+                    headers={"Accept": "text/html"},
+                )
+                assert response.status_code == 200
+                mock_render.assert_called_once_with("https://example.com", "article")
+        finally:
+            app.dependency_overrides.pop(get_http_client, None)
+
+    def test_wait_for_max_length(self, api_client):
+        """Test that very long selectors are rejected (422)."""
+        long_selector = "a" * 501  # Exceeds max_length=500
+
+        response = api_client.get(
+            f"/https://example.com?wait_for={long_selector}",
+            headers={"Accept": "text/html"},
+        )
+        # FastAPI returns 422 for validation errors
+        assert response.status_code == 422

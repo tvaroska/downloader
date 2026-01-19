@@ -6,11 +6,21 @@ from collections import OrderedDict
 from typing import Literal
 
 from bs4 import BeautifulSoup, Tag
+from playwright.async_api import TimeoutError as PlaywrightTimeoutError
 
 from .config import get_settings
 from .pdf_generator import get_shared_pdf_generator
 
 logger = logging.getLogger(__name__)
+
+
+class SelectorTimeoutError(Exception):
+    """Raised when wait_for_selector times out."""
+
+    def __init__(self, selector: str, timeout_ms: int):
+        self.selector = selector
+        self.timeout_ms = timeout_ms
+        super().__init__(f"Timeout waiting for selector '{selector}' after {timeout_ms}ms")
 
 
 class BoundedCache:
@@ -346,7 +356,10 @@ async def convert_content_with_playwright_fallback(
         raise
 
 
-async def render_html_with_playwright(url: str) -> bytes:
+async def render_html_with_playwright(
+    url: str,
+    wait_for_selector: str | None = None,
+) -> bytes:
     """
     Fetch and render HTML using Playwright to execute JavaScript.
 
@@ -355,11 +368,13 @@ async def render_html_with_playwright(url: str) -> bytes:
 
     Args:
         url: The URL to fetch and render
+        wait_for_selector: Optional CSS selector to wait for after page load
 
     Returns:
         Fully rendered HTML content as bytes
 
     Raises:
+        SelectorTimeoutError: If wait_for_selector is specified but not found
         Exception: If Playwright rendering fails
     """
     try:
@@ -388,6 +403,16 @@ async def render_html_with_playwright(url: str) -> bytes:
 
             logger.debug(f"Page loaded, waiting for network idle: {url}")
             await page.wait_for_load_state("networkidle", timeout=10000)
+
+            # Wait for specific selector if requested
+            if wait_for_selector:
+                try:
+                    logger.info(f"Waiting for selector '{wait_for_selector}' on {url}")
+                    await page.wait_for_selector(wait_for_selector, timeout=10000, state="visible")
+                    logger.info(f"Selector '{wait_for_selector}' found on {url}")
+                except PlaywrightTimeoutError:
+                    logger.warning(f"Selector '{wait_for_selector}' not found within 10s on {url}")
+                    raise SelectorTimeoutError(wait_for_selector, 10000)
 
             # Close modals
             await _close_page_modals(page)
