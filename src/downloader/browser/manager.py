@@ -2,6 +2,8 @@
 
 import asyncio
 import logging
+import os
+import signal
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -25,12 +27,16 @@ class BrowserConfig:
         memory_limit_mb: JavaScript heap memory limit per browser (MB)
         acquire_timeout: Timeout in seconds for acquiring a browser
         headless: Run browsers in headless mode
+        close_timeout: Timeout in seconds for graceful browser close
+        force_kill_timeout: Seconds to wait before SIGKILL after SIGTERM
     """
 
     pool_size: int = 3
     memory_limit_mb: int = 512
     acquire_timeout: float = 30.0
     headless: bool = True
+    close_timeout: float = 5.0
+    force_kill_timeout: float = 2.0
 
     # Standard browser launch arguments
     launch_args: list[str] = field(
@@ -99,6 +105,7 @@ class BrowserPool:
                     "usage_count": 0,
                     "last_used": asyncio.get_event_loop().time(),
                     "healthy": True,
+                    "pid": self._get_browser_pid(browser),
                 }
                 await self._available_browsers.put(browser)
                 logger.info(f"Browser {i + 1}/{self.config.pool_size} initialized")
@@ -117,6 +124,77 @@ class BrowserPool:
             headless=self.config.headless,
             args=self.config.get_launch_args(),
         )
+
+    def _get_browser_pid(self, browser: Browser) -> int | None:
+        """Extract the process ID from a Playwright browser instance.
+
+        Accesses Playwright internals to get the Chromium process PID.
+        Returns None if PID cannot be extracted.
+        """
+        try:
+            impl = getattr(browser, "_impl_obj", None)
+            if impl:
+                process = getattr(impl, "_browser_process", None)
+                if process:
+                    return process.pid
+            return None
+        except Exception:
+            return None
+
+    async def _force_kill_process(self, pid: int) -> None:
+        """Force kill a browser process that failed to close gracefully.
+
+        Sends SIGTERM first, waits briefly, then sends SIGKILL if needed.
+        """
+        try:
+            os.kill(pid, signal.SIGTERM)
+            logger.info(f"Sent SIGTERM to browser process (pid: {pid})")
+
+            await asyncio.sleep(self.config.force_kill_timeout)
+
+            try:
+                os.kill(pid, 0)  # Check if process still exists
+                os.kill(pid, signal.SIGKILL)
+                logger.warning(f"Force-killed browser process with SIGKILL (pid: {pid})")
+            except ProcessLookupError:
+                logger.debug(f"Process {pid} terminated after SIGTERM")
+        except ProcessLookupError:
+            logger.debug(f"Process {pid} not found (already terminated)")
+        except PermissionError:
+            logger.error(f"Permission denied killing process {pid}")
+        except Exception as e:
+            logger.error(f"Failed to kill process {pid}: {e}")
+
+    async def _close_browser_with_timeout(self, browser: Browser, pid: int | None = None) -> bool:
+        """Close a browser gracefully with timeout, force-kill if needed.
+
+        Args:
+            browser: The browser instance to close
+            pid: Optional PID (use if already extracted before health tracking removal)
+
+        Returns:
+            True if closed gracefully, False if force-killed or failed
+        """
+        if pid is None:
+            pid = self._browser_health.get(browser, {}).get("pid")
+
+        try:
+            if browser.is_connected():
+                await asyncio.wait_for(browser.close(), timeout=self.config.close_timeout)
+                logger.debug(f"Browser closed gracefully (pid: {pid})")
+                return True
+        except asyncio.TimeoutError:
+            logger.warning(
+                f"Browser close timed out after {self.config.close_timeout}s (pid: {pid})"
+            )
+        except Exception as e:
+            logger.warning(f"Browser close failed: {e} (pid: {pid})")
+
+        if pid:
+            await self._force_kill_process(pid)
+            return False
+
+        return False
 
     async def get_browser(self) -> Browser:
         """Get an available browser from the pool with O(1) selection."""
@@ -172,16 +250,15 @@ class BrowserPool:
     async def _replace_browser(self, old_browser: Browser):
         """Replace an unhealthy browser with a new one."""
         try:
-            # Remove old browser
+            # Get PID before removing from tracking
+            pid = self._browser_health.get(old_browser, {}).get("pid")
+
+            # Remove old browser from tracking
             self._all_browsers.discard(old_browser)
             self._browser_health.pop(old_browser, None)
 
-            # Close old browser safely
-            try:
-                if old_browser.is_connected():
-                    await old_browser.close()
-            except Exception:
-                pass  # Ignore errors when closing broken browser
+            # Close old browser with timeout, force-kill if necessary
+            await self._close_browser_with_timeout(old_browser, pid)
 
             # Create new browser
             new_browser = await self._launch_browser()
@@ -190,6 +267,7 @@ class BrowserPool:
                 "usage_count": 0,
                 "last_used": asyncio.get_event_loop().time(),
                 "healthy": True,
+                "pid": self._get_browser_pid(new_browser),
             }
 
             # Add to available queue
@@ -199,18 +277,27 @@ class BrowserPool:
             logger.error(f"Failed to replace browser: {e}")
 
     async def close(self):
-        """Close all browsers and cleanup."""
+        """Close all browsers and cleanup with timeout."""
         self._closed = True
 
         try:
-            # Close all browsers
-            close_tasks = []
-            for browser in self._all_browsers:
-                if browser and browser.is_connected():
-                    close_tasks.append(browser.close())
+            # Close all browsers with timeout
+            close_tasks = [
+                self._close_browser_with_timeout(browser)
+                for browser in self._all_browsers
+                if browser
+            ]
 
             if close_tasks:
-                await asyncio.gather(*close_tasks, return_exceptions=True)
+                # Overall timeout for entire pool shutdown
+                pool_timeout = self.config.close_timeout * len(close_tasks) + 5.0
+                try:
+                    await asyncio.wait_for(
+                        asyncio.gather(*close_tasks, return_exceptions=True),
+                        timeout=pool_timeout,
+                    )
+                except asyncio.TimeoutError:
+                    logger.error("Pool close timed out, some browsers may be orphaned")
 
             # Clear all data structures
             self._all_browsers.clear()

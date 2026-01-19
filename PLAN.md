@@ -40,12 +40,13 @@
 
 ### 2. Process Isolation & Security (P1 - Required)
 
-2.1. **S2-SEC-1: Implement browser process isolation** ✅ PARTIALLY DONE
+2.1. **S2-SEC-1: Implement browser process isolation** ✅ DONE
    - [x] Browsers run as separate Chromium processes (Playwright default)
    - [x] Health monitoring and usage tracking exists
-   - [ ] Add memory limits per browser context (512MB)
-   - [ ] Add explicit zombie process cleanup on timeout
+   - [x] Add memory limits per browser context (512MB via --js-flags)
+   - [x] Add explicit zombie process cleanup on timeout (SIGTERM/SIGKILL fallback)
    - Files: `src/downloader/browser/manager.py`
+   - Plan: `.claude/plans/groovy-jingling-river.md`
 
 2.2. **S2-SEC-2: Add browser security hardening** ✅ DONE
    - [x] `--disable-extensions`, `--disable-plugins` already set
@@ -93,7 +94,7 @@
 | Category | Remaining Work | Status |
 |----------|----------------|--------|
 | Backend (Core) | — | ✅ Done |
-| Security | Remove `--disable-web-security`, file:// blocking | 1 task partial |
+| Security | — | ✅ Done |
 | Testing | Integration tests for new params | 2 tasks open |
 | Infrastructure | — | ✅ Done |
 | Documentation | Document new params | 1 task partial |
