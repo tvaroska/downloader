@@ -310,24 +310,35 @@ async def handle_pdf_response(
 
 
 async def handle_html_response(
-    validated_url: str, content: bytes, metadata: ResponseMetadata
+    validated_url: str,
+    content: bytes,
+    metadata: ResponseMetadata,
+    force_render: bool = False,
 ) -> Response:
     """
     Handle HTML format response with optional Playwright rendering.
 
     Flow:
-    1. Check if HTML content needs JavaScript rendering
+    1. Check if forced rendering via ?render=true, or auto-detect JS-heavy content
     2. If yes, fetch rendered HTML using Playwright
     3. Return HTML content with appropriate headers
+
+    Args:
+        validated_url: The validated URL being processed
+        content: Raw HTML content bytes
+        metadata: Response metadata
+        force_render: If True, bypass auto-detection and force Playwright rendering
     """
     rendered_with_js = False
 
     if "html" in metadata["content_type"].lower():
-        # Check if we need to render with Playwright
-        if should_use_playwright_for_html(validated_url, content, metadata["content_type"]):
-            logger.info(
-                f"Detected JS-heavy HTML for {validated_url}, triggering Playwright rendering"
-            )
+        # Check if we need to render with Playwright (forced or auto-detected)
+        needs_render = force_render or should_use_playwright_for_html(
+            validated_url, content, metadata["content_type"]
+        )
+        if needs_render:
+            render_reason = "forced via ?render=true" if force_render else "auto-detected JS-heavy"
+            logger.info(f"Playwright rendering ({render_reason}) for {validated_url}")
             record_html_rendering_detection()
 
             try:
@@ -398,6 +409,7 @@ async def _process_single_format_for_multi(
     content: bytes,
     metadata: ResponseMetadata,
     pdf_semaphore: asyncio.Semaphore,
+    force_render: bool = False,
 ) -> tuple[str, str]:
     """
     Process a single format for multi-format response.
@@ -408,6 +420,7 @@ async def _process_single_format_for_multi(
         content: Downloaded content bytes
         metadata: Response metadata
         pdf_semaphore: Semaphore for PDF generation
+        force_render: If True, force Playwright rendering for HTML
 
     Returns:
         Tuple of (mime_type, processed_content)
@@ -442,7 +455,7 @@ async def _process_single_format_for_multi(
             return ("application/pdf", pdf_base64)
 
         elif format_type == "html":
-            response = await handle_html_response(url, content, metadata)
+            response = await handle_html_response(url, content, metadata, force_render)
             if isinstance(response.body, bytes):
                 content_str = response.body.decode("utf-8", errors="ignore")
             else:
@@ -463,6 +476,7 @@ async def process_multiple_formats(
     metadata: ResponseMetadata,
     formats: list[str],
     pdf_semaphore: asyncio.Semaphore,
+    force_render: bool = False,
 ) -> dict[str, str]:
     """
     Process content into multiple formats in parallel.
@@ -473,6 +487,7 @@ async def process_multiple_formats(
         metadata: Response metadata
         formats: List of format strings to generate
         pdf_semaphore: Semaphore for PDF generation
+        force_render: If True, force Playwright rendering for HTML
 
     Returns:
         Dict structure:
@@ -490,7 +505,9 @@ async def process_multiple_formats(
 
     for format_type in formats:
         task = asyncio.create_task(
-            _process_single_format_for_multi(format_type, url, content, metadata, pdf_semaphore)
+            _process_single_format_for_multi(
+                format_type, url, content, metadata, pdf_semaphore, force_render
+            )
         )
         tasks.append(task)
         format_types.append(format_type)
@@ -525,6 +542,7 @@ async def handle_multi_format_response(
     metadata: ResponseMetadata,
     formats: list[str],
     pdf_semaphore: asyncio.Semaphore,
+    force_render: bool = False,
 ) -> Response:
     """
     Create multi-format JSON response.
@@ -535,11 +553,14 @@ async def handle_multi_format_response(
         metadata: Response metadata
         formats: List of format strings to generate
         pdf_semaphore: Semaphore for PDF generation
+        force_render: If True, force Playwright rendering for HTML
 
     Returns:
         JSON Response with all requested formats
     """
-    results_dict = await process_multiple_formats(url, content, metadata, formats, pdf_semaphore)
+    results_dict = await process_multiple_formats(
+        url, content, metadata, formats, pdf_semaphore, force_render
+    )
 
     return Response(
         content=json.dumps(results_dict),

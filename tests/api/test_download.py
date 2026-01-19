@@ -307,3 +307,148 @@ class TestDownloadEndpoint:
             assert response.status_code == 200
         finally:
             app.dependency_overrides.pop(get_http_client, None)
+
+
+class TestRenderParameter:
+    """Tests for the ?render=true query parameter."""
+
+    def test_render_true_forces_playwright(self, api_client):
+        """Test that ?render=true forces Playwright rendering."""
+        mock_content = b"<html><body><h1>Static Page</h1></body></html>"
+        mock_client = AsyncMock()
+        mock_client.download.return_value = (
+            mock_content,
+            {
+                "url": "https://example.com",
+                "status_code": 200,
+                "content_type": "text/html; charset=utf-8",
+                "size": len(mock_content),
+                "headers": {"content-type": "text/html; charset=utf-8"},
+            },
+        )
+
+        rendered_content = b"<html><body><h1>Rendered Page</h1></body></html>"
+
+        async def mock_get_http_client():
+            return mock_client
+
+        app.dependency_overrides[get_http_client] = mock_get_http_client
+        try:
+            with patch(
+                "src.downloader.services.content_processor.render_html_with_playwright",
+                return_value=rendered_content,
+            ) as mock_render:
+                response = api_client.get(
+                    "/https://example.com?render=true",
+                    headers={"Accept": "text/html"},
+                )
+                assert response.status_code == 200
+                assert response.headers["X-Rendered-With-JS"] == "true"
+                assert response.content == rendered_content
+                mock_render.assert_called_once_with("https://example.com")
+        finally:
+            app.dependency_overrides.pop(get_http_client, None)
+
+    def test_render_false_uses_auto_detection(self, api_client):
+        """Test that ?render=false (explicit) uses auto-detection."""
+        mock_content = b"<html><body><h1>Static Page</h1></body></html>"
+        mock_client = AsyncMock()
+        mock_client.download.return_value = (
+            mock_content,
+            {
+                "url": "https://example.com",
+                "status_code": 200,
+                "content_type": "text/html; charset=utf-8",
+                "size": len(mock_content),
+                "headers": {"content-type": "text/html; charset=utf-8"},
+            },
+        )
+
+        async def mock_get_http_client():
+            return mock_client
+
+        app.dependency_overrides[get_http_client] = mock_get_http_client
+        try:
+            with patch(
+                "src.downloader.services.content_processor.should_use_playwright_for_html",
+                return_value=False,
+            ) as mock_detect:
+                response = api_client.get(
+                    "/https://example.com?render=false",
+                    headers={"Accept": "text/html"},
+                )
+                assert response.status_code == 200
+                assert response.headers["X-Rendered-With-JS"] == "false"
+                assert response.content == mock_content
+                mock_detect.assert_called_once()
+        finally:
+            app.dependency_overrides.pop(get_http_client, None)
+
+    def test_no_render_param_uses_auto_detection(self, api_client):
+        """Test that missing render param uses auto-detection (default behavior)."""
+        mock_content = b"<html><body><h1>Static Page</h1></body></html>"
+        mock_client = AsyncMock()
+        mock_client.download.return_value = (
+            mock_content,
+            {
+                "url": "https://example.com",
+                "status_code": 200,
+                "content_type": "text/html; charset=utf-8",
+                "size": len(mock_content),
+                "headers": {"content-type": "text/html; charset=utf-8"},
+            },
+        )
+
+        async def mock_get_http_client():
+            return mock_client
+
+        app.dependency_overrides[get_http_client] = mock_get_http_client
+        try:
+            with patch(
+                "src.downloader.services.content_processor.should_use_playwright_for_html",
+                return_value=False,
+            ) as mock_detect:
+                response = api_client.get(
+                    "/https://example.com",
+                    headers={"Accept": "text/html"},
+                )
+                assert response.status_code == 200
+                assert response.headers["X-Rendered-With-JS"] == "false"
+                mock_detect.assert_called_once()
+        finally:
+            app.dependency_overrides.pop(get_http_client, None)
+
+    def test_render_true_graceful_degradation(self, api_client):
+        """Test that ?render=true falls back to raw HTML on Playwright failure."""
+        mock_content = b"<html><body><h1>Original</h1></body></html>"
+        mock_client = AsyncMock()
+        mock_client.download.return_value = (
+            mock_content,
+            {
+                "url": "https://example.com",
+                "status_code": 200,
+                "content_type": "text/html; charset=utf-8",
+                "size": len(mock_content),
+                "headers": {"content-type": "text/html; charset=utf-8"},
+            },
+        )
+
+        async def mock_get_http_client():
+            return mock_client
+
+        app.dependency_overrides[get_http_client] = mock_get_http_client
+        try:
+            with patch(
+                "src.downloader.services.content_processor.render_html_with_playwright",
+                side_effect=Exception("Browser crash"),
+            ):
+                response = api_client.get(
+                    "/https://example.com?render=true",
+                    headers={"Accept": "text/html"},
+                )
+                # Should succeed with raw HTML on failure
+                assert response.status_code == 200
+                assert response.headers["X-Rendered-With-JS"] == "false"
+                assert response.content == mock_content
+        finally:
+            app.dependency_overrides.pop(get_http_client, None)

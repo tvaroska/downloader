@@ -2,7 +2,7 @@
 
 import logging
 
-from fastapi import APIRouter, Depends, Header, HTTPException, Path, Request, Response
+from fastapi import APIRouter, Depends, Header, HTTPException, Path, Query, Request, Response
 
 from ..auth import get_api_key
 from ..dependencies import HTTPClientDep, PDFSemaphoreDep
@@ -37,6 +37,7 @@ async def download_url(
     request: Request,
     url: str = Path(..., description="The URL to download"),
     accept: str | None = Header(None, description="Accept header for content negotiation"),
+    render: bool = Query(False, description="Force Playwright rendering, bypass auto-detection"),
     http_client: HTTPClientDep = None,
     pdf_semaphore: PDFSemaphoreDep = None,
     api_key: str | None = Depends(get_api_key),
@@ -68,9 +69,14 @@ async def download_url(
         }
     }
 
+    **Query Parameters:**
+        render: Force Playwright browser rendering (default: false).
+                When true, bypasses auto-detection and renders with JavaScript.
+
     Args:
         url: URL to download
         accept: Accept header for format selection
+        render: Force Playwright rendering, bypass auto-detection
         request: FastAPI request object (for accessing Accept headers)
         api_key: API key for authentication (if enabled)
 
@@ -94,7 +100,7 @@ async def download_url(
             # Multi-format request
             logger.info(f"Multi-format request: {formats} (Accept: {accept})")
             return await handle_multi_format_response(
-                validated_url, content, metadata, formats, pdf_semaphore
+                validated_url, content, metadata, formats, pdf_semaphore, render
             )
         else:
             # Single format request (backward compatible)
@@ -110,7 +116,7 @@ async def download_url(
             elif format_type == "pdf":
                 return await handle_pdf_response(validated_url, metadata, pdf_semaphore)
             elif format_type == "html":
-                return await handle_html_response(validated_url, content, metadata)
+                return await handle_html_response(validated_url, content, metadata, render)
             else:
                 return await handle_raw_response(content, metadata)
 

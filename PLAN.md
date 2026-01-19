@@ -2,112 +2,122 @@
 
 **Last Updated:** 2026-01-18
 
-## Current Sprint: Sprint 1 (Content Transformation)
+## Current Sprint: Sprint 2 (Browser Rendering)
 
-**Priority:** High - Core feature for LLM use cases
-**Estimated Effort:** 1 week (senior engineer)
-**Focus:** Transform downloaded content into formats optimized for LLM consumption
-
----
-
-## Sprint 1 - Content Transformation
-
-### 1. HTML to Markdown (P1 - Core)
-
-1.1. **S1-BE-1: Add markdownify dependency and core converter** ✅
-   - [x] Add `markdownify>=0.11.0` to pyproject.toml
-   - [x] Create `src/downloader/transformers/markdown.py`
-   - [x] Implement `html_to_markdown()` with heading, list, link, code block preservation
-   - Completed: 2026-01-18
-   - Plan: .claude/plans/imperative-sauteeing-cook.md
-
-1.2. **S1-BE-2: Add Accept header content negotiation to download endpoint** ✅
-   - [x] Support `Accept: text/markdown`, `Accept: text/plain`, `Accept: text/html`
-   - [x] Default to `text/plain` (LLM-optimized default)
-   - [x] Multi-format support via comma-separated Accept values
-   - Completed: 2026-01-18
-
-1.3. **S1-BE-3: Add format option to batch endpoint** ✅
-   - [x] Add `format` field to BatchURLRequest schema
-   - [x] Add `default_format` field to BatchRequest schema
-   - [x] Apply transformation per-URL in batch processing
-   - Completed: 2026-01-18
-
-1.4. **S1-TEST-1: Add markdown transformation tests** ✅
-   - [x] Create `tests/unit/test_markdown_transformer.py`
-   - [x] Test structure preservation (headings, lists, links, code blocks)
-   - [x] Test edge cases (malformed HTML, empty content, nested structures)
-   - Completed: 2026-01-18
-   - Plan: .claude/plans/generic-scribbling-lovelace.md
-
-### 2. Plain Text Extraction (P2 - Core)
-
-2.1. **S1-BE-4: Implement plain text extractor** ✅
-   - [x] Create `src/downloader/transformers/plaintext.py`
-   - [x] Use BeautifulSoup to strip tags and extract clean text
-   - [x] Handle whitespace normalization
-   - Completed: 2026-01-18
-   - Plan: .claude/plans/fancy-popping-origami.md
-
-2.2. **S1-TEST-2: Add text extraction tests** ✅
-   - [x] Create `tests/unit/test_plaintext_transformer.py`
-   - [x] Test tag stripping, whitespace handling, Unicode support
-   - Completed: 2026-01-18
-   - Plan: .claude/plans/curious-yawning-storm.md
-
-### 3. API Documentation (P1 - Required)
-
-3.1. **S1-DOC-1: Update API reference for content negotiation** ✅
-   - [x] Document `Accept` header support (`text/markdown`, `text/plain`, `text/html`)
-   - [x] Add batch request format option
-   - [x] Include example responses
-   - [x] Add supported formats summary table
-   - [x] Document multi-format requests
-   - Completed: 2026-01-18
-   - Plan: .claude/plans/synchronous-sniffing-ullman.md
+**Priority:** High - Enable JavaScript-rendered content capture
+**Focus:** Explicit render control and security hardening (Playwright already integrated)
 
 ---
 
-## Sprint 1 Summary
+## Sprint 2 - Browser Rendering
 
-| Category | Tasks | Estimated Hours |
-|----------|-------|-----------------|
-| Backend (Markdown) | 3 | 4-7 hours |
-| Backend (Text) | 1 | 1-2 hours |
-| Testing | 2 | 3 hours |
-| Documentation | 1 | 1 hour |
-| **Total** | **7** | **9-13 hours** |
+### 1. Playwright Integration (P1 - Core)
+
+1.1. **S2-BE-1: Extract browser module from pdf_generator** ✅ PARTIALLY DONE
+   - [x] Add `playwright>=1.40.0` to pyproject.toml (already present)
+   - [x] BrowserPool class exists in `pdf_generator.py` with queue-based management
+   - [x] 30s timeout already implemented
+   - [ ] Extract BrowserPool to `src/downloader/browser/manager.py` for reuse
+   - [ ] Add 512MB memory limit per browser context
+   - Files: `src/downloader/browser/manager.py`, `src/downloader/pdf_generator.py`
+
+1.2. **S2-BE-2: Add explicit ?render=true parameter** ✅ DONE
+   - [x] Auto-detection of JS-heavy pages exists (`needs_javascript_rendering()`)
+   - [x] Playwright rendering works via `render_html_with_playwright()`
+   - [x] Add `?render=true` query parameter to force rendering (bypass auto-detect)
+   - [x] Wire parameter through to content processor
+   - Files: `src/downloader/routes/download.py`, `src/downloader/services/content_processor.py`
+   - Plan: `.claude/plans/groovy-snacking-pudding.md`
+
+1.3. **S2-BE-3: Add wait_for selector support**
+   - [x] Basic `wait_for_load_state("networkidle")` exists
+   - [ ] Add `?wait_for=<selector>` query parameter
+   - [ ] Implement `page.wait_for_selector()` with configurable timeout
+   - [ ] Handle selector not found gracefully (timeout error)
+   - Files: `src/downloader/routes/download.py`, `src/downloader/content_converter.py`
+
+### 2. Process Isolation & Security (P1 - Required)
+
+2.1. **S2-SEC-1: Implement browser process isolation** ✅ PARTIALLY DONE
+   - [x] Browsers run as separate Chromium processes (Playwright default)
+   - [x] Health monitoring and usage tracking exists
+   - [ ] Add memory limits per browser context (512MB)
+   - [ ] Add explicit zombie process cleanup on timeout
+   - Files: `src/downloader/browser/manager.py`
+
+2.2. **S2-SEC-2: Add browser security hardening** ✅ PARTIALLY DONE
+   - [x] `--disable-extensions`, `--disable-plugins` already set
+   - [x] `--no-sandbox`, `--disable-dev-shm-usage` for container safety
+   - [ ] Remove `--disable-web-security` flag (currently enabled, insecure)
+   - [ ] Add `--disable-webgl` flag
+   - [ ] Add file:// URL blocking in validation layer
+   - Files: `src/downloader/pdf_generator.py`, `src/downloader/validation.py`
+
+### 3. Testing (P1 - Required)
+
+3.1. **S2-TEST-1: Add browser rendering integration tests**
+   - [ ] Create `tests/integration/test_browser_rendering.py`
+   - [ ] Test basic JS rendering (React/Vue hello world)
+   - [ ] Test wait_for selector functionality
+   - [ ] Test timeout handling
+   - Files: `tests/integration/test_browser_rendering.py`
+
+3.2. **S2-TEST-2: Add browser security tests**
+   - [ ] Test file:// URL blocking
+   - [ ] Test memory limit enforcement
+   - [ ] Test process cleanup after timeout
+   - Files: `tests/integration/test_browser_security.py`
+
+### 4. Infrastructure (P1 - Required)
+
+4.1. **S2-INFRA-1: Update Dockerfile for Playwright** ✅ DONE
+   - [x] Playwright browser installation in Dockerfile
+   - [x] System dependencies installed via `playwright install-deps`
+   - [x] Container builds and runs with Chromium
+   - Files: `Dockerfile`
+
+4.2. **S2-DOC-1: Document browser rendering feature**
+   - [x] Auto-rendering behavior documented (implicit)
+   - [ ] Add `?render=true` parameter to API reference
+   - [ ] Add `?wait_for=<selector>` parameter to API reference
+   - [ ] Add examples for SPA scraping
+   - Files: `docs/api/api-reference.md`
 
 ---
 
-## Acceptance Criteria for Sprint 1 Completion
+## Sprint 2 Summary
 
-- [ ] `Accept: text/markdown` returns clean markdown from HTML pages
-- [ ] `Accept: text/plain` returns plain text with no HTML tags
-- [ ] Batch endpoint supports `format` option
-- [ ] Markdown preserves headings, lists, links, and code blocks
-- [ ] All transformation tests pass
-- [x] API documentation updated
-- [ ] Transformation adds < 500ms to response time
+| Category | Remaining Work | Status |
+|----------|----------------|--------|
+| Backend (Core) | `?wait_for`, extract BrowserPool | 2 tasks partial |
+| Security | Memory limits, remove `--disable-web-security`, file:// blocking | 2 tasks partial |
+| Testing | Integration tests for new params | 2 tasks open |
+| Infrastructure | — | ✅ Done |
+| Documentation | Document new params | 1 task partial |
 
 ---
 
-## Sprint 2 Preview - OCR & Advanced Transformation
+## Acceptance Criteria for Sprint 2 Completion
 
-**Focus:** Image to text extraction and advanced content handling
-
-| Task ID | Description | Priority |
-|---------|-------------|----------|
-| S2-BE-1 | Add pytesseract and Tesseract dependency | P1 |
-| S2-BE-2 | Implement OCR transformer for images | P1 |
-| S2-BE-3 | Add `Accept: image/ocr` or similar content type support | P1 |
-| S2-BE-4 | Handle mixed content (HTML with embedded images) | P2 |
-| S2-TEST-1 | OCR accuracy tests (>90% target) | P1 |
-| S2-DOC-1 | Document OCR feature and system requirements | P1 |
+- [x] `?render=true` returns JavaScript-rendered HTML (forces rendering)
+- [ ] `?wait_for=<selector>` waits for element before returning
+- [x] Browser sessions timeout after 30 seconds (already implemented)
+- [ ] Memory usage stays under 512MB per session
+- [ ] `--disable-web-security` removed, file:// URLs blocked
+- [x] Dockerfile builds with Playwright support (already done)
+- [ ] All browser rendering tests pass
+- [ ] API documentation updated with new parameters
 
 ---
 
 ## Completed Sprints
+
+### Sprint 1 - Content Transformation ✅
+
+**Completed:** 2026-01-18
+**Archive:** [docs/features/content-transformation.md](docs/features/content-transformation.md)
+
+7 tasks completed: HTML to Markdown conversion, plain text extraction, Accept header content negotiation, batch format support, 69 transformer tests.
 
 ### Sprint 0 - Production Readiness ✅
 
@@ -120,7 +130,7 @@
 
 ## Notes
 
-- Sprint 0 remediation is complete; project is production-ready
-- Content Transformation (Phase 5) is the current strategic priority
+- OCR (Image to Text) deferred to future sprint based on priority decision
+- Phase 6 (Browser Rendering) is current strategic priority
 - See docs/roadmap.md for full feature roadmap
 - See docs/features/ for completed work history
