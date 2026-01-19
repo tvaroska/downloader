@@ -49,10 +49,11 @@
    - Completed: 2026-01-18
    - Plan: .claude/plans/fancy-popping-origami.md
 
-2.2. **S1-TEST-2: Add text extraction tests**
-   - Create `tests/lib/test_text_transformer.py`
-   - Test tag stripping, whitespace handling, Unicode support
-   - Effort: 1 hour
+2.2. **S1-TEST-2: Add text extraction tests** ✅
+   - [x] Create `tests/unit/test_plaintext_transformer.py`
+   - [x] Test tag stripping, whitespace handling, Unicode support
+   - Completed: 2026-01-18
+   - Plan: .claude/plans/curious-yawning-storm.md
 
 ### 3. API Documentation (P1 - Required)
 
