@@ -13,7 +13,7 @@ logger = logging.getLogger(__name__)
 class ContentMarkdownConverter(MarkdownConverter):
     """Custom markdown converter with enhanced code block and structure handling."""
 
-    def convert_pre(self, el: Tag, text: str, convert_as_inline: bool) -> str:
+    def convert_pre(self, el: Tag, text: str, **kwargs) -> str:
         """Handle pre tags with code language detection."""
         # Detect language from class attribute (e.g., class="language-python")
         code_el = el.find("code")

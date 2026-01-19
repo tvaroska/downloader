@@ -21,23 +21,24 @@
    - Completed: 2026-01-18
    - Plan: .claude/plans/imperative-sauteeing-cook.md
 
-1.2. **S1-BE-2: Add format query parameter to download endpoint**
-   - File: `src/downloader/api/routes.py`
-   - Add `?format=markdown|text|html` query parameter
-   - Default to `html` (current behavior)
-   - Effort: 1-2 hours
+1.2. **S1-BE-2: Add Accept header content negotiation to download endpoint** ✅
+   - [x] Support `Accept: text/markdown`, `Accept: text/plain`, `Accept: text/html`
+   - [x] Default to `text/plain` (LLM-optimized default)
+   - [x] Multi-format support via comma-separated Accept values
+   - Completed: 2026-01-18
 
-1.3. **S1-BE-3: Add format option to batch endpoint**
-   - File: `src/downloader/api/routes.py`
-   - Add `format` field to batch request body schema
-   - Apply transformation per-URL in batch processing
-   - Effort: 1-2 hours
+1.3. **S1-BE-3: Add format option to batch endpoint** ✅
+   - [x] Add `format` field to BatchURLRequest schema
+   - [x] Add `default_format` field to BatchRequest schema
+   - [x] Apply transformation per-URL in batch processing
+   - Completed: 2026-01-18
 
-1.4. **S1-TEST-1: Add markdown transformation tests**
-   - Create `tests/lib/test_markdown_transformer.py`
-   - Test structure preservation (headings, lists, links, code blocks)
-   - Test edge cases (malformed HTML, empty content, nested structures)
-   - Effort: 2 hours
+1.4. **S1-TEST-1: Add markdown transformation tests** ✅
+   - [x] Create `tests/unit/test_markdown_transformer.py`
+   - [x] Test structure preservation (headings, lists, links, code blocks)
+   - [x] Test edge cases (malformed HTML, empty content, nested structures)
+   - Completed: 2026-01-18
+   - Plan: .claude/plans/generic-scribbling-lovelace.md
 
 ### 2. Plain Text Extraction (P2 - Core)
 
@@ -54,9 +55,9 @@
 
 ### 3. API Documentation (P1 - Required)
 
-3.1. **S1-DOC-1: Update API reference for format parameter**
+3.1. **S1-DOC-1: Update API reference for content negotiation**
    - File: `docs/api/api-reference.md`
-   - Document `?format` query parameter
+   - Document `Accept` header support (`text/markdown`, `text/plain`, `text/html`)
    - Add batch request format option
    - Include example responses
    - Effort: 1 hour
@@ -77,8 +78,8 @@
 
 ## Acceptance Criteria for Sprint 1 Completion
 
-- [ ] `?format=markdown` returns clean markdown from HTML pages
-- [ ] `?format=text` returns plain text with no HTML tags
+- [ ] `Accept: text/markdown` returns clean markdown from HTML pages
+- [ ] `Accept: text/plain` returns plain text with no HTML tags
 - [ ] Batch endpoint supports `format` option
 - [ ] Markdown preserves headings, lists, links, and code blocks
 - [ ] All transformation tests pass
@@ -95,7 +96,7 @@
 |---------|-------------|----------|
 | S2-BE-1 | Add pytesseract and Tesseract dependency | P1 |
 | S2-BE-2 | Implement OCR transformer for images | P1 |
-| S2-BE-3 | Add `?format=ocr` parameter support | P1 |
+| S2-BE-3 | Add `Accept: image/ocr` or similar content type support | P1 |
 | S2-BE-4 | Handle mixed content (HTML with embedded images) | P2 |
 | S2-TEST-1 | OCR accuracy tests (>90% target) | P1 |
 | S2-DOC-1 | Document OCR feature and system requirements | P1 |
