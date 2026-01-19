@@ -141,6 +141,16 @@ class PDFConfig(BaseSettings):
         description="Number of browser instances to maintain in the pool",
     )
 
+    # Memory Limit Settings
+    # Why 512MB? Limits JavaScript heap to prevent runaway memory on complex pages
+    # Enforced via Chromium's --js-flags=--max-old-space-size flag
+    browser_memory_limit_mb: int = Field(
+        default=512,
+        ge=128,
+        le=4096,
+        description="Memory limit per browser instance in MB",
+    )
+
     model_config = SettingsConfigDict(env_prefix="PDF_")
 
 

@@ -48,20 +48,6 @@ _js_heavy_cache = BoundedCache(maxsize=1000)  # URLs needing JS rendering for HT
 _static_html_cache = BoundedCache(maxsize=1000)  # URLs confirmed as static HTML
 
 
-async def _create_playwright_context(browser):
-    """Create an isolated Playwright browser context with standard settings."""
-    return await browser.new_context(
-        user_agent=(
-            "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 "
-            "(KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
-        ),
-        viewport={"width": 1280, "height": 720},
-        ignore_https_errors=False,
-        java_script_enabled=True,
-        bypass_csp=False,
-    )
-
-
 async def _close_page_modals(page) -> None:
     """Attempt to close common signup boxes and modals."""
     close_selectors = [
@@ -318,7 +304,7 @@ async def convert_content_with_playwright_fallback(
 
         try:
             # Create isolated context for this request
-            context = await _create_playwright_context(browser)
+            context = await generator.pool.create_context(browser)
             page = await context.new_page()
 
             logger.info(f"🌐 Loading page with Playwright: {url}")
@@ -388,7 +374,7 @@ async def render_html_with_playwright(url: str) -> bytes:
 
         try:
             # Create isolated context
-            context = await _create_playwright_context(browser)
+            context = await generator.pool.create_context(browser)
             page = await context.new_page()
 
             logger.info(f"🌐 Loading page with Playwright: {url}")

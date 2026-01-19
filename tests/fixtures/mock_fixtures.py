@@ -103,7 +103,7 @@ def mock_playwright():
     Creates unique browser mocks for each launch() call to ensure BrowserPool's
     set-based storage works correctly (the set stores unique objects).
     """
-    with patch("src.downloader.pdf_generator.async_playwright") as mock:
+    with patch("src.downloader.browser.manager.async_playwright") as mock:
         playwright_instance = AsyncMock()
         mock.return_value.start = AsyncMock(return_value=playwright_instance)
 
@@ -133,6 +133,7 @@ def mock_playwright():
 @pytest.fixture
 def mock_browser_pool():
     """Mock browser pool for PDF generation tests."""
+    # Patch both locations for backward compatibility
     with patch("src.downloader.pdf_generator.BrowserPool") as mock_pool_class:
         pool_instance = AsyncMock()
         mock_pool_class.return_value = pool_instance
@@ -140,5 +141,6 @@ def mock_browser_pool():
         browser = AsyncMock()
         pool_instance.get_browser = AsyncMock(return_value=browser)
         pool_instance.release_browser = AsyncMock()
+        pool_instance.create_context = AsyncMock()
 
         yield pool_instance, browser

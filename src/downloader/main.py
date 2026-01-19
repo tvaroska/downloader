@@ -74,6 +74,7 @@ async def lifespan(app: FastAPI):
             pool_size=current_settings.pdf.pool_size,
             page_load_timeout=current_settings.pdf.page_load_timeout,
             wait_until=current_settings.pdf.wait_until,
+            memory_limit_mb=current_settings.pdf.browser_memory_limit_mb,
         )
         await pdf_generator.__aenter__()
         app.state.pdf_generator = pdf_generator

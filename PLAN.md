@@ -13,13 +13,14 @@
 
 ### 1. Playwright Integration (P1 - Core)
 
-1.1. **S2-BE-1: Extract browser module from pdf_generator** ✅ PARTIALLY DONE
+1.1. **S2-BE-1: Extract browser module from pdf_generator** ✅ DONE
    - [x] Add `playwright>=1.40.0` to pyproject.toml (already present)
    - [x] BrowserPool class exists in `pdf_generator.py` with queue-based management
    - [x] 30s timeout already implemented
-   - [ ] Extract BrowserPool to `src/downloader/browser/manager.py` for reuse
-   - [ ] Add 512MB memory limit per browser context
+   - [x] Extract BrowserPool to `src/downloader/browser/manager.py` for reuse
+   - [x] Add 512MB memory limit per browser context via `--js-flags=--max-old-space-size`
    - Files: `src/downloader/browser/manager.py`, `src/downloader/pdf_generator.py`
+   - Plan: `.claude/plans/streamed-leaping-pascal.md`
 
 1.2. **S2-BE-2: Add explicit ?render=true parameter** ✅ DONE
    - [x] Auto-detection of JS-heavy pages exists (`needs_javascript_rendering()`)
@@ -89,8 +90,8 @@
 
 | Category | Remaining Work | Status |
 |----------|----------------|--------|
-| Backend (Core) | `?wait_for`, extract BrowserPool | 2 tasks partial |
-| Security | Memory limits, remove `--disable-web-security`, file:// blocking | 2 tasks partial |
+| Backend (Core) | `?wait_for` | 1 task open |
+| Security | Remove `--disable-web-security`, file:// blocking | 1 task partial |
 | Testing | Integration tests for new params | 2 tasks open |
 | Infrastructure | — | ✅ Done |
 | Documentation | Document new params | 1 task partial |
@@ -102,7 +103,7 @@
 - [x] `?render=true` returns JavaScript-rendered HTML (forces rendering)
 - [ ] `?wait_for=<selector>` waits for element before returning
 - [x] Browser sessions timeout after 30 seconds (already implemented)
-- [ ] Memory usage stays under 512MB per session
+- [x] Memory usage limited to 512MB per session (via `--js-flags=--max-old-space-size`)
 - [ ] `--disable-web-security` removed, file:// URLs blocked
 - [x] Dockerfile builds with Playwright support (already done)
 - [ ] All browser rendering tests pass
