@@ -180,7 +180,7 @@ class TestSSRFProtection:
         """Test that only http/https schemes are allowed."""
         settings = Settings(ssrf=SSRFConfig(resolve_dns=False))
 
-        with pytest.raises(URLValidationError, match="http or https"):
+        with pytest.raises(URLValidationError, match="file://"):
             validate_url("file:///etc/passwd", settings)
 
         with pytest.raises(URLValidationError, match="http or https"):

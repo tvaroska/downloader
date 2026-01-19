@@ -27,7 +27,7 @@ class TestPlaywrightHTMLRendering:
 <body><h1>Rendered Content</h1></body>
 </html>"""
         mock_page.content.return_value = rendered_html
-        mock_page.goto.return_value = AsyncMock(status=200)
+        mock_page.goto.return_value = MagicMock(status=200)
 
         # Execute
         url = "https://example.com/article"
@@ -51,7 +51,7 @@ class TestPlaywrightHTMLRendering:
         mock_generator, mock_browser, mock_context, mock_page = mock_playwright_for_html
 
         # Configure mock to return 404
-        mock_page.goto.return_value = AsyncMock(status=404)
+        mock_page.goto.return_value = MagicMock(status=404)
 
         # Execute and expect exception
         url = "https://example.com/not-found"
@@ -83,7 +83,7 @@ class TestPlaywrightHTMLRendering:
         mock_generator, mock_browser, mock_context, mock_page = mock_playwright_for_html
 
         # Configure mocks
-        mock_page.goto.return_value = AsyncMock(status=200)
+        mock_page.goto.return_value = MagicMock(status=200)
         mock_page.content.return_value = "<html><body>Content</body></html>"
 
         # Create mock close button
@@ -104,7 +104,7 @@ class TestPlaywrightHTMLRendering:
         """Test that browser is properly released back to pool."""
         mock_generator, mock_browser, mock_context, mock_page = mock_playwright_for_html
 
-        mock_page.goto.return_value = AsyncMock(status=200)
+        mock_page.goto.return_value = MagicMock(status=200)
         mock_page.content.return_value = "<html><body>Content</body></html>"
 
         # Execute
@@ -157,7 +157,7 @@ class TestHandleHTMLResponse:
 <body><article>Full content here</article></body>
 </html>"""
         mock_page.content.return_value = rendered_html
-        mock_page.goto.return_value = AsyncMock(status=200)
+        mock_page.goto.return_value = MagicMock(status=200)
 
         # Clear caches
         from src.downloader import content_converter
@@ -279,6 +279,7 @@ def mock_playwright_for_html():
     mock_browser.new_context = AsyncMock(return_value=mock_context)
 
     mock_pool.get_browser = AsyncMock(return_value=mock_browser)
+    mock_pool.create_context = AsyncMock(return_value=mock_context)
     mock_pool.release_browser = AsyncMock()
 
     mock_generator.pool = mock_pool
