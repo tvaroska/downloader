@@ -1,6 +1,6 @@
 # REST API Downloader - Sprint Plan
 
-**Last Updated:** 2026-01-18
+**Last Updated:** 2026-01-19
 
 ## Current Sprint: Sprint 2 (Browser Rendering)
 
@@ -59,18 +59,20 @@
 
 ### 3. Testing (P1 - Required)
 
-3.1. **S2-TEST-1: Add browser rendering integration tests**
-   - [ ] Create `tests/integration/test_browser_rendering.py`
-   - [ ] Test basic JS rendering (React/Vue hello world)
-   - [ ] Test wait_for selector functionality
-   - [ ] Test timeout handling
+3.1. **S2-TEST-1: Add browser rendering integration tests** ✅ DONE
+   - [x] Create `tests/integration/test_browser_rendering.py`
+   - [x] Test basic JS rendering (React/Vue hello world)
+   - [x] Test wait_for selector functionality
+   - [x] Test timeout handling
    - Files: `tests/integration/test_browser_rendering.py`
+   - Plan: `.claude/plans/mighty-launching-hejlsberg.md`
 
-3.2. **S2-TEST-2: Add browser security tests**
-   - [ ] Test file:// URL blocking
-   - [ ] Test memory limit enforcement
-   - [ ] Test process cleanup after timeout
+3.2. **S2-TEST-2: Add browser security tests** ✅ DONE
+   - [x] Test file:// URL blocking
+   - [x] Test memory limit enforcement
+   - [x] Test process cleanup after timeout
    - Files: `tests/integration/test_browser_security.py`
+   - Plan: `.claude/plans/mighty-launching-hejlsberg.md`
 
 ### 4. Infrastructure (P1 - Required)
 
@@ -95,7 +97,7 @@
 |----------|----------------|--------|
 | Backend (Core) | — | ✅ Done |
 | Security | — | ✅ Done |
-| Testing | Integration tests for new params | 2 tasks open |
+| Testing | — | ✅ Done |
 | Infrastructure | — | ✅ Done |
 | Documentation | Document new params | 1 task partial |
 
@@ -109,7 +111,7 @@
 - [x] Memory usage limited to 512MB per session (via `--js-flags=--max-old-space-size`)
 - [x] `--disable-web-security` removed, file:// URLs blocked
 - [x] Dockerfile builds with Playwright support (already done)
-- [ ] All browser rendering tests pass
+- [x] All browser rendering tests pass
 - [ ] API documentation updated with new parameters
 
 ---
