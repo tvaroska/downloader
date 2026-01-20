@@ -25,12 +25,15 @@ See [FEEDBACK.md](FEEDBACK.md) for full assessment.
    - **Result:** Coverage increased from 40% to **85.14%** (30 new tests added)
    - Plan: `.claude/plans/dazzling-popping-popcorn.md`
 
-1.2. **S0-TEST-2: Increase routes/batch.py coverage from 41% to 75%+**
-   - [ ] Add tests for job processing logic (lines 59-263)
-   - [ ] Add tests for result aggregation (lines 296-355)
-   - [ ] Add tests for concurrent URL processing
-   - [ ] Add tests for timeout handling and partial failures
+1.2. **S0-TEST-2: Increase routes/batch.py coverage from 41% to 75%+** ✅
+   - [x] Add tests for job processing logic (lines 59-263)
+   - [x] Add tests for result aggregation (lines 296-355)
+   - [x] Add tests for concurrent URL processing
+   - [x] Add tests for timeout handling and partial failures
    - Files: `tests/api/test_batch_processing.py`
+   - **Completed:** 2026-01-20
+   - **Result:** Coverage increased from 19% to **86.34%** (33 new tests added)
+   - Plan: `.claude/plans/whimsical-zooming-floyd.md`
 
 1.3. **S0-TEST-3: Increase metrics.py coverage from 45% to 70%+**
    - [ ] Add tests for metric recording paths (lines 149-293)
