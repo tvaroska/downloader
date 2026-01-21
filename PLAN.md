@@ -127,15 +127,21 @@ See [FEEDBACK.md](FEEDBACK.md) for full assessment.
    - **Note:** Configured with per-module ignores for gradual adoption (100+ existing errors in legacy modules)
    - Plan: `.claude/plans/cozy-toasting-milner.md`
 
-3.2. **S0-CI-2: Add dependency vulnerability scanning**
-   - [ ] Add `pip-audit` or `safety` to CI pipeline
-   - [ ] Configure to fail on high/critical vulnerabilities
-   - Files: `.github/workflows/ci.yml`
+3.2. **S0-CI-2: Add dependency vulnerability scanning** ✅
+   - [x] Add `pip-audit` to CI pipeline
+   - [x] Configure to fail on known vulnerabilities
+   - Files: `.github/workflows/ci.yml`, `pyproject.toml`
+   - **Completed:** 2026-01-20
+   - **Note:** Added pip-audit with `--skip-editable` flag; fixed 4 CVEs in transitive dependencies
+   - Plan: `.claude/plans/snoopy-discovering-parnas.md`
 
-3.3. **S0-CI-3: Fix coverage threshold enforcement**
-   - [ ] Ensure coverage reaches 70% (currently 68.2%)
-   - [ ] After tests added, increase threshold to 75%
-   - Files: `.github/workflows/ci.yml`, `.coveragerc`
+3.3. **S0-CI-3: Fix coverage threshold enforcement** ✅
+   - [x] Ensure coverage reaches 75%+
+   - [x] Increased threshold from 70% to 75%
+   - Files: `.github/workflows/ci.yml`
+   - **Completed:** 2026-01-20
+   - **Result:** Current coverage at 85.46%
+   - Plan: `.claude/plans/snoopy-discovering-parnas.md`
 
 ---
 
@@ -181,10 +187,10 @@ See [FEEDBACK.md](FEEDBACK.md) for full assessment.
 |----------|-------|-----------|----------|
 | Test Coverage | 6 | 6 ✅ | P0 |
 | Documentation | 5 | 5 ✅ | P0 |
-| CI/CD | 3 | 1 | P1 |
+| CI/CD | 3 | 3 ✅ | P1 |
 | Security | 2 | 0 | P1 |
 | Code Quality | 3 | 0 | P2 |
-| **Total** | **19** | **12** | - |
+| **Total** | **19** | **14** | - |
 
 **Acceptance Criteria:**
 - [x] job_manager.py coverage ≥ 75% (achieved 85.14%)
@@ -196,7 +202,8 @@ See [FEEDBACK.md](FEEDBACK.md) for full assessment.
 - [x] All documentation links verified working
 - [x] CHANGELOG.md, SECURITY.md, CONTRIBUTING.md exist
 - [x] mypy passes in CI
-- [ ] No critical/high dependency vulnerabilities
+- [x] No critical/high dependency vulnerabilities (pip-audit integrated)
+- [x] Coverage threshold enforced at 75%+ (currently 85.46%)
 - [x] Version consistency across all files
 
 ---

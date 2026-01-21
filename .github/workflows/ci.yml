@@ -74,6 +74,9 @@ jobs:
       - name: Install dependencies
         run: uv sync --frozen
 
+      - name: Run dependency vulnerability scan
+        run: uv run pip-audit --skip-editable --progress-spinner=off
+
       - name: Install Playwright browsers
         run: uv run playwright install chromium --with-deps
 
@@ -84,7 +87,7 @@ jobs:
             --cov=src/downloader \
             --cov-report=xml \
             --cov-report=term \
-            --cov-fail-under=70
+            --cov-fail-under=75
         env:
           REDIS_URI: redis://localhost:6379
 
@@ -92,7 +95,7 @@ jobs:
         uses: codecov/codecov-action@v4
         with:
           files: ./coverage.xml
-          fail_ci_if_error: false
+          fail_ci_if_error: true
           verbose: true
         env:
           CODECOV_TOKEN: ${{ secrets.CODECOV_TOKEN }}
