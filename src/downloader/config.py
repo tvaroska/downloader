@@ -299,6 +299,49 @@ class RedisConfig(BaseSettings):
     model_config = SettingsConfigDict(env_prefix="REDIS_", populate_by_name=True)
 
 
+class SchedulerConfig(BaseSettings):
+    """Scheduler configuration for scheduled job management.
+
+    APScheduler is used for scheduling recurring download jobs.
+    """
+
+    # Job Store Settings
+    # Why redis default? Provides persistence across restarts for production reliability
+    job_store_type: Literal["memory", "redis"] = Field(
+        default="redis",
+        description="Job store backend type (redis requires REDIS_URI)",
+    )
+
+    # Executor Settings
+    # Why 10 workers? Balances concurrent job execution vs resource usage
+    # Each scheduled job may trigger HTTP downloads, so limit parallelism
+    max_workers: int = Field(
+        default=10,
+        ge=1,
+        le=50,
+        description="Maximum number of concurrent scheduled job workers",
+    )
+
+    # Misfire Settings
+    # Why 60s? Allows scheduler to recover from brief downtimes without missing jobs
+    # Jobs running up to 60s late will still execute; beyond that they're skipped
+    misfire_grace_time: int = Field(
+        default=60,
+        ge=1,
+        le=3600,
+        description="Seconds a job can be late before considered misfired",
+    )
+
+    # Coalesce Settings
+    # Why True? If multiple runs were missed, execute only once to prevent flood
+    coalesce: bool = Field(
+        default=True,
+        description="Combine multiple missed runs into a single execution",
+    )
+
+    model_config = SettingsConfigDict(env_prefix="SCHEDULER_")
+
+
 class AuthConfig(BaseSettings):
     """Authentication configuration."""
 
@@ -481,6 +524,7 @@ class Settings(BaseSettings):
     batch: BatchConfig = Field(default_factory=BatchConfig)
     content: ContentConfig = Field(default_factory=ContentConfig)
     redis: RedisConfig = Field(default_factory=RedisConfig)
+    scheduler: SchedulerConfig = Field(default_factory=SchedulerConfig)
     auth: AuthConfig = Field(default_factory=AuthConfig)
     logging: LoggingConfig = Field(default_factory=LoggingConfig)
     ssrf: SSRFConfig = Field(default_factory=SSRFConfig)

@@ -20,6 +20,7 @@ from .logging_config import get_logger, setup_logging
 from .middleware import MetricsMiddleware, get_system_metrics_collector
 from .pdf_generator import PlaywrightPDFGenerator
 from .ratelimit_middleware import RateLimitMiddleware
+from .scheduler import SchedulerService
 
 # Load settings and configure logging
 settings = get_settings()
@@ -105,6 +106,20 @@ async def lifespan(app: FastAPI):
         app.state.job_manager = None
         logger.info("Job manager not initialized (Redis not configured)")
 
+    # Initialize scheduler if Redis is configured
+    if current_settings.redis.redis_uri:
+        logger.info("Initializing scheduler...")
+        scheduler_service = SchedulerService(
+            redis_uri=current_settings.redis.redis_uri,
+            settings=current_settings.scheduler,
+        )
+        await scheduler_service.start()
+        app.state.scheduler = scheduler_service
+        logger.info("Scheduler initialized")
+    else:
+        app.state.scheduler = None
+        logger.info("Scheduler not initialized (Redis not configured)")
+
     # Start system metrics collection
     logger.info("Starting system metrics collection...")
     system_metrics = get_system_metrics_collector()
@@ -125,6 +140,10 @@ async def lifespan(app: FastAPI):
     # Close PDF generator if initialized
     if app.state.pdf_generator:
         await app.state.pdf_generator.__aexit__(None, None, None)
+
+    # Shutdown scheduler if initialized
+    if app.state.scheduler:
+        await app.state.scheduler.shutdown()
 
     # Close job manager if initialized
     if app.state.job_manager:
@@ -222,6 +241,16 @@ async def health_check(request: Request):
     pdf_generator = getattr(request.app.state, "pdf_generator", None)
     pdf_available = pdf_generator is not None
 
+    # Check scheduler status
+    scheduler = getattr(request.app.state, "scheduler", None)
+    scheduler_status = {
+        "available": scheduler is not None,
+    }
+    if scheduler:
+        scheduler_status.update(await scheduler.get_status())
+    else:
+        scheduler_status["reason"] = "Redis connection required"
+
     health_info = {
         "status": "healthy",
         "version": __version__,
@@ -242,6 +271,7 @@ async def health_check(request: Request):
                 "available_slots": pdf_semaphore._value,
                 "utilization_percent": round(pdf_util, 1),
             },
+            "scheduler": scheduler_status,
         },
     }
     health_info.update(get_auth_status(app_settings))

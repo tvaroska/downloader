@@ -230,13 +230,15 @@ See [FEEDBACK.md](FEEDBACK.md) for full assessment.
 
 ### 1. Core Scheduling (P1 - Core)
 
-1.1. **S3-BE-1: Add APScheduler dependency and scheduler service**
-   - [ ] Add `apscheduler>=3.10.0` to pyproject.toml
-   - [ ] Create `src/downloader/scheduler/service.py` with scheduler initialization
-   - [ ] Configure Redis job store for persistence
-   - [ ] Add scheduler startup/shutdown hooks to app lifecycle
-   - Files: `pyproject.toml`, `src/downloader/scheduler/service.py`, `src/downloader/app.py`
+1.1. **S3-BE-1: Add APScheduler dependency and scheduler service** ✅
+   - [x] Add `apscheduler>=3.10.0` to pyproject.toml
+   - [x] Create `src/downloader/scheduler/service.py` with scheduler initialization
+   - [x] Configure Redis job store for persistence
+   - [x] Add scheduler startup/shutdown hooks to app lifecycle
+   - Files: `pyproject.toml`, `src/downloader/scheduler/service.py`, `src/downloader/main.py`
    - Effort: 4h
+   - **Completed:** 2026-01-21
+   - Plan: `.claude/plans/playful-crafting-backus.md`
 
 1.2. **S3-BE-2: Implement schedule CRUD endpoints**
    - [ ] `POST /schedules` - Create scheduled job with cron expression
