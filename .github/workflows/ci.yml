@@ -35,6 +35,9 @@ jobs:
       - name: Run ruff format check
         run: uv run ruff format --check src/ tests/ examples/
 
+      - name: Run mypy type checking
+        run: uv run mypy src/
+
       - name: Run smoke tests
         run: uv run pytest tests/ -m smoke -v --timeout=30
 
