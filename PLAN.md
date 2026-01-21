@@ -240,14 +240,16 @@ See [FEEDBACK.md](FEEDBACK.md) for full assessment.
    - **Completed:** 2026-01-21
    - Plan: `.claude/plans/playful-crafting-backus.md`
 
-1.2. **S3-BE-2: Implement schedule CRUD endpoints**
-   - [ ] `POST /schedules` - Create scheduled job with cron expression
-   - [ ] `GET /schedules` - List user's scheduled jobs
-   - [ ] `GET /schedules/{id}` - Get schedule details and next run time
-   - [ ] `DELETE /schedules/{id}` - Remove scheduled job
-   - [ ] Add ScheduleCreate, ScheduleResponse Pydantic models
+1.2. **S3-BE-2: Implement schedule CRUD endpoints** ✅
+   - [x] `POST /schedules` - Create scheduled job with cron expression
+   - [x] `GET /schedules` - List user's scheduled jobs
+   - [x] `GET /schedules/{id}` - Get schedule details and next run time
+   - [x] `DELETE /schedules/{id}` - Remove scheduled job
+   - [x] Add ScheduleCreate, ScheduleResponse Pydantic models
    - Files: `src/downloader/routes/schedules.py`, `src/downloader/models/schedule.py`
    - Effort: 6h
+   - **Completed:** 2026-01-21
+   - Plan: `.claude/plans/wobbly-marinating-peacock.md`
 
 1.3. **S3-BE-3: Implement job execution logic**
    - [ ] Create job executor that calls download endpoint internally
