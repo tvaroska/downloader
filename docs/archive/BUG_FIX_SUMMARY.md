@@ -1,8 +1,10 @@
 # Bug Fix Summary: JavaScript Rendering for Substack/JS-Heavy Sites
 
+> **Status: RESOLVED** - This fix has been deployed and verified.
+
 **Date:** January 2, 2026
 **Issue:** DOWNLOADER_BUG.md - Missing metadata for JavaScript-heavy sites
-**Status:** ✅ **FIXED**
+**Status:** FIXED
 
 ---
 

@@ -1,5 +1,7 @@
 # HTML JavaScript Rendering Feature - Test Results
 
+> **Status: RESOLVED** - Issue confirmed and fixed. See [BUG_FIX_SUMMARY.md](BUG_FIX_SUMMARY.md).
+
 **Date:** January 2, 2026
 **Feature:** JavaScript rendering for HTML responses (commit 0b76359)
 **Primary Test URL:** `https://ontologist.substack.com/p/understanding-shacl-12-rules`

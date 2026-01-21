@@ -1,5 +1,7 @@
 # Documentation
 
+**Last Updated:** 2026-01-20
+
 Technical documentation for the REST API Downloader.
 
 ## Documentation Index

@@ -1,5 +1,7 @@
 # Content Transformation - Feature History
 
+**Last Updated:** 2026-01-20
+
 ## Overview
 
 Transform downloaded content into formats optimized for downstream consumption (LLMs, data pipelines).

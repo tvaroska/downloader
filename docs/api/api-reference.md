@@ -1,5 +1,7 @@
 # REST API Downloader - API Reference
 
+**Last Updated:** 2026-01-20
+
 Complete API documentation for the REST API Downloader service.
 
 ## Base URL

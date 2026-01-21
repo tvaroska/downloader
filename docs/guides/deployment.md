@@ -1,5 +1,7 @@
 # Deployment Guide
 
+**Last Updated:** 2026-01-20
+
 This guide covers deploying the REST API Downloader to production.
 
 ## Prerequisites

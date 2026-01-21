@@ -1,9 +1,11 @@
 # Downloader Service Issue: Missing Metadata for JavaScript-Heavy Sites
 
+> **Status: RESOLVED** - Fixed by adding `brotli` library. See [BUG_FIX_SUMMARY.md](BUG_FIX_SUMMARY.md).
+
 **Service:** [github.com/tvaroska/downloader](https://github.com/tvaroska/downloader)
 **Issue Date:** January 2, 2026
 **Severity:** Medium - Affects content quality but has workarounds
-**Status:** Reported
+**Status:** Resolved
 
 ---
 

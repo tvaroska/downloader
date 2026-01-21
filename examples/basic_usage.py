@@ -369,7 +369,7 @@ async def main():
         print("\n📚 Next steps:")
         print("   • Try concurrent_pdf_requests.py for load testing")
         print("   • Explore content_formats.py for format comparison")
-        print("   • Check error_handling.py for robust error patterns")
+        print("   • See batch_job_example.py for async batch processing")
 
     except KeyboardInterrupt:
         print("\n⏹️  Examples interrupted by user")

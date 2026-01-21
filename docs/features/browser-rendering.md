@@ -1,5 +1,7 @@
 # Browser Rendering - Feature History
 
+**Last Updated:** 2026-01-20
+
 ## Overview
 
 Capture JavaScript-rendered content from SPAs and dynamic websites using Playwright-based browser automation.
