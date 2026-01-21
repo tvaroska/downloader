@@ -1,8 +1,11 @@
 """Schedule management endpoints for recurring downloads."""
 
+from __future__ import annotations
+
 import logging
 import uuid
 from datetime import datetime, timezone
+from typing import TYPE_CHECKING
 
 from apscheduler.triggers.cron import CronTrigger
 from fastapi import APIRouter, Depends, HTTPException, Path
@@ -13,7 +16,29 @@ from ..models.responses import ErrorResponse
 from ..models.schedule import ScheduleCreate, ScheduleListResponse, ScheduleResponse
 from ..scheduler import SchedulerService
 
+if TYPE_CHECKING:
+    from ..scheduler import ScheduledJobExecutor
+
 logger = logging.getLogger(__name__)
+
+# Module-level executor reference (set at startup via set_executor())
+_executor: ScheduledJobExecutor | None = None
+
+
+def set_executor(executor: ScheduledJobExecutor) -> None:
+    """Set the executor instance for scheduled jobs.
+
+    This function is called at application startup to inject the executor
+    dependency into this module. APScheduler jobs run outside FastAPI's
+    request context, so we use this module-level reference instead.
+
+    Args:
+        executor: The executor instance to use for job execution.
+    """
+    global _executor
+    _executor = executor
+    logger.info("Executor set for scheduled jobs")
+
 
 router = APIRouter()
 
@@ -39,11 +64,36 @@ async def scheduled_download_job(
 ) -> None:
     """Job function executed by APScheduler for scheduled downloads.
 
-    This is a placeholder - full implementation in S3-BE-3 (executor).
-    For now, just log the execution.
+    This function is called by APScheduler when a scheduled job triggers.
+    It delegates to the executor for actual download execution with retry logic.
+
+    Args:
+        schedule_id: Unique identifier for the schedule.
+        url: URL to download.
+        format: Output format (text, markdown, html, pdf, json, raw).
+        headers: Optional custom HTTP headers.
     """
-    logger.info(f"[SCHEDULE-{schedule_id}] Executing download: {url} (format={format})")
-    # TODO: S3-BE-3 will implement actual download execution
+    if _executor is None:
+        logger.error(f"[SCHEDULE-{schedule_id}] Executor not initialized, cannot execute job")
+        return
+
+    logger.info(f"[SCHEDULE-{schedule_id}] Starting execution: {url} (format={format})")
+
+    try:
+        execution = await _executor.execute(schedule_id, url, format, headers)
+
+        if execution.success:
+            logger.info(
+                f"[SCHEDULE-{schedule_id}] Completed in {execution.duration:.2f}s "
+                f"({execution.content_size or 0} bytes)"
+            )
+        else:
+            logger.error(
+                f"[SCHEDULE-{schedule_id}] Failed after {execution.attempt} attempts: "
+                f"{execution.error_message}"
+            )
+    except Exception as e:
+        logger.exception(f"[SCHEDULE-{schedule_id}] Unexpected error during execution: {e}")
 
 
 def _format_cron_trigger(trigger: CronTrigger) -> str:

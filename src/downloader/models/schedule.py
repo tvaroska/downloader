@@ -1,9 +1,19 @@
 """Pydantic models for schedule CRUD operations."""
 
 from datetime import datetime
+from enum import Enum
 from typing import Literal
 
 from pydantic import BaseModel, Field, field_validator
+
+
+class ExecutionStatus(str, Enum):
+    """Status of a scheduled job execution."""
+
+    PENDING = "pending"
+    RUNNING = "running"
+    COMPLETED = "completed"
+    FAILED = "failed"
 
 
 class ScheduleCreate(BaseModel):
@@ -75,3 +85,18 @@ class ScheduleListResponse(BaseModel):
 
     schedules: list[ScheduleResponse] = Field(..., description="List of schedules")
     total: int = Field(..., description="Total number of schedules")
+
+
+class ScheduleExecution(BaseModel):
+    """Record of a single scheduled job execution."""
+
+    execution_id: str = Field(..., description="Unique execution identifier (UUID)")
+    schedule_id: str = Field(..., description="ID of the parent schedule")
+    status: ExecutionStatus = Field(..., description="Execution status")
+    started_at: datetime = Field(..., description="Execution start time")
+    completed_at: datetime | None = Field(None, description="Execution completion time")
+    duration: float | None = Field(None, description="Execution duration in seconds")
+    success: bool = Field(..., description="Whether execution succeeded")
+    content_size: int | None = Field(None, description="Downloaded content size in bytes")
+    error_message: str | None = Field(None, description="Error message if failed")
+    attempt: int = Field(..., ge=1, description="Attempt number (1-based)")

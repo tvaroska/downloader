@@ -6,13 +6,18 @@ the application's Redis backend and lifecycle management.
 
 import logging
 from datetime import datetime
-from typing import Any
+
+# TYPE_CHECKING import to avoid circular imports
+from typing import TYPE_CHECKING, Any
 
 from apscheduler.executors.asyncio import AsyncIOExecutor
 from apscheduler.jobstores.memory import MemoryJobStore
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 
 from ..config import SchedulerConfig
+
+if TYPE_CHECKING:
+    from .executor import ScheduledJobExecutor
 
 logger = logging.getLogger(__name__)
 
@@ -60,6 +65,7 @@ class SchedulerService:
         self.settings = settings
         self._scheduler: AsyncIOScheduler | None = None
         self._started = False
+        self._executor: ScheduledJobExecutor | None = None
 
         # Configure job stores
         jobstores: dict[str, Any] = {}
@@ -224,6 +230,24 @@ class SchedulerService:
         if self._scheduler:
             self._scheduler.remove_job(job_id)
             logger.info(f"Removed scheduled job: {job_id}")
+
+    @property
+    def executor(self) -> "ScheduledJobExecutor | None":
+        """Get the job executor for handling scheduled downloads.
+
+        Returns:
+            The executor instance if set, None otherwise.
+        """
+        return self._executor
+
+    def set_executor(self, executor: "ScheduledJobExecutor") -> None:
+        """Set the job executor for handling scheduled downloads.
+
+        Args:
+            executor: The executor instance to use for job execution.
+        """
+        self._executor = executor
+        logger.info("Executor attached to scheduler service")
 
 
 def get_scheduler_service(

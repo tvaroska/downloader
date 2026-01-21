@@ -116,8 +116,25 @@ async def lifespan(app: FastAPI):
         await scheduler_service.start()
         app.state.scheduler = scheduler_service
         logger.info("Scheduler initialized")
+
+        # Initialize executor for scheduled job execution
+        from .routes.schedules import set_executor as set_schedules_executor
+        from .scheduler import ExecutionStorage, ScheduledJobExecutor
+
+        execution_storage = ExecutionStorage(job_manager.redis_client)
+        executor = ScheduledJobExecutor(
+            http_client=http_client,
+            storage=execution_storage,
+            pdf_generator=app.state.pdf_generator,
+            pdf_semaphore=app.state.pdf_semaphore,
+        )
+        scheduler_service.set_executor(executor)
+        set_schedules_executor(executor)
+        app.state.execution_storage = execution_storage
+        logger.info("Scheduler executor initialized")
     else:
         app.state.scheduler = None
+        app.state.execution_storage = None
         logger.info("Scheduler not initialized (Redis not configured)")
 
     # Start system metrics collection
