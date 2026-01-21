@@ -378,12 +378,22 @@ class SSRFConfig(BaseSettings):
 
 
 class CORSConfig(BaseSettings):
-    """CORS configuration."""
+    """CORS configuration.
 
-    # Why "*" default? Development convenience; should be restricted in production
+    SECURITY: Default allows only localhost for development safety.
+    Production deployments must explicitly set CORS_ALLOWED_ORIGINS.
+    """
+
+    # Why localhost default? Security by default; prevents accidental exposure
+    # when developers forget to configure CORS for production
     allowed_origins: list[str] = Field(
-        default=["*"],
-        description="Allowed CORS origins (use specific domains in production)",
+        default=[
+            "http://localhost:3000",
+            "http://localhost:8080",
+            "http://127.0.0.1:3000",
+            "http://127.0.0.1:8080",
+        ],
+        description="Allowed CORS origins. Default: localhost only. Set explicitly in production.",
     )
 
     model_config = SettingsConfigDict(env_prefix="CORS_")
@@ -494,7 +504,16 @@ class Settings(BaseSettings):
                 messages.append("WARNING: No API key configured in production")
 
             if "*" in self.cors.allowed_origins:
-                messages.append("WARNING: CORS allows all origins in production")
+                messages.append("WARNING: CORS allows all origins in production - security risk!")
+            elif not self.cors.allowed_origins:
+                messages.append("WARNING: CORS origins empty - cross-origin requests blocked")
+            elif any(
+                o.startswith("http://localhost") or o.startswith("http://127.0.0.1")
+                for o in self.cors.allowed_origins
+            ):
+                messages.append(
+                    "WARNING: CORS includes localhost in production - likely misconfigured"
+                )
 
             if not self.logging.json_logs:
                 messages.append("INFO: JSON logs recommended for production")

@@ -147,16 +147,21 @@ See [FEEDBACK.md](FEEDBACK.md) for full assessment.
 
 ### 4. Security Improvements (P1 - Required)
 
-4.1. **S0-SEC-1: Fix CORS default configuration**
-   - [ ] Change default CORS from `["*"]` to empty or localhost-only
-   - [ ] Add clear documentation about production CORS configuration
-   - [ ] Add production environment check that warns about wildcard CORS
-   - Files: `src/downloader/config.py`, `docs/guides/configuration.md`
+4.1. **S0-SEC-1: Fix CORS default configuration** ✅
+   - [x] Change default CORS from `["*"]` to localhost-only
+   - [x] Add clear documentation about production CORS configuration
+   - [x] Add production environment check that warns about wildcard/localhost CORS
+   - Files: `src/downloader/config.py`, `docs/guides/deployment.md`, `.env.example`, `SECURITY.md`
+   - **Completed:** 2026-01-20
+   - Plan: `.claude/plans/graceful-petting-cray.md`
 
-4.2. **S0-SEC-2: Add secrets detection to pre-commit**
-   - [ ] Add `detect-secrets` or `gitleaks` to pre-commit config
-   - [ ] Create baseline for existing files
-   - Files: `.pre-commit-config.yaml`
+4.2. **S0-SEC-2: Add secrets detection to pre-commit** ✅
+   - [x] Add `detect-secrets` to pre-commit config
+   - [x] Create baseline for existing files
+   - [x] Add documentation in CONTRIBUTING.md and SECURITY.md
+   - Files: `.pre-commit-config.yaml`, `.secrets.baseline`, `pyproject.toml`, `CONTRIBUTING.md`, `SECURITY.md`
+   - **Completed:** 2026-01-20
+   - Plan: `.claude/plans/graceful-petting-cray.md`
 
 ---
 
@@ -188,9 +193,9 @@ See [FEEDBACK.md](FEEDBACK.md) for full assessment.
 | Test Coverage | 6 | 6 ✅ | P0 |
 | Documentation | 5 | 5 ✅ | P0 |
 | CI/CD | 3 | 3 ✅ | P1 |
-| Security | 2 | 0 | P1 |
+| Security | 2 | 2 ✅ | P1 |
 | Code Quality | 3 | 0 | P2 |
-| **Total** | **19** | **14** | - |
+| **Total** | **19** | **16** | - |
 
 **Acceptance Criteria:**
 - [x] job_manager.py coverage ≥ 75% (achieved 85.14%)

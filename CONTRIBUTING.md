@@ -82,12 +82,41 @@ Pre-commit hooks run automatically on commit:
 - YAML validation
 - Large file checks
 - Ruff linting and formatting
+- **Secrets detection** (detect-secrets)
 
 To run manually:
 
 ```bash
 uv run pre-commit run --all-files
 ```
+
+### Secrets Detection
+
+This project uses [detect-secrets](https://github.com/Yelp/detect-secrets) to prevent accidental commits of API keys, passwords, and other secrets.
+
+#### If Pre-commit Fails
+
+If the secrets hook flags something:
+
+1. **True Positive**: Remove the secret from your code. Use environment variables instead.
+
+2. **False Positive**: Update the baseline:
+   ```bash
+   # Re-scan and update baseline
+   uv run detect-secrets scan . > .secrets.baseline
+
+   # Audit to mark false positives (optional)
+   uv run detect-secrets audit .secrets.baseline
+   ```
+
+#### Supported Secret Types
+
+The scanner detects:
+- AWS keys and credentials
+- Private keys (RSA, SSH, etc.)
+- API tokens (GitHub, Slack, Discord, etc.)
+- High-entropy strings that may be passwords
+- Database connection strings with credentials
 
 ## Testing
 

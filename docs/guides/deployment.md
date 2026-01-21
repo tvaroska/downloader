@@ -41,8 +41,14 @@ All settings have sensible defaults. See `.env.example` for the complete list.
 | Variable | Default | Production Recommendation |
 |----------|---------|---------------------------|
 | `DOWNLOADER_KEY` | None (auth disabled) | Set a strong API key |
-| `CORS_ALLOWED_ORIGINS` | `*` (all origins) | Restrict to your domains |
+| `CORS_ALLOWED_ORIGINS` | localhost only | **REQUIRED**: Set to your production domains |
 | `ENVIRONMENT` | `development` | Set to `production` |
+
+> **CORS Security Warning**: The default CORS configuration only allows localhost
+> origins for development convenience. In production, you **MUST** explicitly configure
+> `CORS_ALLOWED_ORIGINS` with your actual domains (e.g., `https://yourdomain.com`).
+> Using `*` (wildcard) is strongly discouraged as it allows any website to make
+> requests to your API.
 
 ### Production .env Example
 

@@ -65,15 +65,27 @@ This project implements several security measures:
 ### Configuration Security
 - **No Secrets in Code**: All sensitive configuration via environment variables
 - **Secure Defaults**: Production-safe defaults for security-sensitive settings
+- **CORS Secure by Default**: Only localhost origins allowed by default; production requires explicit configuration
+- **Secrets Detection**: Pre-commit hooks scan for accidentally committed secrets using [detect-secrets](https://github.com/Yelp/detect-secrets)
 
 ## Security-Related Configuration
 
 See the [Deployment Guide](docs/guides/deployment.md) for production security configuration including:
 
-- CORS configuration (avoid `*` in production)
+- **CORS configuration**: Default allows only localhost; must be explicitly configured for production domains
 - Rate limiting settings
 - Authentication setup
 - Network isolation recommendations
+
+### Secrets Detection
+
+Pre-commit hooks automatically scan for accidentally committed secrets:
+
+- Runs on every `git commit`
+- Detects API keys, passwords, private keys, and high-entropy strings
+- Baseline file (`.secrets.baseline`) whitelists known false positives
+
+If you find a secret in the repository history, please report it through our [security vulnerability process](#reporting-a-vulnerability).
 
 ## Disclosure Policy
 
