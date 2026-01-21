@@ -142,7 +142,7 @@ curl http://localhost:80/health
 ```json
 {
   "status": "healthy",
-  "version": "0.2.1",
+  "version": "0.3.0",
   "environment": "production",
   "services": {
     "job_manager": {"available": true, "status": "connected"},
@@ -296,13 +296,13 @@ docker-compose logs -f app | jq '.'
 
 ## Monitoring
 
-See [Monitoring Implementation](./MONITORING_IMPLEMENTATION.md) for:
+See [Monitoring Guide](./monitoring.md) for:
 - Prometheus metrics collection
 - Grafana dashboard setup
 - Alerting configuration
 
 ## Related Documentation
 
-- [Configuration Management](./CONFIGURATION_MANAGEMENT.md) - All configuration options
-- [API Reference](./api-reference.md) - API endpoints and schemas
-- [Monitoring Implementation](./MONITORING_IMPLEMENTATION.md) - Observability setup
+- [Configuration Guide](./configuration.md) - All configuration options
+- [API Reference](../api/api-reference.md) - API endpoints and schemas
+- [Monitoring Guide](./monitoring.md) - Observability setup

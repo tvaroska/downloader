@@ -108,7 +108,7 @@ Check service health and version information.
 ```json
 {
   "status": "healthy",
-  "version": "0.0.1"
+  "version": "0.3.0"
 }
 ```
 

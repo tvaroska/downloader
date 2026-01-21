@@ -34,11 +34,6 @@ This directory contains practical examples demonstrating how to use the REST API
 - **[batch_processing.py](batch_processing.py)** - Legacy batch processing (synchronous)
 - **[batch_job_example.py](batch_job_example.py)** - **NEW:** Background job-based batch processing
 
-### Advanced Usage
-
-- **[error_handling.py](error_handling.py)** - Comprehensive error handling examples
-- **[monitoring_example.py](monitoring_example.py)** - Health monitoring and metrics
-
 ## Quick Start
 
 1. **Start the server**:
@@ -64,12 +59,6 @@ This directory contains practical examples demonstrating how to use the REST API
 3. Test legacy batch processing with `batch_processing.py`
 4. **Try the new background jobs with `batch_job_example.py`**
 5. Test performance with `concurrent_pdf_requests.py`
-6. Handle edge cases with `error_handling.py`
-
-### Production Integration
-- Use `load_testing.py` to validate performance under load
-- Implement patterns from `error_handling.py` in production code
-- Monitor service health using `monitoring_example.py`
 
 ## Common Use Cases
 
@@ -168,7 +157,7 @@ Should return:
 ```json
 {
   "status": "healthy",
-  "version": "0.0.1",
+  "version": "0.3.0",
   "auth_enabled": false,
   "auth_methods": null
 }
