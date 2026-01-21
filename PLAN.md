@@ -261,12 +261,14 @@ See [FEEDBACK.md](FEEDBACK.md) for full assessment.
    - **Completed:** 2026-01-21
    - Plan: `.claude/plans/rosy-beaming-zephyr.md`
 
-1.4. **S3-BE-4: Add job history endpoint**
-   - [ ] `GET /schedules/{id}/history` - Get past executions
-   - [ ] Include start time, duration, status, error message
-   - [ ] Paginate results (default 20, max 100)
+1.4. **S3-BE-4: Add job history endpoint** ✅
+   - [x] `GET /schedules/{id}/history` - Get past executions
+   - [x] Include start time, duration, status, error message
+   - [x] Paginate results (default 20, max 100)
    - Files: `src/downloader/routes/schedules.py`
    - Effort: 2h
+   - **Completed:** 2026-01-21
+   - Plan: `.claude/plans/smooth-hopping-lynx.md`
 
 ### 2. Testing (P1 - Required)
 

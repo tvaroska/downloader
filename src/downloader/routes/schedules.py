@@ -8,12 +8,17 @@ from datetime import datetime, timezone
 from typing import TYPE_CHECKING
 
 from apscheduler.triggers.cron import CronTrigger
-from fastapi import APIRouter, Depends, HTTPException, Path
+from fastapi import APIRouter, Depends, HTTPException, Path, Query
 
 from ..auth import get_api_key
-from ..dependencies import SchedulerDep
+from ..dependencies import ExecutionStorageDep, SchedulerDep
 from ..models.responses import ErrorResponse
-from ..models.schedule import ScheduleCreate, ScheduleListResponse, ScheduleResponse
+from ..models.schedule import (
+    ScheduleCreate,
+    ScheduleExecutionListResponse,
+    ScheduleListResponse,
+    ScheduleResponse,
+)
 from ..scheduler import SchedulerService
 
 if TYPE_CHECKING:
@@ -299,6 +304,69 @@ async def get_schedule(
             detail=ErrorResponse(
                 error="Failed to get schedule",
                 error_type="schedule_get_error",
+            ).model_dump(),
+        ) from e
+
+
+@router.get("/schedules/{schedule_id}/history", response_model=ScheduleExecutionListResponse)
+async def get_schedule_history(
+    schedule_id: str = Path(..., description="Schedule identifier"),
+    limit: int = Query(20, ge=1, le=100, description="Maximum results per page"),
+    offset: int = Query(0, ge=0, description="Number of results to skip"),
+    scheduler: SchedulerDep = None,
+    execution_storage: ExecutionStorageDep = None,
+    api_key: str | None = Depends(get_api_key),
+) -> ScheduleExecutionListResponse:
+    """Get execution history for a scheduled job.
+
+    Returns past executions ordered by start time (newest first).
+    Each execution includes start time, duration, status, and error message if failed.
+    """
+    svc = _require_scheduler(scheduler)
+
+    try:
+        # Verify schedule exists
+        job = svc.get_job(schedule_id)
+
+        if job is None:
+            raise HTTPException(
+                status_code=404,
+                detail=ErrorResponse(
+                    error=f"Schedule {schedule_id} not found",
+                    error_type="schedule_not_found",
+                ).model_dump(),
+            )
+
+        # Check execution storage is available
+        if execution_storage is None:
+            raise HTTPException(
+                status_code=503,
+                detail=ErrorResponse(
+                    error="Execution storage is not available. Redis connection required.",
+                    error_type="service_unavailable",
+                ).model_dump(),
+            )
+
+        # Get executions with pagination
+        executions = await execution_storage.get_executions(schedule_id, limit, offset)
+        total = await execution_storage.get_execution_count(schedule_id)
+
+        return ScheduleExecutionListResponse(
+            executions=executions,
+            total=total,
+            limit=limit,
+            offset=offset,
+        )
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.exception(f"Failed to get history for schedule {schedule_id}: {e}")
+        raise HTTPException(
+            status_code=500,
+            detail=ErrorResponse(
+                error="Failed to get schedule history",
+                error_type="schedule_history_error",
             ).model_dump(),
         ) from e
 

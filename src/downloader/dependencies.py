@@ -16,7 +16,7 @@ from .config import Settings, get_settings
 from .http_client import HTTPClient
 from .job_manager import JobManager
 from .pdf_generator import PlaywrightPDFGenerator
-from .scheduler import SchedulerService
+from .scheduler import ExecutionStorage, SchedulerService
 
 logger = logging.getLogger(__name__)
 
@@ -170,6 +170,23 @@ async def get_scheduler_dependency(request: Request) -> SchedulerService | None:
     return getattr(request.app.state, "scheduler", None)
 
 
+# Execution Storage Dependency
+async def get_execution_storage_dependency(request: Request) -> ExecutionStorage | None:
+    """
+    Get execution storage instance from app state.
+
+    The execution storage is initialized during app lifespan if Redis is configured.
+    Returns None if Redis is not available.
+
+    Args:
+        request: FastAPI request containing app state
+
+    Returns:
+        ExecutionStorage instance or None if not configured
+    """
+    return getattr(request.app.state, "execution_storage", None)
+
+
 # Type aliases for cleaner route signatures
 SettingsDep = Annotated[Settings, Depends(get_settings_dependency)]
 HTTPClientDep = Annotated[HTTPClient, Depends(get_http_client)]
@@ -179,3 +196,4 @@ PDFSemaphoreDep = Annotated[asyncio.Semaphore, Depends(get_pdf_semaphore)]
 BatchSemaphoreDep = Annotated[asyncio.Semaphore, Depends(get_batch_semaphore)]
 RateLimiterDep = Annotated[Limiter, Depends(get_rate_limiter)]
 SchedulerDep = Annotated[SchedulerService | None, Depends(get_scheduler_dependency)]
+ExecutionStorageDep = Annotated[ExecutionStorage | None, Depends(get_execution_storage_dependency)]

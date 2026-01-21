@@ -100,3 +100,12 @@ class ScheduleExecution(BaseModel):
     content_size: int | None = Field(None, description="Downloaded content size in bytes")
     error_message: str | None = Field(None, description="Error message if failed")
     attempt: int = Field(..., ge=1, description="Attempt number (1-based)")
+
+
+class ScheduleExecutionListResponse(BaseModel):
+    """Response model for listing schedule executions."""
+
+    executions: list[ScheduleExecution] = Field(..., description="List of executions")
+    total: int = Field(..., description="Total number of executions")
+    limit: int = Field(..., description="Maximum results per page")
+    offset: int = Field(..., description="Number of results skipped")
