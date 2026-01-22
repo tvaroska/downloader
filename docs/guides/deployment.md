@@ -150,7 +150,7 @@ curl http://localhost:80/health
 ```json
 {
   "status": "healthy",
-  "version": "0.3.0",
+  "version": "0.5.0",
   "environment": "production",
   "services": {
     "job_manager": {"available": true, "status": "connected"},

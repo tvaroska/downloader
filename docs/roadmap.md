@@ -1,6 +1,6 @@
 # REST API Downloader - Strategic Roadmap
 
-**Last Updated:** 2026-01-19
+**Last Updated:** 2026-01-21
 
 ## Overview
 
@@ -18,28 +18,29 @@ This document outlines the strategic priorities and feature roadmap for the REST
 | Phase 4: Security & Production | ✅ Complete | 100% |
 | Phase 5: Content Transformation | 🚧 Partial | 70% |
 | Phase 6: Browser Rendering | 🚧 Partial | 60% |
-| Phase 7: Scheduling & Quotas | 🚧 In Progress | 0% |
+| Phase 7: Scheduling & Quotas | 🚧 In Progress | 50% |
 
 ---
 
 ## Current Quarter Focus
 
-### Active: Phase 7 - Scheduling & Quotas
+### Active: Phase 7 - Scheduling & Quotas (Continued)
 
-**Sprint 3** (Current): Scheduling CRUD API
-- 7 tasks, ~24 hours effort
+**Sprint 4** (Current): Quota Management
+- 7 tasks, ~21 hours effort
+- Per-API-key quotas, usage tracking, rate limiting
 - See [PLAN.md](../PLAN.md) for detailed task breakdown
 
-**Sprint 4** (Next): Quota Management
-- 7 tasks, ~21 hours effort
+**Sprint 5** (Next): Ethical Crawling
+- 7 tasks, ~16 hours effort
+- robots.txt respect, configurable User-Agent
 
-### Completed: Phase 6 - Browser Rendering (Partial)
+### Completed: Sprint 3 - Scheduling API ✅
 
-**Sprint 2** (Complete): Playwright-based JS Rendering
-- 10 tasks completed
-- Core rendering (`?render=true`, `?wait_for`) complete
-- Screenshot/PDF output deferred to future sprint
-- See [docs/features/browser-rendering.md](features/browser-rendering.md)
+**Sprint 3** (Complete): Scheduling CRUD API
+- 7 tasks completed
+- Cron-based scheduling, job execution with retry, job history
+- See [docs/features/scheduling.md](features/scheduling.md)
 
 ---
 
@@ -76,7 +77,7 @@ This document outlines the strategic priorities and feature roadmap for the REST
 - ✅ Transformation adds < 500ms to response time (measured: 53-110ms overhead)
 
 #### OCR Deferred
-OCR (pytesseract) deferred to future sprint based on priority decision.
+OCR (pytesseract) deferred to Sprint 6 based on priority decision.
 
 ---
 
@@ -111,8 +112,8 @@ OCR (pytesseract) deferred to future sprint based on priority decision.
 - ✅ 46 integration tests passing
 
 #### Future Work
-- Screenshot/PDF output (`?output=screenshot|pdf`)
-- Interaction scripting (custom DSL for click/type/scroll)
+- Screenshot/PDF output (`?output=screenshot|pdf`) - Sprint 6
+- Interaction scripting (custom DSL for click/type/scroll) - Backlog
 
 ---
 
@@ -124,36 +125,61 @@ OCR (pytesseract) deferred to future sprint based on priority decision.
 
 | Feature | Priority | Complexity | Status |
 |---------|----------|------------|--------|
-| Cron-based scheduling | P1 | Medium | 🚧 Sprint 3 |
-| Schedule CRUD API | P1 | Low | 🚧 Sprint 3 |
-| Job history/logging | P2 | Low | 🚧 Sprint 3 |
+| Cron-based scheduling | P1 | Medium | ✅ Complete |
+| Schedule CRUD API | P1 | Low | ✅ Complete |
+| Job history/logging | P2 | Low | ✅ Complete |
 | Webhook on completion | P3 | Medium | 📋 Backlog |
 
 #### Quota Features
 
 | Feature | Priority | Complexity | Status |
 |---------|----------|------------|--------|
-| Per-API-key request limits | P1 | Medium | 📋 Sprint 4 |
-| Usage tracking endpoint | P1 | Low | 📋 Sprint 4 |
-| Rate limit 429 responses | P1 | Low | 📋 Sprint 4 |
+| Per-API-key request limits | P1 | Medium | 🚧 Sprint 4 |
+| Usage tracking endpoint | P1 | Low | 🚧 Sprint 4 |
+| Rate limit 429 responses | P1 | Low | 🚧 Sprint 4 |
 | Tier-based plans | P3 | Medium | 📋 Backlog |
 
-#### API Changes (Planned)
+#### API Implemented (Scheduling)
 - `POST /schedules` - Create scheduled job
 - `GET /schedules` - List user's scheduled jobs
 - `GET /schedules/{id}` - Get schedule details
 - `DELETE /schedules/{id}` - Remove scheduled job
 - `GET /schedules/{id}/history` - Get past executions
+
+#### API Planned (Quotas - Sprint 4)
 - `GET /usage` - Current usage statistics
 
 #### Success Criteria
-- Cron expressions execute within 1 minute of scheduled time
-- Quota enforcement has < 10ms overhead per request
-- Usage stats are accurate within 1% margin
+- ✅ Cron expressions execute within 1 minute of scheduled time
+- [ ] Quota enforcement has < 10ms overhead per request
+- [ ] Usage stats are accurate within 1% margin
 
-#### Current Sprint
-- **Sprint 3**: Scheduling CRUD API, cron execution, job history
-- **Sprint 4**: Quota management, usage tracking, rate limiting
+---
+
+### 🚧 P1: Ethical Crawling (Sprint 5)
+
+**Goal**: Enable responsible crawling with robots.txt compliance.
+
+#### Features
+
+| Feature | Priority | Complexity | Status |
+|---------|----------|------------|--------|
+| robots.txt parsing | P1 | Medium | 📋 Sprint 5 |
+| Configurable User-Agent | P1 | Low | 📋 Sprint 5 |
+| Redis caching for robots.txt | P2 | Low | 📋 Sprint 5 |
+| Crawl-delay respect | P2 | Medium | 📋 Sprint 5 |
+
+#### API Changes (Planned)
+- New config: `RESPECT_ROBOTS_TXT` (default: True)
+- New config: `USER_AGENT` (default: `REST-API-Downloader/1.0`)
+- 403 response when URL disallowed by robots.txt
+
+#### Success Criteria
+- robots.txt checked before every download
+- Caching reduces robots.txt fetches by 90%+
+- Clear error messages when URL disallowed
+
+**Archive:** [docs/features/downloader-core.md](features/downloader-core.md)
 
 ---
 
@@ -161,38 +187,38 @@ OCR (pytesseract) deferred to future sprint based on priority decision.
 
 These features are not prioritized for immediate development but may be considered later:
 
+### Extended Features (Sprint 6 Candidates)
+
+| Feature | Description | Complexity | Priority |
+|---------|-------------|------------|----------|
+| Screenshot/PDF output | `?output=screenshot\|pdf` for browser captures | Medium | P2 |
+| Webhook notifications | Push results to configured endpoints | Medium | P2 |
+| OCR (Image to Text) | Pytesseract-based text extraction | High | P2 |
+| SDK/Client Libraries | Python, JavaScript, Go clients | Medium | P3 |
+
 ### Operations & DevOps
 
 | Feature | Description | Complexity | Personas |
 |---------|-------------|------------|----------|
 | Prometheus /metrics endpoint | Native Prometheus metrics for monitoring | Low | Sarah (DevOps) |
 | Graceful shutdown with drain | Zero-downtime deployments, connection draining | Low | Sarah (DevOps) |
-| OpenTelemetry integration | Distributed tracing, OTLP export | Medium | Sarah (DevOps) |
 
 ### Developer Experience
 
 | Feature | Description | Complexity | Personas |
 |---------|-------------|------------|----------|
-| SDK/Client Libraries | Python, JavaScript, Go clients with code generation | Medium | Maya (API Dev), Alex (Analyst) |
 | GraphQL API | Alternative query interface | Medium | Maya (API Dev) |
-
-### Content & Processing
-
-| Feature | Description | Complexity | Personas |
-|---------|-------------|------------|----------|
-| Webhook notifications | Push results to configured endpoints | Medium | Maya, David (Pipeline) |
-| Content diffing | Track changes between downloads | Medium | Maya, Alex |
-| Advanced caching | Content-aware TTLs, pre-warming | Medium | David (Pipeline) |
-| OCR (Image to Text) | Pytesseract-based text extraction | High | Alex (Analyst) |
-| Screenshot/PDF output | Browser-based capture | Medium | Alex (Analyst) |
-| Interaction scripting | Custom DSL for browser automation | High | Alex (Analyst) |
 
 ### Infrastructure
 
-| Feature | Description | Complexity | Personas |
-|---------|-------------|------------|----------|
-| Multi-region support | Distributed deployment | High | Sarah (DevOps) |
-| Bandwidth quotas | Limit bytes downloaded per key | Medium | Sarah (DevOps) |
+| Feature | Description | Complexity | Priority | Personas |
+|---------|-------------|------------|----------|----------|
+| Split Worker Architecture | Isolate API from Playwright/scheduler via Redis queue | High | P2 | Sarah (DevOps) |
+| OpenTelemetry integration | Distributed tracing across API -> Redis -> External | Medium | P2 | Sarah (DevOps) |
+| Multi-region support | Distributed deployment | High | P3 | Sarah (DevOps) |
+| Bandwidth quotas | Limit bytes downloaded per key | Medium | P3 | Sarah (DevOps) |
+
+**Archive:** [docs/features/infrastructure.md](features/infrastructure.md)
 
 ---
 
@@ -217,11 +243,15 @@ playwright>=1.40.0
 ```
 System: `playwright install chromium`
 
-### Phase 7 Dependencies (Current)
+### Phase 7 Dependencies (Scheduling - Complete)
 ```
 apscheduler>=3.10.0
 ```
-Or alternatively: `celery[redis]>=5.3.0`
+
+### Sprint 5 Dependencies (Ethical Crawling)
+```
+robotexclusionrulesparser>=1.7.1  # or use stdlib urllib.robotparser
+```
 
 ---
 
@@ -231,8 +261,9 @@ Or alternatively: `celery[redis]>=5.3.0`
 |------|--------|------------|------------|
 | Browser rendering OOM | High | Medium | Process isolation, memory limits ✅ |
 | OCR accuracy issues | Medium | Medium | Cloud API fallback option |
-| Scheduler job failures | Medium | Low | Dead-letter queue, retry policies |
+| Scheduler job failures | Medium | Low | Dead-letter queue, retry policies ✅ |
 | Quota bypass attempts | Medium | Low | Server-side enforcement only |
+| robots.txt caching stale | Low | Medium | Configurable TTL, force refresh option |
 
 ---
 
@@ -240,6 +271,9 @@ Or alternatively: `celery[redis]>=5.3.0`
 
 | Date | Decision | Rationale |
 |------|----------|-----------|
+| 2026-01-21 | Sprint 3 complete, Sprint 4 (Quotas) next | Scheduling API fully implemented |
+| 2026-01-21 | Sprint 5: Ethical Crawling | User priority - prevent IP bans, enable responsible crawling |
+| 2026-01-21 | Move Screenshot/PDF, OCR to Sprint 6 | Quotas and ethical crawling higher priority |
 | 2026-01-19 | Add graceful shutdown, Prometheus metrics, SDK to backlog | DevOps (Sarah) and developer experience priorities from persona analysis |
 | 2026-01-19 | Sprint 2 complete, move to Phase 7 | Browser rendering core complete, scheduling higher priority |
 | 2026-01-19 | Defer Screenshot/PDF output | Core rendering sufficient, scheduling more valuable |
@@ -267,20 +301,26 @@ Or alternatively: `celery[redis]>=5.3.0`
 - ✅ Process isolation and security
 - Screenshot/PDF output deferred
 
-### Release 0.5.0 - Scheduling (Current)
-- Cron-based scheduling API
-- Schedule CRUD endpoints
-- Job history and logging
-- Target: Sprint 3 completion
+### Release 0.5.0 - Scheduling (Complete)
+- ✅ Cron-based scheduling API
+- ✅ Schedule CRUD endpoints
+- ✅ Job history and logging
+- ✅ Job execution with retry
 
-### Release 0.6.0 - Quotas
+### Release 0.6.0 - Quotas (Current)
 - Per-API-key quotas
 - Usage tracking endpoint
 - Rate limit 429 responses
 - Target: Sprint 4 completion
 
-### Release 0.7.0 - Extended Features (Future)
+### Release 0.7.0 - Ethical Crawling (Next)
+- robots.txt compliance
+- Configurable User-Agent
+- Redis caching for robots.txt
+- Target: Sprint 5 completion
+
+### Release 0.8.0 - Extended Features (Future)
 - Screenshot/PDF output
 - Webhook notifications
 - OCR (Image to Text)
-- Target: TBD based on priorities
+- Target: Sprint 6 completion

@@ -7,6 +7,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.5.0] - 2026-01-21
+
+### Added
+- Cron-based job scheduling with APScheduler integration
+- Schedule CRUD endpoints: `POST/GET/DELETE /schedules`, `GET /schedules/{id}`
+- Job execution with configurable retry logic (max 3 attempts)
+- Job history endpoint: `GET /schedules/{id}/history` with pagination (default 20, max 100)
+- Redis-based job store for schedule persistence across restarts
+- 114 scheduler tests (78 unit + 36 integration) with 95% module coverage
+
+### Changed
+- Scheduler service initializes on app startup with Redis job store
+- Job results stored in Redis with 24h TTL
+
+### Technical
+- New modules: `scheduler/service.py`, `scheduler/executor.py`, `scheduler/storage.py`
+- New routes: `routes/schedules.py`
+- New models: `models/schedule.py`
+
 ## [0.3.0] - 2026-01-19
 
 ### Added

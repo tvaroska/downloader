@@ -1,6 +1,6 @@
 [project]
 name = "downloader"
-version = "0.3.0"
+version = "0.5.0"
 description = "REST API Downloader - High-performance web service for programmatic URL content downloading"
 readme = "README.md"
 requires-python = ">=3.10"

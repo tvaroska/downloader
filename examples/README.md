@@ -157,7 +157,7 @@ Should return:
 ```json
 {
   "status": "healthy",
-  "version": "0.3.0",
+  "version": "0.5.0",
   "auth_enabled": false,
   "auth_methods": null
 }
