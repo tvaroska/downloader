@@ -43,3 +43,41 @@ def batch_request_complex():
         "concurrency_limit": 3,
         "timeout_per_url": 30,
     }
+
+
+# ============= Schedule Request Fixtures =============
+
+
+@pytest.fixture
+def schedule_request_basic():
+    """Basic schedule creation request."""
+    return {
+        "name": "Test Schedule",
+        "url": "https://example.com/page",
+        "cron_expression": "0 9 * * *",  # Daily at 9 AM
+        "format": "text",
+    }
+
+
+@pytest.fixture
+def schedule_request_with_headers():
+    """Schedule request with custom headers."""
+    return {
+        "name": "Authenticated Schedule",
+        "url": "https://api.example.com/data",
+        "cron_expression": "*/15 * * * *",  # Every 15 minutes
+        "format": "json",
+        "headers": {"Authorization": "Bearer token123"},
+    }
+
+
+@pytest.fixture
+def schedule_request_disabled():
+    """Schedule request with enabled=False."""
+    return {
+        "name": "Disabled Schedule",
+        "url": "https://example.com/page",
+        "cron_expression": "0 0 * * *",  # Daily at midnight
+        "format": "markdown",
+        "enabled": False,
+    }

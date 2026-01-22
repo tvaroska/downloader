@@ -272,19 +272,25 @@ See [FEEDBACK.md](FEEDBACK.md) for full assessment.
 
 ### 2. Testing (P1 - Required)
 
-2.1. **S3-TEST-1: Add scheduler unit tests**
-   - [ ] Test schedule CRUD operations
-   - [ ] Test cron expression validation
-   - [ ] Test job storage and retrieval
+2.1. **S3-TEST-1: Add scheduler unit tests** ✅
+   - [x] Test schedule CRUD operations
+   - [x] Test cron expression validation
+   - [x] Test job storage and retrieval
    - Files: `tests/unit/test_scheduler.py`
    - Effort: 3h
+   - **Completed:** 2026-01-21
+   - **Result:** 78 unit tests covering models, storage, service, and executor
+   - Plan: `.claude/plans/resilient-stirring-quokka.md`
 
-2.2. **S3-TEST-2: Add scheduler integration tests**
-   - [ ] Test job execution with mock download
-   - [ ] Test retry on failure
-   - [ ] Test schedule persistence across restarts
+2.2. **S3-TEST-2: Add scheduler integration tests** ✅
+   - [x] Test job execution with mock download
+   - [x] Test retry on failure
+   - [x] Test schedule persistence across restarts
    - Files: `tests/integration/test_scheduler.py`
    - Effort: 3h
+   - **Completed:** 2026-01-21
+   - **Result:** 36 integration tests covering routes, execution, retry, and persistence
+   - Plan: `.claude/plans/resilient-stirring-quokka.md`
 
 ### 3. Documentation (P1 - Required)
 
