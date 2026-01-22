@@ -1,6 +1,6 @@
 # REST API Downloader - Sprint Plan
 
-**Last Updated:** 2026-01-20
+**Last Updated:** 2026-01-21
 
 ## Sprint 0 - Critical Remediation (MUST COMPLETE FIRST)
 
@@ -294,12 +294,14 @@ See [FEEDBACK.md](FEEDBACK.md) for full assessment.
 
 ### 3. Documentation (P1 - Required)
 
-3.1. **S3-DOC-1: Document scheduling API**
-   - [ ] Add scheduling endpoints to API reference
-   - [ ] Add cron expression examples
-   - [ ] Add scheduling guide with use cases
+3.1. **S3-DOC-1: Document scheduling API** ✅
+   - [x] Add scheduling endpoints to API reference
+   - [x] Add cron expression examples
+   - [x] Add scheduling guide with use cases
    - Files: `docs/api/api-reference.md`, `docs/guides/scheduling.md`
    - Effort: 2h
+   - **Completed:** 2026-01-21
+   - Plan: `.claude/plans/magical-napping-papert.md`
 
 ---
 
@@ -343,7 +345,7 @@ See [FEEDBACK.md](FEEDBACK.md) for full assessment.
 - [ ] Job history shows last 20 executions by default
 - [ ] Failed jobs retry up to 3 times
 - [ ] All scheduler tests pass
-- [ ] API documentation updated with scheduling endpoints
+- [x] API documentation updated with scheduling endpoints
 
 ---
 

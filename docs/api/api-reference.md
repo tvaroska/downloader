@@ -1,6 +1,6 @@
 # REST API Downloader - API Reference
 
-**Last Updated:** 2026-01-20
+**Last Updated:** 2026-01-21
 
 Complete API documentation for the REST API Downloader service.
 
@@ -913,6 +913,291 @@ const response = await fetch(url, {
 });
 const content = await response.text();
 ```
+
+## Scheduled Downloads
+
+Schedule recurring downloads with cron expressions. Schedules are stored in Redis and execute automatically at the specified times.
+
+### Create Schedule
+
+Create a new scheduled download job.
+
+**Endpoint:** `POST /schedules`
+
+**Request Body:**
+```json
+{
+  "name": "Daily Report Download",
+  "url": "https://example.com/report",
+  "cron_expression": "0 9 * * *",
+  "format": "markdown",
+  "headers": {"Authorization": "Bearer token"},
+  "enabled": true
+}
+```
+
+**Request Fields:**
+
+| Field | Type | Required | Description |
+|-------|------|----------|-------------|
+| `name` | string | Yes | Human-readable name (1-100 characters) |
+| `url` | string | Yes | URL to download (1-2048 characters) |
+| `cron_expression` | string | Yes | Standard 5-field cron expression |
+| `format` | string | No | Output format: `text`, `html`, `markdown`, `pdf`, `json`, `raw` (default: `text`) |
+| `headers` | object | No | Custom HTTP headers for the request |
+| `enabled` | boolean | No | Whether schedule is active (default: `true`) |
+
+**Response:**
+```json
+{
+  "id": "550e8400-e29b-41d4-a716-446655440000",
+  "name": "Daily Report Download",
+  "url": "https://example.com/report",
+  "cron_expression": "0 9 * * *",
+  "format": "markdown",
+  "headers": {"Authorization": "Bearer token"},
+  "enabled": true,
+  "created_at": "2026-01-21T10:30:00Z",
+  "next_run_time": "2026-01-22T09:00:00Z"
+}
+```
+
+**Status Codes:**
+- `200` - Schedule created successfully
+- `400` - Invalid cron expression or validation error
+- `503` - Scheduler service unavailable (Redis not connected)
+
+**Error Examples:**
+
+Invalid cron expression:
+```json
+{
+  "detail": {
+    "success": false,
+    "error": "Invalid cron expression: Wrong number of fields",
+    "error_type": "validation_error"
+  }
+}
+```
+
+Scheduler unavailable:
+```json
+{
+  "detail": {
+    "success": false,
+    "error": "Scheduler service is not available. Redis connection required.",
+    "error_type": "service_unavailable"
+  }
+}
+```
+
+---
+
+### List Schedules
+
+Get all scheduled download jobs.
+
+**Endpoint:** `GET /schedules`
+
+**Response:**
+```json
+{
+  "schedules": [
+    {
+      "id": "550e8400-e29b-41d4-a716-446655440000",
+      "name": "Daily Report Download",
+      "url": "https://example.com/report",
+      "cron_expression": "0 9 * * *",
+      "format": "markdown",
+      "headers": null,
+      "enabled": true,
+      "created_at": "2026-01-21T10:30:00Z",
+      "next_run_time": "2026-01-22T09:00:00Z"
+    }
+  ],
+  "total": 1
+}
+```
+
+**Status Codes:**
+- `200` - Schedules retrieved successfully
+- `503` - Scheduler service unavailable
+
+---
+
+### Get Schedule Details
+
+Get details of a specific scheduled job.
+
+**Endpoint:** `GET /schedules/{schedule_id}`
+
+**Parameters:**
+- `schedule_id` (path, required) - Schedule identifier (UUID)
+
+**Response:**
+```json
+{
+  "id": "550e8400-e29b-41d4-a716-446655440000",
+  "name": "Daily Report Download",
+  "url": "https://example.com/report",
+  "cron_expression": "0 9 * * *",
+  "format": "markdown",
+  "headers": {"Authorization": "Bearer token"},
+  "enabled": true,
+  "created_at": "2026-01-21T10:30:00Z",
+  "next_run_time": "2026-01-22T09:00:00Z"
+}
+```
+
+**Status Codes:**
+- `200` - Schedule retrieved successfully
+- `404` - Schedule not found
+- `503` - Scheduler service unavailable
+
+---
+
+### Get Schedule History
+
+Get execution history for a scheduled job.
+
+**Endpoint:** `GET /schedules/{schedule_id}/history`
+
+**Parameters:**
+- `schedule_id` (path, required) - Schedule identifier (UUID)
+
+**Query Parameters:**
+
+| Parameter | Type | Default | Description |
+|-----------|------|---------|-------------|
+| `limit` | integer | `20` | Maximum results per page (1-100) |
+| `offset` | integer | `0` | Number of results to skip |
+
+**Response:**
+```json
+{
+  "executions": [
+    {
+      "execution_id": "abc12345-6789-0def-ghij-klmnopqrstuv",
+      "schedule_id": "550e8400-e29b-41d4-a716-446655440000",
+      "status": "completed",
+      "started_at": "2026-01-21T09:00:00Z",
+      "completed_at": "2026-01-21T09:00:02Z",
+      "duration": 2.5,
+      "success": true,
+      "content_size": 15234,
+      "error_message": null,
+      "attempt": 1
+    },
+    {
+      "execution_id": "def67890-abcd-1234-efgh-ijklmnopqrst",
+      "schedule_id": "550e8400-e29b-41d4-a716-446655440000",
+      "status": "failed",
+      "started_at": "2026-01-20T09:00:00Z",
+      "completed_at": "2026-01-20T09:00:35Z",
+      "duration": 35.2,
+      "success": false,
+      "content_size": null,
+      "error_message": "Connection timeout after 3 attempts",
+      "attempt": 3
+    }
+  ],
+  "total": 2,
+  "limit": 20,
+  "offset": 0
+}
+```
+
+**Execution Status Values:**
+- `pending` - Execution queued
+- `running` - Currently executing
+- `completed` - Finished successfully
+- `failed` - Failed after all retry attempts
+
+**Status Codes:**
+- `200` - History retrieved successfully
+- `404` - Schedule not found
+- `503` - Execution storage unavailable
+
+---
+
+### Delete Schedule
+
+Remove a scheduled job.
+
+**Endpoint:** `DELETE /schedules/{schedule_id}`
+
+**Parameters:**
+- `schedule_id` (path, required) - Schedule identifier (UUID)
+
+**Response:**
+```json
+{
+  "success": true,
+  "message": "Schedule 550e8400-e29b-41d4-a716-446655440000 deleted successfully"
+}
+```
+
+**Status Codes:**
+- `200` - Schedule deleted successfully
+- `404` - Schedule not found
+- `503` - Scheduler service unavailable
+
+---
+
+### Cron Expression Format
+
+Schedules use standard 5-field UNIX cron format:
+
+```
+┌───────────── minute (0-59)
+│ ┌───────────── hour (0-23)
+│ │ ┌───────────── day of month (1-31)
+│ │ │ ┌───────────── month (1-12)
+│ │ │ │ ┌───────────── day of week (0-6, 0=Sunday)
+│ │ │ │ │
+* * * * *
+```
+
+**Common Patterns:**
+
+| Pattern | Expression | Description |
+|---------|-----------|-------------|
+| Daily at 9 AM | `0 9 * * *` | Every day at 9:00 AM |
+| Weekdays at 9 AM | `0 9 * * 1-5` | Monday-Friday at 9:00 AM |
+| Every 15 minutes | `*/15 * * * *` | At 0, 15, 30, 45 minutes |
+| Hourly | `0 * * * *` | At the start of every hour |
+| Every 6 hours | `0 */6 * * *` | At midnight, 6 AM, noon, 6 PM |
+| Weekly on Sunday | `0 0 * * 0` | Every Sunday at midnight |
+| First of month | `0 0 1 * *` | 1st day of each month at midnight |
+
+**Supported Operators:**
+- `*` - Any value
+- `*/n` - Every n units (step)
+- `n-m` - Range from n to m
+- `n,m,o` - Specific values
+
+---
+
+### Retry Behavior
+
+Failed scheduled jobs are automatically retried:
+
+- **Maximum attempts:** 3
+- **Retry delays:** 5s, 15s, 30s (exponential backoff)
+- **Final status:** After 3 failures, job is marked as `failed` in history
+
+---
+
+### Scheduler Configuration
+
+| Environment Variable | Default | Description |
+|---------------------|---------|-------------|
+| `SCHEDULER_JOB_STORE_TYPE` | `redis` | Job store backend (`redis` or `memory`) |
+| `SCHEDULER_MAX_WORKERS` | `10` | Maximum concurrent job workers |
+| `SCHEDULER_MISFIRE_GRACE_TIME` | `60` | Seconds late a job can still run |
+| `SCHEDULER_COALESCE` | `true` | Run once if multiple executions missed |
+
+---
 
 ## Versioning
 
