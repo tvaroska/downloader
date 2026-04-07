@@ -330,6 +330,24 @@ Submit a batch processing job for background execution.
 - `400` - Invalid request (too many URLs, validation errors)
 - `503` - Service unavailable (Redis not configured)
 
+#### Implicit Playwright Fallback
+
+When processing batch URLs with `text` or `markdown` format, the service automatically falls back to Playwright browser rendering if the initial HTML-to-text/markdown conversion produces empty content. This handles JavaScript-heavy pages (SPAs, React/Vue/Angular sites) without requiring `render=true`.
+
+**How it works:**
+
+1. The URL is fetched and converted to the requested format (text or markdown)
+2. If the converted content is empty, the service checks whether Playwright fallback is appropriate:
+   - The response must be HTML content
+   - The HTML body must contain enough text (above a configurable threshold)
+   - The page must have content indicators (`<main>`, `<article>`, `.content`, etc.)
+   - Error/maintenance pages are excluded from fallback
+3. If eligible, Playwright renders the page with `networkidle` wait strategy and extracts content from the rendered DOM
+
+**Caching:** Results of fallback eligibility checks are cached per-URL to avoid redundant Playwright invocations on repeated requests.
+
+**Note:** This implicit fallback only applies to batch processing. For single-URL downloads, use `?render=true` or `?wait_for=<selector>` to explicitly request browser rendering.
+
 ---
 
 ### Check Job Status

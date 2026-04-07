@@ -21,11 +21,12 @@
    - Files: `README.md`, `docs/api/api-reference.md`
    - Effort: 1h
 
-1.3. **S0-DOC-3: Document Playwright fallback behavior**
-   - [ ] Explain implicit Playwright fallback in batch processing
-   - [ ] Add note to api-reference.md under batch endpoints
+1.3. **S0-DOC-3: Document Playwright fallback behavior** ✅
+   - [x] Explain implicit Playwright fallback in batch processing
+   - [x] Add note to api-reference.md under batch endpoints
    - Files: `docs/api/api-reference.md`
    - Effort: 30m
+   - Completed: 2026-04-07
 
 1.4. **S0-DOC-4: Add Getting Started section with minimal vs full setup**
    - [ ] Show minimal setup (no Redis, no Playwright) with available features
