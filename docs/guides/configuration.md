@@ -399,6 +399,23 @@ This implementation addresses:
 
 ---
 
+## Rate Limiting Storage Fallback
+
+The rate limiter storage backend is resolved using a three-step fallback chain:
+
+1. **`RATELIMIT_STORAGE_URI`** — if set, used directly. Useful when you want a dedicated Redis instance for rate limiting separate from job storage.
+2. **`REDIS_URI`** — if `RATELIMIT_STORAGE_URI` is not set, the main Redis connection is reused.
+3. **`memory://`** — if neither is set, falls back to in-memory storage. This works for single-instance deployments but **resets on restart** and does **not share state** across multiple instances.
+
+The fallback is implemented in `src/downloader/main.py`:
+```python
+storage_uri = settings.ratelimit.storage_uri or settings.redis.redis_uri or "memory://"
+```
+
+> **Tip:** For production multi-instance deployments, ensure at least `REDIS_URI` is configured so rate limits are enforced globally.
+
+---
+
 ## 🚧 Future Enhancements
 
 ### Potential Additions

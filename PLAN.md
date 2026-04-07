@@ -55,11 +55,12 @@
 
 ### 3. Configuration Clarity (P1)
 
-3.1. **S0-DOC-5: Document rate limiting storage fallback chain**
-   - [ ] Explain `RATELIMIT_STORAGE_URI → REDIS_URI → memory://` fallback in .env.example
-   - [ ] Add note to configuration guide
+3.1. **S0-DOC-5: Document rate limiting storage fallback chain** ✅
+   - [x] Explain `RATELIMIT_STORAGE_URI → REDIS_URI → memory://` fallback in .env.example
+   - [x] Add note to configuration guide
    - Files: `.env.example`, `docs/guides/configuration.md`
    - Effort: 30m
+   - Completed: 2026-04-07
 
 ---
 
