@@ -25,6 +25,12 @@ class ErrorResponse(BaseModel):
     error_type: str
 
 
+class HTTPErrorResponse(BaseModel):
+    """Error response as returned by HTTPException (wrapped in detail key)."""
+
+    detail: ErrorResponse
+
+
 # Batch processing models
 class BatchURLRequest(BaseModel):
     """Individual URL request within a batch."""

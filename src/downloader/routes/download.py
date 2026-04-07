@@ -13,7 +13,7 @@ from ..http_client import (
     HTTPTimeoutError,
     RequestPriority,
 )
-from ..models.responses import ErrorResponse
+from ..models.responses import ErrorResponse, HTTPErrorResponse
 from ..pdf_generator import PDFGeneratorError
 from ..services.content_processor import (
     handle_html_response,
@@ -33,7 +33,16 @@ logger = logging.getLogger(__name__)
 router = APIRouter()
 
 
-@router.get("/{url:path}")
+@router.get(
+    "/{url:path}",
+    responses={
+        400: {"model": HTTPErrorResponse, "description": "Invalid URL or request"},
+        408: {"model": HTTPErrorResponse, "description": "Request timeout"},
+        500: {"model": HTTPErrorResponse, "description": "Internal server error"},
+        502: {"model": HTTPErrorResponse, "description": "Upstream server error"},
+        503: {"model": HTTPErrorResponse, "description": "Service temporarily unavailable"},
+    },
+)
 async def download_url(
     request: Request,
     url: str = Path(..., description="The URL to download"),

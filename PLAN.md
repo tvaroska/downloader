@@ -45,11 +45,13 @@
    - Completed: 2026-04-07
    - Plan: `.claude/plans/floofy-zooming-simon.md`
 
-2.2. **S0-BE-2: Fix error response nesting inconsistency**
-   - [ ] Audit ErrorResponse wrapping across all routes
-   - [ ] Ensure OpenAPI schema matches actual response shape (detail wrapping)
+2.2. **S0-BE-2: Fix error response nesting inconsistency** ✅
+   - [x] Audit ErrorResponse wrapping across all routes
+   - [x] Ensure OpenAPI schema matches actual response shape (detail wrapping)
    - Files: `src/downloader/routes/download.py`, `src/downloader/routes/batch.py`
    - Effort: 2h
+   - Completed: 2026-04-07
+   - Plan: `.claude/plans/piped-hatching-pinwheel.md`
 
 ### 3. Configuration Clarity (P1)
 

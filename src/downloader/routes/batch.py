@@ -24,6 +24,7 @@ from ..models.responses import (
     BatchURLRequest,
     BatchURLResult,
     ErrorResponse,
+    HTTPErrorResponse,
     JobStatusResponse,
     JobSubmissionResponse,
 )
@@ -355,7 +356,14 @@ async def process_background_batch_job(
     return results_dict, summary
 
 
-@router.post("/batch")
+@router.post(
+    "/batch",
+    responses={
+        400: {"model": HTTPErrorResponse, "description": "Invalid batch request"},
+        500: {"model": HTTPErrorResponse, "description": "Job submission error"},
+        503: {"model": HTTPErrorResponse, "description": "Redis unavailable"},
+    },
+)
 async def submit_batch_job(
     batch_request: BatchRequest,
     request: Request,
@@ -428,7 +436,14 @@ async def submit_batch_job(
         )
 
 
-@router.get("/jobs/{job_id}/status")
+@router.get(
+    "/jobs/{job_id}/status",
+    responses={
+        404: {"model": HTTPErrorResponse, "description": "Job not found"},
+        500: {"model": HTTPErrorResponse, "description": "Status retrieval error"},
+        503: {"model": HTTPErrorResponse, "description": "Redis unavailable"},
+    },
+)
 async def get_job_status(
     job_id: str = Path(..., description="Job identifier"),
     job_manager: JobManagerDep = None,
@@ -485,7 +500,15 @@ async def get_job_status(
         )
 
 
-@router.get("/jobs/{job_id}/results")
+@router.get(
+    "/jobs/{job_id}/results",
+    responses={
+        400: {"model": HTTPErrorResponse, "description": "Results not available"},
+        404: {"model": HTTPErrorResponse, "description": "Job or results not found"},
+        500: {"model": HTTPErrorResponse, "description": "Results retrieval error"},
+        503: {"model": HTTPErrorResponse, "description": "Redis unavailable"},
+    },
+)
 async def get_job_results(
     job_id: str = Path(..., description="Job identifier"),
     job_manager: JobManagerDep = None,
@@ -569,7 +592,14 @@ async def get_job_results(
         )
 
 
-@router.delete("/jobs/{job_id}")
+@router.delete(
+    "/jobs/{job_id}",
+    responses={
+        404: {"model": HTTPErrorResponse, "description": "Job not found"},
+        500: {"model": HTTPErrorResponse, "description": "Cancellation error"},
+        503: {"model": HTTPErrorResponse, "description": "Redis unavailable"},
+    },
+)
 async def cancel_job(
     job_id: str = Path(..., description="Job identifier"),
     job_manager: JobManagerDep = None,
