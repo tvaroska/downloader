@@ -204,35 +204,68 @@ curl http://localhost:8000/health
 
 Returns authentication status and supported methods when enabled.
 
-## 🔥 Quick Start
+## 🔥 Getting Started
 
-### Using Docker (Recommended)
+### Minimal Setup (no Redis, no Playwright)
 
-```bash
-# Build the image
-docker build -t downloader .
-
-# Run without authentication
-docker run -p 8000:8000 downloader
-
-# Or run with API key authentication
-docker run -e DOWNLOADER_KEY=your-secret-key -p 8000:8000 downloader
-
-# Test the API
-curl -H "Accept: text/plain" http://localhost:8000/https://example.com
-```
-
-### Local Development
+Works out of the box — download URLs and extract content in text, markdown, HTML, or JSON formats.
 
 ```bash
 # Install dependencies
 uv sync
 
-# Run development server
+# Start the server
 uv run python run.py
 
-# Run tests
-uv run pytest tests/ -v
+# Download a page as plain text
+curl http://localhost:8000/https://example.com
+
+# Get markdown format
+curl -H "Accept: text/markdown" http://localhost:8000/https://example.com
+```
+
+**Available features:** single URL download (`GET /{url}`), content negotiation (text/markdown/HTML/JSON), health check, metrics.
+
+**Not available without Redis:** batch processing, scheduled downloads.
+**Not available without Playwright:** PDF generation.
+
+### Full Setup (Redis + Playwright)
+
+Unlocks batch processing, scheduled downloads, and PDF output.
+
+```bash
+# Install dependencies
+uv sync
+
+# Install Playwright browser for PDF generation
+uv run playwright install chromium
+
+# Start Redis (e.g., via Docker)
+docker run -d -p 6379:6379 redis:alpine
+
+# Start the server with Redis
+REDIS_URI=redis://localhost:6379 uv run python run.py
+
+# Generate a PDF
+curl -H "Accept: application/pdf" -o page.pdf \
+  http://localhost:8000/https://example.com
+
+# Submit a batch job
+curl -X POST http://localhost:8000/batch \
+  -H "Content-Type: application/json" \
+  -d '{"urls": [{"url": "https://example.com"}, {"url": "https://github.com"}]}'
+```
+
+### Using Docker
+
+```bash
+# Run without authentication
+docker run -p 8000:8000 ghcr.io/tvaroska/downloader
+
+# Run with API key and Redis
+docker run -e DOWNLOADER_KEY=your-secret-key \
+  -e REDIS_URI=redis://host.docker.internal:6379 \
+  -p 8000:8000 ghcr.io/tvaroska/downloader
 ```
 
 ## 📖 Usage Examples

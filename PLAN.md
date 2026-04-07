@@ -28,11 +28,12 @@
    - Effort: 30m
    - Completed: 2026-04-07
 
-1.4. **S0-DOC-4: Add Getting Started section with minimal vs full setup**
-   - [ ] Show minimal setup (no Redis, no Playwright) with available features
-   - [ ] Show full setup with all dependencies and features enabled
+1.4. **S0-DOC-4: Add Getting Started section with minimal vs full setup** ✅
+   - [x] Show minimal setup (no Redis, no Playwright) with available features
+   - [x] Show full setup with all dependencies and features enabled
    - Files: `README.md`
    - Effort: 1h
+   - Completed: 2026-04-07
 
 ### 2. Error Handling (P1)
 
