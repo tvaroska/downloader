@@ -131,6 +131,34 @@ DELETE /schedules/{schedule_id}
 
 Removes a scheduled download.
 
+### Metrics
+
+Monitor service performance and health.
+
+#### Prometheus Metrics
+```http
+GET /metrics
+```
+Returns all metrics in Prometheus text exposition format.
+
+#### Performance Summary
+```http
+GET /metrics/performance
+```
+Returns JSON with uptime, request counts, error rates, and per-endpoint response time statistics (avg, min, max, p95).
+
+#### Health Score
+```http
+GET /metrics/health-score
+```
+Returns a health score (0-100) with status (`healthy`, `degraded`, `unhealthy`) and contributing factors.
+
+#### Live System Metrics
+```http
+GET /metrics/live
+```
+Returns real-time system metrics including concurrency usage (PDF/batch semaphores), connection pool stats, and performance data.
+
 ## 🔐 Authentication
 
 API key authentication is **optional** and controlled by the `DOWNLOADER_KEY` environment variable.

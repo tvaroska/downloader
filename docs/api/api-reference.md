@@ -469,6 +469,160 @@ Cancel a running or pending batch processing job.
 
 ---
 
+## Metrics
+
+Monitor service performance, health, and resource usage.
+
+### Prometheus Metrics
+
+Get all service metrics in Prometheus text exposition format for scraping.
+
+**Endpoint:** `GET /metrics`
+
+**Response:**
+```
+Content-Type: text/plain; version=0.0.4; charset=utf-8
+
+# HELP downloader_requests_total Total requests
+# TYPE downloader_requests_total counter
+downloader_requests_total 1234
+# HELP downloader_request_duration_seconds Request duration
+# TYPE downloader_request_duration_seconds histogram
+downloader_request_duration_seconds_sum 456.78
+downloader_request_duration_seconds_count 1234
+# HELP downloader_errors_total Total errors
+# TYPE downloader_errors_total counter
+downloader_errors_total 12
+```
+
+**Status Codes:**
+- `200` - Metrics retrieved successfully
+
+---
+
+### Performance Summary
+
+Get detailed performance statistics per endpoint.
+
+**Endpoint:** `GET /metrics/performance`
+
+**Response:**
+```json
+{
+  "uptime_seconds": 3600.5,
+  "total_requests": 1234,
+  "total_errors": 12,
+  "overall_error_rate_percent": 0.97,
+  "overall_avg_response_time": 0.37,
+  "endpoints": {
+    "GET_/{url}": {
+      "request_count": 800,
+      "error_count": 10,
+      "error_rate_percent": 1.25,
+      "avg_response_time": 0.45,
+      "min_response_time": 0.05,
+      "max_response_time": 2.1,
+      "p95_response_time": 1.2
+    }
+  }
+}
+```
+
+**Status Codes:**
+- `200` - Performance data retrieved successfully
+
+---
+
+### Health Score
+
+Get a composite health score with diagnostic breakdown.
+
+**Endpoint:** `GET /metrics/health-score`
+
+**Response:**
+```json
+{
+  "overall_score": 92,
+  "status": "healthy",
+  "factors": {
+    "error_rate": {
+      "value": 0.97,
+      "penalty": 5.0,
+      "status": "good"
+    },
+    "response_time": {
+      "value": 0.37,
+      "penalty": 3.0,
+      "status": "good"
+    },
+    "uptime": {
+      "value": 3600.5,
+      "bonus": 0,
+      "status": "good"
+    }
+  }
+}
+```
+
+**Health Status Values:**
+- `healthy` - Score >= 80
+- `degraded` - Score >= 50
+- `unhealthy` - Score < 50
+
+**Status Codes:**
+- `200` - Health score retrieved successfully
+
+---
+
+### Live System Metrics
+
+Get real-time system resource usage and concurrency statistics.
+
+**Endpoint:** `GET /metrics/live`
+
+**Response:**
+```json
+{
+  "timestamp": "2026-01-21T12:00:00Z",
+  "concurrency": {
+    "pdf_semaphore": {
+      "max": 4,
+      "in_use": 1,
+      "available": 3
+    },
+    "batch_semaphore": {
+      "max": 16,
+      "in_use": 3,
+      "available": 13
+    }
+  },
+  "performance": {
+    "uptime_seconds": 3600.5,
+    "total_requests": 1234,
+    "total_errors": 12,
+    "overall_error_rate_percent": 0.97,
+    "overall_avg_response_time": 0.37,
+    "endpoints": {}
+  },
+  "connections": {
+    "redis": "connected",
+    "http_client": {
+      "pool_size": 200,
+      "active_connections": 5
+    }
+  },
+  "system": {
+    "cpu_cores": 4,
+    "scaling_info": "batch=16, pdf=4"
+  }
+}
+```
+
+**Status Codes:**
+- `200` - Live metrics retrieved successfully
+
+---
+
 ## Error Handling
 
 All errors return JSON responses with structured error information.

@@ -16,8 +16,8 @@
    - Effort: 1h
 
 1.2. **S0-DOC-2: Document metrics endpoints**
-   - [ ] Add `/metrics`, `/metrics/performance`, `/metrics/health-score` to README.md
-   - [ ] Add metrics section to docs/api/api-reference.md
+   - [x] Add `/metrics`, `/metrics/performance`, `/metrics/health-score` to README.md
+   - [x] Add metrics section to docs/api/api-reference.md
    - Files: `README.md`, `docs/api/api-reference.md`
    - Effort: 1h
 
