@@ -37,11 +37,13 @@
 
 ### 2. Error Handling (P1)
 
-2.1. **S0-BE-1: Return 503 when Redis is unavailable**
-   - [ ] Return clear 503 with message when batch/schedule endpoints are called without Redis
-   - [ ] Include which feature requires Redis in error message
+2.1. **S0-BE-1: Return 503 when Redis is unavailable** ✅
+   - [x] Return clear 503 with message when batch/schedule endpoints are called without Redis
+   - [x] Include which feature requires Redis in error message
    - Files: `src/downloader/routes/batch.py`, `src/downloader/routes/schedules.py`
    - Effort: 1h
+   - Completed: 2026-04-07
+   - Plan: `.claude/plans/floofy-zooming-simon.md`
 
 2.2. **S0-BE-2: Fix error response nesting inconsistency**
    - [ ] Audit ErrorResponse wrapping across all routes

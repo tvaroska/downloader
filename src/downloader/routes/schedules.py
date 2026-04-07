@@ -54,7 +54,7 @@ def _require_scheduler(scheduler: SchedulerDep) -> SchedulerService:
         raise HTTPException(
             status_code=503,
             detail=ErrorResponse(
-                error="Scheduler service is not available. Redis connection required.",
+                error="Scheduling is not available. Redis connection (REDIS_URI) is required.",
                 error_type="service_unavailable",
             ).model_dump(),
         )
@@ -342,7 +342,7 @@ async def get_schedule_history(
             raise HTTPException(
                 status_code=503,
                 detail=ErrorResponse(
-                    error="Execution storage is not available. Redis connection required.",
+                    error="Schedule execution history is not available. Redis connection (REDIS_URI) is required.",
                     error_type="service_unavailable",
                 ).model_dump(),
             )
