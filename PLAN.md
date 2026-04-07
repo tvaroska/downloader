@@ -1,14 +1,69 @@
 # REST API Downloader - Sprint Plan
 
-**Last Updated:** 2026-01-21
+**Last Updated:** 2026-04-07
 
-## Sprint 0 - Critical Remediation ✅ COMPLETE
+## Sprint 0 - Usability Fixes
 
-**Status:** All 19 tasks completed
-**Completed:** 2026-01-20
-**Archive:** [docs/features/production-readiness.md](docs/features/production-readiness.md)
+**Status:** Open
+**Priority:** P1 - Documentation accuracy and developer experience
 
-Summary: Test coverage increased to 85%+, all documentation fixes, CI/CD hardening with mypy and pip-audit, CORS security defaults, secrets detection.
+### 1. Documentation Gaps (P0)
+
+1.1. **S0-DOC-1: Add schedule endpoints to README and API reference**
+   - [x] Document schedule CRUD endpoints in README.md
+   - [x] Add schedule endpoints with examples to docs/api/api-reference.md
+   - Files: `README.md`, `docs/api/api-reference.md`
+   - Effort: 1h
+
+1.2. **S0-DOC-2: Document metrics endpoints**
+   - [ ] Add `/metrics`, `/metrics/performance`, `/metrics/health-score` to README.md
+   - [ ] Add metrics section to docs/api/api-reference.md
+   - Files: `README.md`, `docs/api/api-reference.md`
+   - Effort: 1h
+
+1.3. **S0-DOC-3: Document Playwright fallback behavior**
+   - [ ] Explain implicit Playwright fallback in batch processing
+   - [ ] Add note to api-reference.md under batch endpoints
+   - Files: `docs/api/api-reference.md`
+   - Effort: 30m
+
+1.4. **S0-DOC-4: Add Getting Started section with minimal vs full setup**
+   - [ ] Show minimal setup (no Redis, no Playwright) with available features
+   - [ ] Show full setup with all dependencies and features enabled
+   - Files: `README.md`
+   - Effort: 1h
+
+### 2. Error Handling (P1)
+
+2.1. **S0-BE-1: Return 503 when Redis is unavailable**
+   - [ ] Return clear 503 with message when batch/schedule endpoints are called without Redis
+   - [ ] Include which feature requires Redis in error message
+   - Files: `src/downloader/routes/batch.py`, `src/downloader/routes/schedules.py`
+   - Effort: 1h
+
+2.2. **S0-BE-2: Fix error response nesting inconsistency**
+   - [ ] Audit ErrorResponse wrapping across all routes
+   - [ ] Ensure OpenAPI schema matches actual response shape (detail wrapping)
+   - Files: `src/downloader/routes/download.py`, `src/downloader/routes/batch.py`
+   - Effort: 2h
+
+### 3. Configuration Clarity (P1)
+
+3.1. **S0-DOC-5: Document rate limiting storage fallback chain**
+   - [ ] Explain `RATELIMIT_STORAGE_URI → REDIS_URI → memory://` fallback in .env.example
+   - [ ] Add note to configuration guide
+   - Files: `.env.example`, `docs/guides/configuration.md`
+   - Effort: 30m
+
+---
+
+### Sprint 0 Summary
+
+| Category | Tasks | Effort |
+|----------|-------|--------|
+| Documentation | 5 | 4h |
+| Backend | 2 | 3h |
+| **Total** | **7** | **7h** |
 
 ---
 

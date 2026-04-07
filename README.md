@@ -12,6 +12,7 @@ High-performance web service for programmatic URL content downloading with intel
 - **Intelligent Extraction**: BeautifulSoup-powered article text extraction
 - **Security**: SSRF protection and URL validation
 - **Performance**: Async HTTP client with connection pooling
+- **Scheduled Downloads**: Cron-based recurring downloads with execution history
 - **Production Ready**: Docker support with health checks
 - **Comprehensive Testing**: 100% test coverage for critical components
 
@@ -82,6 +83,53 @@ DELETE /jobs/{job_id}
 ```
 
 Cancels a running or pending job.
+
+### Scheduled Downloads
+
+Create cron-based schedules for recurring URL downloads. Requires Redis.
+
+#### Create Schedule
+```http
+POST /schedules
+Content-Type: application/json
+
+{
+  "name": "Daily news digest",
+  "url": "https://example.com/news",
+  "cron_expression": "0 9 * * *",
+  "format": "markdown"
+}
+```
+
+Creates a scheduled download. Supported formats: `text`, `markdown`, `html`, `pdf`, `json`, `raw`.
+
+#### List Schedules
+```http
+GET /schedules
+```
+
+Returns all configured schedules with next run times.
+
+#### Get Schedule Details
+```http
+GET /schedules/{schedule_id}
+```
+
+Returns schedule configuration and next run time.
+
+#### Get Execution History
+```http
+GET /schedules/{schedule_id}/history?limit=20&offset=0
+```
+
+Returns paginated execution history with status, duration, and error details. Default limit: 20 (max 100).
+
+#### Delete Schedule
+```http
+DELETE /schedules/{schedule_id}
+```
+
+Removes a scheduled download.
 
 ## 🔐 Authentication
 
@@ -275,6 +323,7 @@ See `.env.example` for complete configuration reference.
 - ✅ Content negotiation via Accept headers (text, markdown, HTML, JSON, PDF)
 - ✅ Background batch processing with job tracking
 - ✅ PDF generation with Playwright
+- ✅ Scheduled downloads with cron expressions and execution history
 - ✅ **Rate limiting with DoS protection** (NEW)
 - ✅ Comprehensive test suite (248 tests: 80 smoke, 3-tier strategy)
 - ✅ SSRF protection and URL validation
@@ -290,4 +339,4 @@ See `.env.example` for complete configuration reference.
 - 🟢 Advanced (1-2 months): Enhanced content preprocessing, SDK libraries, GraphQL API
 - 🔵 Enterprise (3-6 months): OAuth2/JWT, multi-region deployment, AI-powered extraction
 
-See `product/roadmap.md` for detailed implementation timeline.
+See `docs/roadmap.md` for detailed implementation timeline.
