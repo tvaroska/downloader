@@ -177,4 +177,4 @@ When adding new examples:
 
 - **Documentation**: See [API Reference](../docs/api/api-reference.md)
 - **Issues**: Report problems via GitHub issues
-- **Architecture**: Review [Technical Architecture](../product/architecture.md)
+- **Architecture**: Review [CLAUDE.md](../CLAUDE.md) for architecture overview

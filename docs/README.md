@@ -78,7 +78,6 @@ monitoring/
 
 **For Strategic Planning:**
 - Review [Product Roadmap](./roadmap.md) - strategic priorities
-- Check [PRD](../product/PRD.md) for product requirements
 
 ## Recent Updates
 
@@ -88,7 +87,7 @@ monitoring/
 - Added Phases 5-7 to roadmap (Content Transformation, Browser Rendering, Scheduling)
 
 ### October 2025
-- Documentation Consolidation: Merged planning docs into product/roadmap.md
+- Documentation Consolidation: Merged planning docs into docs/roadmap.md
 - SSRF Protection: Implemented comprehensive SSRF protection
 - Configuration System: Added Pydantic Settings-based configuration
 - Structured Logging: Separate access/error handlers with JSON support
