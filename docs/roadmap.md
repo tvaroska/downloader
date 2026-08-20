@@ -29,7 +29,7 @@ This document outlines the strategic priorities and feature roadmap for the REST
 **Sprint 4** (Current): Quota Management
 - 7 tasks, ~21 hours effort
 - Per-API-key quotas, usage tracking, rate limiting
-- See [PLAN.md](../PLAN.md) for detailed task breakdown
+- See [TODO.md](../TODO.md) for detailed task breakdown
 
 **Sprint 5** (Next): Ethical Crawling
 - 7 tasks, ~16 hours effort

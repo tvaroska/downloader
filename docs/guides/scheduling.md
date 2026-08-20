@@ -411,4 +411,4 @@ echo $REDIS_URI
 | Get history | GET | `/schedules/{id}/history` |
 | Delete schedule | DELETE | `/schedules/{id}` |
 
-For complete API documentation, see the [API Reference](../api/api-reference.md#scheduled-downloads).
+For complete API documentation, see the [API Reference](../../spec/contracts.md#scheduled-downloads).

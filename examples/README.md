@@ -175,6 +175,6 @@ When adding new examples:
 
 ## Support
 
-- **Documentation**: See [API Reference](../docs/api/api-reference.md)
+- **Documentation**: See [API Reference](../spec/contracts.md)
 - **Issues**: Report problems via GitHub issues
 - **Architecture**: Review [CLAUDE.md](../CLAUDE.md) for architecture overview

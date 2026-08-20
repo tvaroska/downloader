@@ -126,22 +126,50 @@ Key variables (see `.env.example` for full list):
 - Multi-tier rate limiting (60/min download, 20/min batch, 200/min status)
 - Non-root Docker container
 
-## Planning Workflow
+## Planning Workflow (gen-3)
 
-This project uses a feature-based planning system:
+This project uses a sprint-based planning workflow managed through slash commands.
+Live status lives in ONE place (`TODO.md`); `spec/` stays status-free.
 
-### File Structure
-- **PLAN.md**: Current sprint only (Sprint 0 + active sprint)
-- **docs/roadmap.md**: Strategic priorities by feature area
-- **docs/features/*.md**: Complete feature history (done, in-progress, planned)
+### Layout
+
+| Path | Purpose |
+|------|---------|
+| `TODO.md` | Tasks + live status/counts (the ONLY place status lives) |
+| `DECISIONS.md` | Append-only decision/learning log (committed) |
+| `CRITICAL.md` | Registry of protected/sensitive paths (auto-escalate) |
+| `spec/` | THE WHAT — requirements. Status-free, **protected**. `contracts.md` |
+| `docs/` | Planning/ops — `roadmap.md`, `guides/*.md`, `features/*.md` (completed-work archive) |
+| `.claude/plans/` | Per-task plans — LOCAL, gitignored, named `{task-id}-{slug}.md` |
+
+Committed: `TODO.md`, `spec/`, `docs/`, `DECISIONS.md`, `CRITICAL.md`.
+Gitignored: `.claude/`. Because plans are local, `/implement` archives plan
+**substance** into `docs/features/*.md` + `DECISIONS.md` — never a
+`Plan: .claude/plans/...` link (dead on other machines).
 
 ### Commands
-- `/open` - Show top 3 open tasks (Sprint 0 first, then current sprint)
-- `/implement {task-id}` - Execute a specific task
-- `/new-task` - Add critical issue to Sprint 0
-- `/replan` - Archive completed work to feature files, update plans
+- `/open` — top open tasks (surfaces `- [!]` failed items)
+- `/implement {task-id}` — implement, run the verification ladder, archive
+- `/new-task` — add a critical issue to Sprint 0
+- `/replan` — sprint transition; archive completed work; run the T3 CUJ gate
+- `/status` — planning summary + live progress
 
-### Task ID Format
-- Sprint 0: `S0-{CATEGORY}-{NUMBER}`
-- Feature sprints: `S{N}-{CATEGORY}-{NUMBER}`
-- Categories: DB, BE, FE, TEST, QA, SEC, INFRA, REL, PERF
+### Checkbox states
+`- [ ]` open · `- [x]` done · `- [!]` attempted-but-failed (awaiting follow-up).
+
+### Task ID format
+`S{sprint}-{feature}-{seq}` with a LOWERCASE feature slug — e.g. `S4-be-1`,
+`S4-test-1`. Sprint 0 is the always-active triage lane. `TODO.md` carries a
+counter comment `<!-- Counters: ... -->` for per-feature seq.
+
+### Verification ladder
+- **T1 (every /implement — gates the commit):** `just test` + build + lint/type-check
+  (Ruff via `just fmt`), not just the unit runner.
+- **T2 (every /implement — gates flipping `- [x]`):** exercise the artifact against the
+  task's acceptance criteria. Files existing / build green is NOT done.
+- **T3 (sprint-close via /replan):** CUJ simulation against `spec/cujs.md` (when defined).
+
+### CRITICAL escalation
+Any task touching a path in `CRITICAL.md` auto-escalates: stronger model + mandatory
+review before commit. `spec/` is protected — agents PROPOSE spec changes, never edit
+during `/implement`.

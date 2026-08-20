@@ -312,5 +312,5 @@ See [Monitoring Guide](./monitoring.md) for:
 ## Related Documentation
 
 - [Configuration Guide](./configuration.md) - All configuration options
-- [API Reference](../api/api-reference.md) - API endpoints and schemas
+- [API Reference](../../spec/contracts.md) - API endpoints and schemas
 - [Monitoring Guide](./monitoring.md) - Observability setup

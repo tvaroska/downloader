@@ -63,23 +63,23 @@ System: `tesseract-ocr` package
 
 | Task ID | Description | Files | Plan |
 |---------|-------------|-------|------|
-| S1-BE-1 | Add markdownify dependency and core converter | `src/downloader/transformers/markdown.py`, `pyproject.toml` | `.claude/plans/imperative-sauteeing-cook.md` |
+| S1-BE-1 | Add markdownify dependency and core converter | `src/downloader/transformers/markdown.py`, `pyproject.toml` | — |
 | S1-BE-2 | Add Accept header content negotiation | `src/downloader/api/routes.py` | - |
 | S1-BE-3 | Add format option to batch endpoint | `src/downloader/api/routes.py`, `src/downloader/models.py` | - |
-| S1-TEST-1 | Add markdown transformation tests | `tests/unit/test_markdown_transformer.py` | `.claude/plans/generic-scribbling-lovelace.md` |
+| S1-TEST-1 | Add markdown transformation tests | `tests/unit/test_markdown_transformer.py` | — |
 
 #### Plain Text Extraction (P2 - Core)
 
 | Task ID | Description | Files | Plan |
 |---------|-------------|-------|------|
-| S1-BE-4 | Implement plain text extractor | `src/downloader/transformers/plaintext.py` | `.claude/plans/fancy-popping-origami.md` |
-| S1-TEST-2 | Add text extraction tests | `tests/unit/test_plaintext_transformer.py` | `.claude/plans/curious-yawning-storm.md` |
+| S1-BE-4 | Implement plain text extractor | `src/downloader/transformers/plaintext.py` | — |
+| S1-TEST-2 | Add text extraction tests | `tests/unit/test_plaintext_transformer.py` | — |
 
 #### API Documentation (P1 - Required)
 
 | Task ID | Description | Files | Plan |
 |---------|-------------|-------|------|
-| S1-DOC-1 | Update API reference for content negotiation | `docs/api/api-reference.md` | `.claude/plans/synchronous-sniffing-ullman.md` |
+| S1-DOC-1 | Update API reference for content negotiation | `spec/contracts.md` | — |
 
 ---
 

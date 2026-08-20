@@ -60,23 +60,23 @@ apscheduler>=3.10.0
 
 | Task ID | Description | Files | Plan |
 |---------|-------------|-------|------|
-| S3-BE-1 | Add APScheduler dependency and scheduler service | `src/downloader/scheduler/service.py`, `src/downloader/main.py`, `pyproject.toml` | `.claude/plans/playful-crafting-backus.md` |
-| S3-BE-2 | Implement schedule CRUD endpoints | `src/downloader/routes/schedules.py`, `src/downloader/models/schedule.py` | `.claude/plans/wobbly-marinating-peacock.md` |
-| S3-BE-3 | Implement job execution logic | `src/downloader/scheduler/executor.py`, `src/downloader/scheduler/storage.py` | `.claude/plans/rosy-beaming-zephyr.md` |
-| S3-BE-4 | Add job history endpoint | `src/downloader/routes/schedules.py` | `.claude/plans/smooth-hopping-lynx.md` |
+| S3-BE-1 | Add APScheduler dependency and scheduler service | `src/downloader/scheduler/service.py`, `src/downloader/main.py`, `pyproject.toml` | — |
+| S3-BE-2 | Implement schedule CRUD endpoints | `src/downloader/routes/schedules.py`, `src/downloader/models/schedule.py` | — |
+| S3-BE-3 | Implement job execution logic | `src/downloader/scheduler/executor.py`, `src/downloader/scheduler/storage.py` | — |
+| S3-BE-4 | Add job history endpoint | `src/downloader/routes/schedules.py` | — |
 
 #### Testing (P1 - Required)
 
 | Task ID | Description | Files | Plan |
 |---------|-------------|-------|------|
-| S3-TEST-1 | Add scheduler unit tests | `tests/unit/test_scheduler.py` | `.claude/plans/resilient-stirring-quokka.md` |
-| S3-TEST-2 | Add scheduler integration tests | `tests/integration/test_scheduler.py` | `.claude/plans/resilient-stirring-quokka.md` |
+| S3-TEST-1 | Add scheduler unit tests | `tests/unit/test_scheduler.py` | — |
+| S3-TEST-2 | Add scheduler integration tests | `tests/integration/test_scheduler.py` | — |
 
 #### Documentation (P1 - Required)
 
 | Task ID | Description | Files | Plan |
 |---------|-------------|-------|------|
-| S3-DOC-1 | Document scheduling API | `docs/api/api-reference.md`, `docs/guides/scheduling.md` | `.claude/plans/magical-napping-papert.md` |
+| S3-DOC-1 | Document scheduling API | `spec/contracts.md`, `docs/guides/scheduling.md` | — |
 
 ---
 

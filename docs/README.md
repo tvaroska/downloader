@@ -7,7 +7,7 @@ Technical documentation for the REST API Downloader.
 ## Documentation Index
 
 ### API Documentation
-- **[API Reference](./api/api-reference.md)** - Complete API documentation with endpoints, schemas, and examples
+- **[API Contracts](../spec/contracts.md)** - Complete API documentation with endpoints, schemas, and examples (the WHAT — lives in `spec/`)
 
 ### Implementation Guides
 - **[Deployment Guide](./guides/deployment.md)** - Production deployment runbook with Docker, configuration, and security
@@ -21,7 +21,8 @@ Technical documentation for the REST API Downloader.
 ### Quick Links
 - **[README](../README.md)** - Project overview and getting started guide
 - **[Examples](../examples/README.md)** - Practical usage examples
-- **[Product Documents](../product/)** - PRD, architecture, metrics
+- **[Requirements (spec/)](../spec/)** - API contracts and product requirements (the WHAT)
+- **[TODO](../TODO.md)** - Live sprint status · **[Decisions](../DECISIONS.md)** · **[Critical paths](../CRITICAL.md)**
 
 ## Documentation Structure
 
@@ -30,8 +31,6 @@ docs/
 ├── README.md                    # This file - documentation index
 ├── roadmap.md                   # Strategic priorities
 ├── features/                    # Feature history (planning system)
-├── api/
-│   └── api-reference.md         # API endpoints and schemas
 ├── guides/
 │   ├── configuration.md         # Configuration system
 │   ├── deployment.md            # Production deployment
@@ -41,12 +40,8 @@ docs/
     ├── DOWNLOADER_BUG.md        # Bug reports
     └── TEST_RESULTS.md          # Test findings
 
-product/
-├── PRD.md                       # Product requirements
-├── architecture.md              # Technical architecture
-├── metrics.md                   # Success metrics
-├── personas.md                  # User personas
-└── user-journeys.md             # User journey maps
+spec/                            # THE WHAT — requirements (status-free)
+└── contracts.md                 # API endpoints and schemas
 
 examples/
 └── README.md                    # Usage examples and guides
@@ -59,13 +54,13 @@ monitoring/
 
 1. **Installation**: See [README](../README.md)
 2. **Configuration**: Copy `.env.example` and customize (see [Configuration](./guides/configuration.md))
-3. **API Usage**: Review [API Reference](./api/api-reference.md) and [Examples](../examples/README.md)
+3. **API Usage**: Review [API Contracts](../spec/contracts.md) and [Examples](../examples/README.md)
 4. **Monitoring**: Set up observability using [Monitoring Guide](./guides/monitoring.md)
 
 ## Finding Information
 
 **For API Usage:**
-- Start with [API Reference](./api/api-reference.md)
+- Start with [API Contracts](../spec/contracts.md)
 - See [Examples](../examples/README.md) for practical code
 
 **For Configuration:**
@@ -96,8 +91,8 @@ monitoring/
 
 When adding new documentation:
 - Technical implementation guides -> `docs/guides/`
-- API documentation -> `docs/api/`
-- Strategic planning -> `product/`
+- API contracts / requirements -> `spec/contracts.md`
+- Strategic planning -> `docs/roadmap.md`
 - Usage examples -> `examples/`
 - Operational guides -> Component-specific directories (e.g., `monitoring/`)
 

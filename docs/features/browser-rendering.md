@@ -61,30 +61,30 @@ System: `playwright install chromium`
 
 | Task ID | Description | Files | Plan |
 |---------|-------------|-------|------|
-| S2-BE-1 | Extract browser module from pdf_generator | `src/downloader/browser/manager.py`, `src/downloader/pdf_generator.py` | `.claude/plans/streamed-leaping-pascal.md` |
-| S2-BE-2 | Add explicit ?render=true parameter | `src/downloader/routes/download.py`, `src/downloader/services/content_processor.py` | `.claude/plans/groovy-snacking-pudding.md` |
-| S2-BE-3 | Add wait_for selector support | `src/downloader/routes/download.py`, `src/downloader/content_converter.py` | `.claude/plans/peppy-kindling-piglet.md` |
+| S2-BE-1 | Extract browser module from pdf_generator | `src/downloader/browser/manager.py`, `src/downloader/pdf_generator.py` | — |
+| S2-BE-2 | Add explicit ?render=true parameter | `src/downloader/routes/download.py`, `src/downloader/services/content_processor.py` | — |
+| S2-BE-3 | Add wait_for selector support | `src/downloader/routes/download.py`, `src/downloader/content_converter.py` | — |
 
 #### Process Isolation & Security (P1 - Required)
 
 | Task ID | Description | Files | Plan |
 |---------|-------------|-------|------|
-| S2-SEC-1 | Implement browser process isolation | `src/downloader/browser/manager.py` | `.claude/plans/groovy-jingling-river.md` |
-| S2-SEC-2 | Add browser security hardening | `src/downloader/browser/manager.py`, `src/downloader/validation.py` | `.claude/plans/keen-booping-beaver.md` |
+| S2-SEC-1 | Implement browser process isolation | `src/downloader/browser/manager.py` | — |
+| S2-SEC-2 | Add browser security hardening | `src/downloader/browser/manager.py`, `src/downloader/validation.py` | — |
 
 #### Testing (P1 - Required)
 
 | Task ID | Description | Files | Plan |
 |---------|-------------|-------|------|
-| S2-TEST-1 | Add browser rendering integration tests | `tests/integration/test_browser_rendering.py` | `.claude/plans/mighty-launching-hejlsberg.md` |
-| S2-TEST-2 | Add browser security tests | `tests/integration/test_browser_security.py` | `.claude/plans/mighty-launching-hejlsberg.md` |
+| S2-TEST-1 | Add browser rendering integration tests | `tests/integration/test_browser_rendering.py` | — |
+| S2-TEST-2 | Add browser security tests | `tests/integration/test_browser_security.py` | — |
 
 #### Infrastructure (P1 - Required)
 
 | Task ID | Description | Files | Plan |
 |---------|-------------|-------|------|
 | S2-INFRA-1 | Update Dockerfile for Playwright | `Dockerfile` | - |
-| S2-DOC-1 | Document browser rendering feature | `docs/api/api-reference.md` | - |
+| S2-DOC-1 | Document browser rendering feature | `spec/contracts.md` | - |
 
 ---
 

@@ -12,7 +12,7 @@ All documentation files use a `**Last Updated:** YYYY-MM-DD` header after the ma
 
 | Document | Review Frequency | Owner |
 |----------|-----------------|-------|
-| `docs/api/api-reference.md` | Every release | Backend team |
+| `spec/contracts.md` | Every release | Backend team |
 | `docs/guides/deployment.md` | Monthly | DevOps |
 | `docs/guides/configuration.md` | Every config change | Backend team |
 | `docs/guides/monitoring.md` | Quarterly | DevOps |
