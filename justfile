@@ -24,10 +24,10 @@ docker:
     #!/usr/bin/env bash
     set -e
     VERSION=$(grep '^version = ' pyproject.toml | cut -d'"' -f2)
-    echo "Building version: $VERSION"
-    docker build -t ghcr.io/tvaroska/downloader:$VERSION -t ghcr.io/tvaroska/downloader:latest .
-    docker push ghcr.io/tvaroska/downloader:$VERSION
-    docker push ghcr.io/tvaroska/downloader:latest
+    echo "Building version: v$VERSION"
+    docker build -t us-central1-docker.pkg.dev/sites-470716/containers/downloader:v$VERSION -t us-central1-docker.pkg.dev/sites-470716/containers/downloader:latest .
+    docker push us-central1-docker.pkg.dev/sites-470716/containers/downloader:v$VERSION
+    docker push us-central1-docker.pkg.dev/sites-470716/containers/downloader:latest
 
 # Clean build artifacts
 clean:
