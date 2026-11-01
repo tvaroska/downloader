@@ -6,6 +6,7 @@ from typing import Any
 
 import httpx
 
+from .models.responses import ResponseMetadata
 from .validation import sanitize_user_agent
 
 logger = logging.getLogger(__name__)
@@ -64,7 +65,7 @@ class HTTPClient:
         self.user_agent = sanitize_user_agent(user_agent)
 
         # Connection limits for pooling
-        limits = httpx.Limits(
+        self._limits = httpx.Limits(
             max_keepalive_connections=100,
             max_connections=200,
             keepalive_expiry=30.0,
@@ -75,7 +76,7 @@ class HTTPClient:
             timeout=timeout,
             follow_redirects=True,
             max_redirects=max_redirects,
-            limits=limits,
+            limits=self._limits,
             http2=True,
             headers={
                 "User-Agent": self.user_agent,
@@ -88,13 +89,13 @@ class HTTPClient:
 
         logger.info(
             f"HTTP client initialized with connection pooling: "
-            f"max_connections={limits.max_connections}, "
-            f"max_keepalive={limits.max_keepalive_connections}"
+            f"max_connections={self._limits.max_connections}, "
+            f"max_keepalive={self._limits.max_keepalive_connections}"
         )
 
     async def download(
         self, url: str, priority: RequestPriority = RequestPriority.HIGH
-    ) -> tuple[bytes, dict[str, Any]]:
+    ) -> tuple[bytes, ResponseMetadata]:
         """
         Download content from a URL.
 
@@ -112,7 +113,7 @@ class HTTPClient:
         """
         return await self._do_download(url)
 
-    async def _do_download(self, url: str) -> tuple[bytes, dict[str, Any]]:
+    async def _do_download(self, url: str) -> tuple[bytes, ResponseMetadata]:
         """Internal download implementation."""
         logger.info(f"Starting download from: {url}")
 
@@ -129,7 +130,7 @@ class HTTPClient:
             content = response.content
 
             # Prepare metadata with connection info
-            metadata = {
+            metadata: ResponseMetadata = {
                 "status_code": response.status_code,
                 "headers": dict(response.headers),
                 "url": str(response.url),
@@ -170,9 +171,9 @@ class HTTPClient:
                 "status": "healthy",
                 "http2_enabled": True,
                 "connection_limits": {
-                    "max_connections": self._client.limits.max_connections,
-                    "max_keepalive": self._client.limits.max_keepalive_connections,
-                    "keepalive_expiry": self._client.limits.keepalive_expiry,
+                    "max_connections": self._limits.max_connections,
+                    "max_keepalive": self._limits.max_keepalive_connections,
+                    "keepalive_expiry": self._limits.keepalive_expiry,
                 },
             }
         except Exception as e:

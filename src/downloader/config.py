@@ -96,6 +96,16 @@ class HTTPClientConfig(BaseSettings):
         return v
 
 
+def _default_pdf_concurrency() -> int:
+    cpu_count = multiprocessing.cpu_count()
+    return min(cpu_count * 2, 12)
+
+
+def _default_batch_concurrency() -> int:
+    cpu_count = multiprocessing.cpu_count()
+    return min(cpu_count * 8, 50)
+
+
 class PDFConfig(BaseSettings):
     """PDF generation configuration settings.
 
@@ -106,12 +116,8 @@ class PDFConfig(BaseSettings):
     # Why 2x CPU cores? PDF rendering is CPU-bound but has I/O wait during page loading
     # Why max 12? Playwright browsers use ~200-300MB RAM each; 12 ≈ 2.4-3.6GB max
     # This prevents memory exhaustion on smaller VMs while allowing scaling on larger ones
-    def _get_default_concurrency():
-        cpu_count = multiprocessing.cpu_count()
-        return min(cpu_count * 2, 12)
-
     concurrency: int = Field(
-        default_factory=_get_default_concurrency,
+        default_factory=_default_pdf_concurrency,
         ge=1,
         le=50,
         description="Max concurrent PDF generations (default: 2x CPU cores, max 12)",
@@ -164,12 +170,8 @@ class BatchConfig(BaseSettings):
     # Why 8x CPU cores? Batch requests are I/O bound (network waits), can handle more parallelism
     # Why max 50? Limits total memory usage and prevents overwhelming downstream services
     # At 50 concurrent downloads × ~10MB average = ~500MB max memory usage
-    def _get_default_concurrency():
-        cpu_count = multiprocessing.cpu_count()
-        return min(cpu_count * 8, 50)
-
     concurrency: int = Field(
-        default_factory=_get_default_concurrency,
+        default_factory=_default_batch_concurrency,
         ge=1,
         le=100,
         description="Max concurrent batch requests (default: 8x CPU cores, max 50)",

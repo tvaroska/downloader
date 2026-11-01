@@ -5,6 +5,7 @@ import base64
 import json
 import logging
 import time
+from typing import Any, Literal
 
 from fastapi import HTTPException, Response
 
@@ -145,7 +146,7 @@ async def _playwright_fallback_for_content(
     processed_content: str,
     original_content: bytes,
     content_type: str,
-    output_format: str,
+    output_format: Literal["text", "markdown"],
     request_id: str = "",
 ) -> str:
     """
@@ -333,6 +334,7 @@ async def handle_html_response(
         wait_for_selector: Optional CSS selector to wait for after page load
     """
     rendered_with_js = False
+    html_content: bytes | str
 
     if "html" in metadata["content_type"].lower():
         # Check if we need to render with Playwright (forced or auto-detected)
@@ -439,17 +441,17 @@ async def _process_single_format_for_multi(
     try:
         if format_type == "json":
             response = await handle_json_response(content, metadata)
-            content_str = response.body.decode("utf-8")
+            content_str = bytes(response.body).decode("utf-8")
             return ("application/json", content_str)
 
         elif format_type == "text":
             response = await handle_text_response(url, content, metadata)
-            content_str = response.body.decode("utf-8")
+            content_str = bytes(response.body).decode("utf-8")
             return ("text/plain", content_str)
 
         elif format_type == "markdown":
             response = await handle_markdown_response(url, content, metadata)
-            content_str = response.body.decode("utf-8")
+            content_str = bytes(response.body).decode("utf-8")
             return ("text/markdown", content_str)
 
         elif format_type == "pdf":
@@ -458,7 +460,7 @@ async def _process_single_format_for_multi(
                 raise Exception("PDF service at capacity")
             response = await handle_pdf_response(url, metadata, pdf_semaphore)
             # Base64 encode for JSON
-            pdf_bytes = response.body
+            pdf_bytes = bytes(response.body)
             pdf_base64 = base64.b64encode(pdf_bytes).decode("utf-8")
             return ("application/pdf", pdf_base64)
 
@@ -466,10 +468,7 @@ async def _process_single_format_for_multi(
             response = await handle_html_response(
                 url, content, metadata, force_render, wait_for_selector
             )
-            if isinstance(response.body, bytes):
-                content_str = response.body.decode("utf-8", errors="ignore")
-            else:
-                content_str = response.body
+            content_str = bytes(response.body).decode("utf-8", errors="ignore")
             return ("text/html", content_str)
 
         else:
@@ -488,7 +487,7 @@ async def process_multiple_formats(
     pdf_semaphore: asyncio.Semaphore,
     force_render: bool = False,
     wait_for_selector: str | None = None,
-) -> dict[str, str]:
+) -> dict[str, Any]:
     """
     Process content into multiple formats in parallel.
 
@@ -528,14 +527,16 @@ async def process_multiple_formats(
     results = await asyncio.gather(*tasks, return_exceptions=True)
 
     # Build response dict
-    response_dict = {}
-    errors = {}
+    response_dict: dict[str, Any] = {}
+    errors: dict[str, str] = {}
 
     for format_type, result in zip(format_types, results, strict=False):
         if isinstance(result, Exception):
             # Format failed - add to errors
             mime_type = _format_to_mime_type(format_type)
             errors[mime_type] = str(result)
+        elif isinstance(result, BaseException):
+            raise result
         else:
             # Format succeeded - add to results
             mime_type, content_str = result

@@ -78,6 +78,7 @@ def setup_logging(config: LoggingConfig) -> None:
         config: Logging configuration settings
     """
     # Determine formatters
+    formatter: logging.Formatter
     if config.json_logs:
         # JSON structured logging for production
         formatter = CustomJsonFormatter(
@@ -99,6 +100,7 @@ def setup_logging(config: LoggingConfig) -> None:
     # ============================================
     # ERROR LOG HANDLER (Application Logs)
     # ============================================
+    error_handler: logging.Handler
     if config.error_log_file:
         # File handler with rotation for error logs
         error_log_path = Path(config.error_log_file)
@@ -129,6 +131,7 @@ def setup_logging(config: LoggingConfig) -> None:
     access_logger.propagate = False  # Don't propagate to root logger
     access_logger.handlers.clear()
 
+    access_handler: logging.Handler
     if config.access_log_file:
         # Separate file handler for access logs
         access_log_path = Path(config.access_log_file)

@@ -45,6 +45,8 @@ router = APIRouter()
 )
 async def download_url(
     request: Request,
+    http_client: HTTPClientDep,
+    pdf_semaphore: PDFSemaphoreDep,
     url: str = Path(..., description="The URL to download"),
     accept: str | None = Header(None, description="Accept header for content negotiation"),
     render: bool = Query(False, description="Force Playwright rendering, bypass auto-detection"),
@@ -53,8 +55,6 @@ async def download_url(
         description="CSS selector to wait for before returning. Implies render=true.",
         max_length=500,
     ),
-    http_client: HTTPClientDep = None,
-    pdf_semaphore: PDFSemaphoreDep = None,
     api_key: str | None = Depends(get_api_key),
 ) -> Response:
     """

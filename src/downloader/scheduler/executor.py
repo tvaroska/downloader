@@ -9,6 +9,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import uuid
+from collections.abc import Mapping
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Any
 
@@ -20,6 +21,7 @@ from ..validation import validate_url
 
 if TYPE_CHECKING:
     from ..http_client import HTTPClient
+    from ..models.responses import ResponseMetadata
     from ..pdf_generator import PlaywrightPDFGenerator
     from .storage import ExecutionStorage
 
@@ -217,7 +219,7 @@ class ScheduledJobExecutor:
         self,
         url: str,
         content: bytes,
-        metadata: dict[str, Any],
+        metadata: ResponseMetadata | Mapping[str, Any],
         format: str,
     ) -> str | bytes:
         """Process downloaded content based on output format.

@@ -3,6 +3,7 @@
 import asyncio
 import time
 from collections.abc import Callable
+from typing import Any
 
 from fastapi import Request, Response
 from starlette.middleware.base import BaseHTTPMiddleware
@@ -79,11 +80,11 @@ class MetricsMiddleware(BaseHTTPMiddleware):
 class SystemMetricsCollector:
     """Collects system-level metrics in the background."""
 
-    def __init__(self):
+    def __init__(self) -> None:
         self.collector = get_metrics_collector()
         self._running = False
-        self._task = None
-        self.app_state = None
+        self._task: asyncio.Task[None] | None = None
+        self.app_state: Any = None
 
     async def start(self, app_state=None):
         """Start background metrics collection.
@@ -229,7 +230,7 @@ class SystemMetricsCollector:
 
 
 # Global system metrics collector
-_system_metrics_collector = None
+_system_metrics_collector: SystemMetricsCollector | None = None
 
 
 def get_system_metrics_collector() -> SystemMetricsCollector:

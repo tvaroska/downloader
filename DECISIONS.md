@@ -6,6 +6,41 @@ history — supersede an old decision with a new entry that references it.
 
 ---
 
+## 2026-11-01 — Stateless-first Sprint 4 re-alignment & offline verification gate
+
+- **Decision (Sprint 4 vs. Sprint 5 re-ordering — supersedes 2026-01-21 roadmap order):**
+  Promoted **Ethical Crawling & Stateless Safety** (`S4-be-1`..`S4-be-5`, `S4-test-1`,
+  `S4-doc-1`) into Sprint 4 using a stateless-first dual-mode design: stdlib
+  `urllib.robotparser` with a bounded in-memory TTL/LRU cache (1h TTL) and in-memory
+  per-domain `Crawl-delay` timestamps by default when `REDIS_URI` is unset, plus
+  optional Redis cache/throttle coordination when `REDIS_URI` is configured. Moved
+  **Multi-Tenant Per-Key Quotas** (`QuotaConfig`, `GET /usage`, `X-RateLimit-*`,
+  `429 Retry-After`) to Sprint 5 Preview (`S5-*`, deferred until multi-key or
+  Redis-backed deployment).
+- **Why (Stateless Kubernetes reality):** Production runs as a stateless Kubernetes
+  deployment behind a single shared `DOWNLOADER_KEY` with `REDIS_URI` unset (`slowapi`
+  `memory://` already enforces global endpoint rate limits). Building Redis-only
+  per-key tenant accounting next would add zero value in single-key stateless pods,
+  whereas stateless-compatible `robots.txt`, `USER_AGENT`, and `Crawl-delay`
+  controls immediately protect live egress. If multi-tenant quotas are activated
+  later, they should either target a Redis-backed deployment or implement a
+  `QUOTA_STORAGE_URI → REDIS_URI → memory://` fallback chain matching `slowapi`.
+  Details in `TODO.md` and `docs/roadmap.md`.
+- **Decision (Lazy unified `PlaywrightPDFGenerator` pool & unblinded offline gate):**
+  Unified browser lifecycle management on a lazily initialized `BrowserPool` inside
+  `PlaywrightPDFGenerator` (deferring Chromium startup until the first PDF or
+  rendered-HTML call rather than FastAPI lifespan startup) and hardened the default
+  fast test gate with `tests/smoke/test_repo_hygiene.py` (enforcing ADR-005
+  portability and repo-relative Markdown link resolution) plus deterministic
+  allowlisted fixture DNS in `tests/conftest.py`.
+- **Why (Fast, deterministic verification):** Lazy browser pool initialization keeps
+  non-browser requests and `TestClient` suites free of multi-second Chromium spawn
+  overhead, while allowlisted offline fixture DNS lets SSRF loopback/private-IP and
+  mocked route tests run sub-second in network-isolated sandboxes without masking
+  real defects.
+
+---
+
 ## 2026-08-20 — Adopted gen-3 planning layout
 
 - **Decision:** Migrated to the gen-3 planning workflow. Live status lives ONLY in

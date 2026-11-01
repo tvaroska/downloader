@@ -27,7 +27,9 @@ class PerformanceMetrics:
     total_response_time: float = 0.0
     min_response_time: float = float("inf")
     max_response_time: float = 0.0
-    response_times: deque = field(default_factory=lambda: deque(maxlen=1000))  # Last 1000 requests
+    response_times: deque[float] = field(
+        default_factory=lambda: deque(maxlen=1000)
+    )  # Last 1000 requests
 
     @property
     def avg_response_time(self) -> float:
@@ -58,7 +60,9 @@ class MetricsCollector:
 
     def __init__(self, history_size: int = 10000):
         self.history_size = history_size
-        self._metrics_history: dict[str, deque] = defaultdict(lambda: deque(maxlen=history_size))
+        self._metrics_history: dict[str, deque[MetricSnapshot]] = defaultdict(
+            lambda: deque(maxlen=history_size)
+        )
         self._performance_metrics: dict[str, PerformanceMetrics] = defaultdict(PerformanceMetrics)
         self._start_time = time.time()
 
@@ -146,17 +150,18 @@ class MetricsCollector:
 
     def get_performance_summary(self) -> dict[str, Any]:
         """Get a summary of performance metrics."""
-        summary = {
+        total_requests = sum(perf.request_count for perf in self._performance_metrics.values())
+        total_errors = sum(perf.error_count for perf in self._performance_metrics.values())
+        endpoints: dict[str, dict[str, float | int]] = {}
+        summary: dict[str, Any] = {
             "uptime_seconds": time.time() - self._start_time,
-            "total_requests": sum(
-                perf.request_count for perf in self._performance_metrics.values()
-            ),
-            "total_errors": sum(perf.error_count for perf in self._performance_metrics.values()),
-            "endpoints": {},
+            "total_requests": total_requests,
+            "total_errors": total_errors,
+            "endpoints": endpoints,
         }
 
         for endpoint, perf in self._performance_metrics.items():
-            summary["endpoints"][endpoint] = {
+            endpoints[endpoint] = {
                 "request_count": perf.request_count,
                 "error_count": perf.error_count,
                 "error_rate_percent": perf.error_rate,
@@ -169,14 +174,12 @@ class MetricsCollector:
             }
 
         # Calculate overall metrics
-        if summary["total_requests"] > 0:
-            summary["overall_error_rate_percent"] = (
-                summary["total_errors"] / summary["total_requests"]
-            ) * 100
+        if total_requests > 0:
+            summary["overall_error_rate_percent"] = (total_errors / total_requests) * 100
             total_response_time = sum(
                 perf.total_response_time for perf in self._performance_metrics.values()
             )
-            summary["overall_avg_response_time"] = total_response_time / summary["total_requests"]
+            summary["overall_avg_response_time"] = total_response_time / total_requests
         else:
             summary["overall_error_rate_percent"] = 0.0
             summary["overall_avg_response_time"] = 0.0
@@ -249,15 +252,16 @@ class MetricsCollector:
         performance = self.get_performance_summary()
 
         # Health scoring (0-100)
-        health_score = 100
-        health_details = {"overall_score": health_score, "factors": {}}
+        health_score: float = 100
+        factors: dict[str, dict[str, Any]] = {}
+        health_details: dict[str, Any] = {"overall_score": health_score, "factors": factors}
 
         # Error rate impact (max -30 points)
         error_rate = performance.get("overall_error_rate_percent", 0)
         if error_rate > 5:
             error_penalty = min(30, error_rate * 2)  # 2 points per percent over 5%
             health_score -= error_penalty
-            health_details["factors"]["error_rate"] = {
+            factors["error_rate"] = {
                 "value": error_rate,
                 "penalty": error_penalty,
                 "status": "critical" if error_rate > 10 else "warning",
@@ -270,7 +274,7 @@ class MetricsCollector:
                 25, (avg_response_time - 1.0) * 10
             )  # 10 points per second over 1s
             health_score -= response_penalty
-            health_details["factors"]["response_time"] = {
+            factors["response_time"] = {
                 "value": avg_response_time,
                 "penalty": response_penalty,
                 "status": "critical" if avg_response_time > 3.0 else "warning",
@@ -279,7 +283,7 @@ class MetricsCollector:
         # Uptime bonus
         uptime = performance.get("uptime_seconds", 0)
         if uptime > 86400:  # More than 24 hours
-            health_details["factors"]["uptime"] = {
+            factors["uptime"] = {
                 "value": uptime,
                 "bonus": 0,
                 "status": "good",

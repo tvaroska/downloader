@@ -5,9 +5,10 @@ import logging
 import os
 import time
 import uuid
+from collections.abc import Awaitable
 from datetime import UTC, datetime
 from enum import Enum
-from typing import Any
+from typing import Any, cast
 
 import redis.asyncio as redis
 from pydantic import BaseModel, Field
@@ -71,8 +72,8 @@ class JobManager:
         self.job_ttl = job_ttl
         self.redis_client: redis.Redis | None = None
         self.connection_pool: redis.ConnectionPool | None = None
-        self._background_tasks: dict[str, asyncio.Task] = {}
-        self._last_health_check = 0
+        self._background_tasks: dict[str, asyncio.Task[None]] = {}
+        self._last_health_check: float = 0
         self._health_check_interval = 60  # Check health every minute
 
     async def connect(self):
@@ -92,7 +93,7 @@ class JobManager:
             self.redis_client = redis.Redis(connection_pool=self.connection_pool)
 
             # Test connection and log pool info
-            await self.redis_client.ping()
+            await cast(Awaitable[bool], self.redis_client.ping())
             logger.info(
                 "Connected to Redis with connection pool (max_connections=20) for job management"
             )
@@ -398,12 +399,12 @@ class JobManager:
                 return False
 
             # Perform health check
-            await self.redis_client.ping()
+            await cast(Awaitable[bool], self.redis_client.ping())
 
             # Log connection pool stats if available
             if self.connection_pool:
                 try:
-                    pool_stats = {
+                    pool_stats: dict[str, Any] = {
                         "max_connections": self.connection_pool.max_connections,
                         "connection_pool_class": self.connection_pool.__class__.__name__,
                     }
@@ -439,7 +440,7 @@ class JobManager:
 
         try:
             is_healthy = await self._check_redis_health()
-            stats = {
+            stats: dict[str, Any] = {
                 "status": "healthy" if is_healthy else "unhealthy",
                 "pool_size": self.connection_pool.max_connections,
                 "health_check_interval": self._health_check_interval,

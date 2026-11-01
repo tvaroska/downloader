@@ -2,13 +2,16 @@
 
 import asyncio
 import multiprocessing
+from collections.abc import AsyncIterator, Awaitable
 from contextlib import asynccontextmanager
+from typing import Any, cast
 
 from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
 from slowapi import Limiter, _rate_limit_exceeded_handler
 from slowapi.errors import RateLimitExceeded
 from slowapi.util import get_remote_address
+from starlette.types import ExceptionHandler
 
 from . import __version__
 from .api import router
@@ -44,7 +47,7 @@ logger.info(f"Rate limiter initialized with storage: {storage_uri}")
 
 
 @asynccontextmanager
-async def lifespan(app: FastAPI):
+async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     """Application lifespan events - initialize and cleanup resources."""
     # Store settings in app state (call get_settings() to support test env reloading)
     current_settings = get_settings()
@@ -100,19 +103,14 @@ async def lifespan(app: FastAPI):
         f"Concurrency semaphores initialized (PDF={current_settings.pdf.concurrency}, BATCH={current_settings.batch.concurrency})"
     )
 
-    # Initialize job manager if Redis is configured
+    # Initialize job manager and scheduler if Redis is configured
     if current_settings.redis.redis_uri:
         logger.info("Initializing job manager with Redis...")
         job_manager = JobManager(current_settings.redis.redis_uri)
         await job_manager.connect()
         app.state.job_manager = job_manager
         logger.info("Job manager initialized")
-    else:
-        app.state.job_manager = None
-        logger.info("Job manager not initialized (Redis not configured)")
 
-    # Initialize scheduler if Redis is configured
-    if current_settings.redis.redis_uri:
         logger.info("Initializing scheduler...")
         scheduler_service = SchedulerService(
             redis_uri=current_settings.redis.redis_uri,
@@ -126,6 +124,8 @@ async def lifespan(app: FastAPI):
         from .routes.schedules import set_executor as set_schedules_executor
         from .scheduler import ExecutionStorage, ScheduledJobExecutor
 
+        if job_manager.redis_client is None:
+            raise RuntimeError("JobManager connected without initializing redis_client")
         execution_storage = ExecutionStorage(job_manager.redis_client)
         executor = ScheduledJobExecutor(
             http_client=http_client,
@@ -138,6 +138,8 @@ async def lifespan(app: FastAPI):
         app.state.execution_storage = execution_storage
         logger.info("Scheduler executor initialized")
     else:
+        app.state.job_manager = None
+        logger.info("Job manager not initialized (Redis not configured)")
         app.state.scheduler = None
         app.state.execution_storage = None
         logger.info("Scheduler not initialized (Redis not configured)")
@@ -187,7 +189,10 @@ app = FastAPI(
 
 # Add rate limiter to app state and register exception handler
 app.state.limiter = limiter
-app.add_exception_handler(RateLimitExceeded, _rate_limit_exceeded_handler)
+app.add_exception_handler(
+    RateLimitExceeded,
+    cast(ExceptionHandler, _rate_limit_exceeded_handler),
+)
 
 # Add middleware in order: RateLimit first, then Metrics, then CORS
 app.add_middleware(RateLimitMiddleware, limiter=limiter)
@@ -203,7 +208,7 @@ app.add_middleware(
 
 
 @app.get("/health")
-async def health_check(request: Request):
+async def health_check(request: Request) -> dict[str, Any]:
     """Health check endpoint with configuration-aware monitoring."""
     # Get settings and semaphores from app state
     app_settings = request.app.state.settings
@@ -215,18 +220,18 @@ async def health_check(request: Request):
     batch_limit = app_settings.batch.concurrency
 
     # Check if Redis is available for batch processing
-    job_manager = getattr(request.app.state, "job_manager", None)
+    job_manager: JobManager | None = getattr(request.app.state, "job_manager", None)
     redis_available = job_manager is not None
 
     # Check job manager status
-    job_manager_status = {
+    job_manager_status: dict[str, Any] = {
         "available": redis_available,
     }
 
     if job_manager:
         try:
             if job_manager.redis_client:
-                await job_manager.redis_client.ping()
+                await cast(Awaitable[bool], job_manager.redis_client.ping())
                 job_manager_status["status"] = "connected"
             else:
                 job_manager_status["status"] = "not_connected"
@@ -240,7 +245,7 @@ async def health_check(request: Request):
     batch_in_use = batch_limit - batch_semaphore._value
     batch_util = (batch_in_use / batch_limit) * 100 if batch_limit > 0 else 0
 
-    batch_info = {
+    batch_info: dict[str, Any] = {
         "available": redis_available,
     }
 
@@ -265,8 +270,8 @@ async def health_check(request: Request):
     pdf_available = pdf_generator is not None
 
     # Check scheduler status
-    scheduler = getattr(request.app.state, "scheduler", None)
-    scheduler_status = {
+    scheduler: SchedulerService | None = getattr(request.app.state, "scheduler", None)
+    scheduler_status: dict[str, Any] = {
         "available": scheduler is not None,
     }
     if scheduler:
@@ -274,7 +279,7 @@ async def health_check(request: Request):
     else:
         scheduler_status["reason"] = "Redis connection required"
 
-    health_info = {
+    health_info: dict[str, Any] = {
         "status": "healthy",
         "version": __version__,
         "environment": app_settings.environment,

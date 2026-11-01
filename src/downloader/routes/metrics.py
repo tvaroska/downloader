@@ -3,6 +3,7 @@
 import logging
 import multiprocessing
 from datetime import UTC, datetime
+from typing import Any
 
 from fastapi import APIRouter, Request, Response
 
@@ -46,9 +47,9 @@ async def get_health_score():
 @router.get("/metrics/live")
 async def get_live_metrics(
     request: Request,
-    pdf_semaphore: PDFSemaphoreDep = None,
-    batch_semaphore: BatchSemaphoreDep = None,
-):
+    pdf_semaphore: PDFSemaphoreDep,
+    batch_semaphore: BatchSemaphoreDep,
+) -> dict[str, Any]:
     """Get live system metrics including current concurrency and connection stats."""
     from ..metrics import get_metrics_collector
 

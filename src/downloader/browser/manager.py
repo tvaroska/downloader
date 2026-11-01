@@ -7,7 +7,13 @@ import signal
 from dataclasses import dataclass, field
 from typing import Any
 
-from playwright.async_api import Browser, BrowserContext, async_playwright
+from playwright.async_api import (
+    Browser,
+    BrowserContext,
+    Playwright,
+    ViewportSize,
+    async_playwright,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -82,7 +88,7 @@ class BrowserPool:
         )
         self._all_browsers: set[Browser] = set()
         self._browser_health: dict[Browser, dict[str, Any]] = {}
-        self._playwright = None
+        self._playwright: Playwright | None = None
         self._lock = asyncio.Lock()
         self._closed = False
 
@@ -120,6 +126,8 @@ class BrowserPool:
 
     async def _launch_browser(self) -> Browser:
         """Launch a single browser instance with memory limits."""
+        if self._playwright is None:
+            raise BrowserPoolError("Playwright instance is not initialized")
         return await self._playwright.chromium.launch(
             headless=self.config.headless,
             args=self.config.get_launch_args(),
@@ -319,7 +327,7 @@ class BrowserPool:
         except Exception as e:
             logger.error(f"Error closing browser pool: {e}")
 
-    def get_pool_stats(self) -> dict:
+    def get_pool_stats(self) -> dict[str, Any]:
         """Get browser pool statistics for monitoring."""
         available_count = self._available_browsers.qsize()
         total_usage = sum(stats["usage_count"] for stats in self._browser_health.values())
@@ -339,7 +347,7 @@ class BrowserPool:
         self,
         browser: Browser,
         user_agent: str | None = None,
-        viewport: dict[str, int] | None = None,
+        viewport: ViewportSize | None = None,
     ) -> BrowserContext:
         """Create an isolated browser context with standard settings.
 

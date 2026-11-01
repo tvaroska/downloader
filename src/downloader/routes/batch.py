@@ -300,7 +300,13 @@ async def process_background_batch_job(
         f"[JOB-{job_id}] Starting background batch processing: {len(batch_request.urls)} URLs"
     )
 
-    request_semaphore = asyncio.Semaphore(batch_request.concurrency_limit)
+    concurrency_limit = (
+        batch_request.concurrency_limit if batch_request.concurrency_limit is not None else 10
+    )
+    timeout_per_url = (
+        batch_request.timeout_per_url if batch_request.timeout_per_url is not None else 30
+    )
+    request_semaphore = asyncio.Semaphore(concurrency_limit)
 
     async def process_with_semaphore(url_request: BatchURLRequest, index: int) -> BatchURLResult:
         """Process a single URL with concurrency control."""
@@ -310,7 +316,7 @@ async def process_background_batch_job(
                 result = await process_single_url_in_batch(
                     url_request=url_request,
                     default_format=batch_request.default_format,
-                    timeout=batch_request.timeout_per_url,
+                    timeout=timeout_per_url,
                     request_id=request_id,
                     http_client=http_client,
                     pdf_semaphore=pdf_semaphore,
@@ -367,10 +373,10 @@ async def process_background_batch_job(
 async def submit_batch_job(
     batch_request: BatchRequest,
     request: Request,
-    http_client: HTTPClientDep = None,
+    http_client: HTTPClientDep,
+    batch_semaphore: BatchSemaphoreDep,
+    pdf_semaphore: PDFSemaphoreDep,
     job_manager: JobManagerDep = None,
-    batch_semaphore: BatchSemaphoreDep = None,
-    pdf_semaphore: PDFSemaphoreDep = None,
     api_key: str | None = Depends(get_api_key),
 ) -> JobSubmissionResponse:
     """Submit a batch processing job for background execution."""
