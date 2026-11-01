@@ -305,16 +305,20 @@ async def convert_content_with_playwright_fallback(
     try:
         logger.info(f"🔄 Starting Playwright {output_format} fallback for {url}")
         generator = get_shared_pdf_generator()
-        if not generator or not generator.pool:
+        if not generator:
             raise Exception("PDF generator pool not initialized")
 
-        browser = await generator.pool.get_browser()
+        pool = await generator.ensure_started()
+        if not pool:
+            raise Exception("PDF generator pool not initialized")
+
+        browser = await pool.get_browser()
         context = None
         page = None
 
         try:
             # Create isolated context for this request
-            context = await generator.pool.create_context(browser)
+            context = await pool.create_context(browser)
             page = await context.new_page()
 
             logger.info(f"🌐 Loading page with Playwright: {url}")
@@ -348,8 +352,7 @@ async def convert_content_with_playwright_fallback(
             # Cleanup in reverse order
             if context:
                 await context.close()
-            if generator.pool:
-                await generator.pool.release_browser(browser)
+            await pool.release_browser(browser)
 
     except Exception as e:
         logger.error(f"Playwright {output_format} fallback failed for {url}: {e}")
@@ -380,16 +383,20 @@ async def render_html_with_playwright(
     try:
         logger.info(f"🔄 Starting Playwright HTML rendering for {url}")
         generator = get_shared_pdf_generator()
-        if not generator or not generator.pool:
+        if not generator:
             raise Exception("PDF generator pool not initialized")
 
-        browser = await generator.pool.get_browser()
+        pool = await generator.ensure_started()
+        if not pool:
+            raise Exception("PDF generator pool not initialized")
+
+        browser = await pool.get_browser()
         context = None
         page = None
 
         try:
             # Create isolated context
-            context = await generator.pool.create_context(browser)
+            context = await pool.create_context(browser)
             page = await context.new_page()
 
             logger.info(f"🌐 Loading page with Playwright: {url}")
@@ -430,8 +437,7 @@ async def render_html_with_playwright(
             # Cleanup (same pattern)
             if context:
                 await context.close()
-            if generator.pool:
-                await generator.pool.release_browser(browser)
+            await pool.release_browser(browser)
 
     except Exception as e:
         logger.error(f"Playwright HTML rendering failed for {url}: {e}")

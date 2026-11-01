@@ -8,7 +8,7 @@ Tests for:
 - ScheduledJobExecutor content processing
 """
 
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
@@ -171,8 +171,8 @@ class TestScheduleModelValidation:
             format="text",
             headers=None,
             enabled=True,
-            created_at=datetime.now(timezone.utc),
-            next_run_time=datetime.now(timezone.utc) + timedelta(hours=1),
+            created_at=datetime.now(UTC),
+            next_run_time=datetime.now(UTC) + timedelta(hours=1),
         )
         assert response.id == "uuid-123"
         assert response.name == "Test Schedule"
@@ -184,8 +184,8 @@ class TestScheduleModelValidation:
             execution_id="exec-123",
             schedule_id="sched-456",
             status=ExecutionStatus.COMPLETED,
-            started_at=datetime.now(timezone.utc),
-            completed_at=datetime.now(timezone.utc),
+            started_at=datetime.now(UTC),
+            completed_at=datetime.now(UTC),
             duration=1.5,
             success=True,
             content_size=1024,
@@ -204,7 +204,7 @@ class TestScheduleModelValidation:
                 execution_id="exec-123",
                 schedule_id="sched-456",
                 status=ExecutionStatus.COMPLETED,
-                started_at=datetime.now(timezone.utc),
+                started_at=datetime.now(UTC),
                 success=True,
                 attempt=0,
             )
@@ -376,8 +376,8 @@ class TestExecutionStorageOperations:
             execution_id="exec-123",
             schedule_id="sched-456",
             status=ExecutionStatus.COMPLETED,
-            started_at=datetime.now(timezone.utc),
-            completed_at=datetime.now(timezone.utc),
+            started_at=datetime.now(UTC),
+            completed_at=datetime.now(UTC),
             duration=1.5,
             success=True,
             content_size=1024,

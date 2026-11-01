@@ -37,6 +37,7 @@ def mock_playwright_for_rendering():
     mock_pool.create_context = AsyncMock(return_value=mock_context)
 
     mock_generator.pool = mock_pool
+    mock_generator.ensure_started = AsyncMock(side_effect=lambda: mock_generator.pool)
 
     with patch(
         "src.downloader.content_converter.get_shared_pdf_generator",
@@ -268,7 +269,7 @@ class TestBrowserRenderingTimeouts:
         """Test handling of page navigation timeout."""
         mock_generator, mock_browser, mock_context, mock_page = mock_playwright_for_rendering
 
-        mock_page.goto.side_effect = asyncio.TimeoutError("Page load timeout")
+        mock_page.goto.side_effect = TimeoutError("Page load timeout")
 
         with pytest.raises((asyncio.TimeoutError, Exception)):
             await render_html_with_playwright("https://example.com/slow-page")
@@ -281,7 +282,7 @@ class TestBrowserRenderingTimeouts:
         mock_generator, mock_browser, mock_context, mock_page = mock_playwright_for_rendering
 
         mock_page.goto.return_value = AsyncMock(status=200)
-        mock_page.wait_for_load_state.side_effect = asyncio.TimeoutError("Network idle timeout")
+        mock_page.wait_for_load_state.side_effect = TimeoutError("Network idle timeout")
 
         with pytest.raises((asyncio.TimeoutError, Exception)):
             await render_html_with_playwright("https://example.com/ajax-heavy")

@@ -3,6 +3,7 @@
 import asyncio
 import base64
 import json
+from datetime import UTC
 from unittest.mock import AsyncMock, patch
 
 import pytest
@@ -531,7 +532,7 @@ class TestProcessSingleUrlInBatch:
         """Test asyncio timeout error handling."""
         url_request = BatchURLRequest(url="https://slow.com", format="text")
         mock_http_client = AsyncMock()
-        mock_http_client.download.side_effect = asyncio.TimeoutError()
+        mock_http_client.download.side_effect = TimeoutError()
 
         result = await process_single_url_in_batch(
             url_request=url_request,
@@ -1012,7 +1013,7 @@ class TestBatchEndpointEdgeCases:
 
     def test_get_job_results_pending(self, api_client, mock_job_manager):
         """Test job results when job is still pending."""
-        from datetime import datetime, timezone
+        from datetime import datetime
         from unittest.mock import MagicMock
 
         job_info = MagicMock()
@@ -1020,7 +1021,7 @@ class TestBatchEndpointEdgeCases:
         job_info.status = JobStatus.PENDING
         job_info.results_available = False
         job_info.progress = 0
-        job_info.created_at = datetime.now(timezone.utc)
+        job_info.created_at = datetime.now(UTC)
         job_info.started_at = None
         job_info.completed_at = None
         job_info.total_urls = 1
@@ -1047,7 +1048,7 @@ class TestBatchEndpointEdgeCases:
 
     def test_get_job_results_failed(self, api_client, mock_job_manager):
         """Test job results when job has failed."""
-        from datetime import datetime, timezone
+        from datetime import datetime
         from unittest.mock import MagicMock
 
         job_info = MagicMock()
@@ -1056,8 +1057,8 @@ class TestBatchEndpointEdgeCases:
         job_info.results_available = False
         job_info.progress = 50
         job_info.error_message = "Something went wrong"
-        job_info.created_at = datetime.now(timezone.utc)
-        job_info.started_at = datetime.now(timezone.utc)
+        job_info.created_at = datetime.now(UTC)
+        job_info.started_at = datetime.now(UTC)
         job_info.completed_at = None
         job_info.total_urls = 2
         job_info.processed_urls = 1
@@ -1082,7 +1083,7 @@ class TestBatchEndpointEdgeCases:
 
     def test_get_job_results_cancelled(self, api_client, mock_job_manager):
         """Test job results when job was cancelled."""
-        from datetime import datetime, timezone
+        from datetime import datetime
         from unittest.mock import MagicMock
 
         job_info = MagicMock()
@@ -1091,8 +1092,8 @@ class TestBatchEndpointEdgeCases:
         job_info.results_available = False
         job_info.progress = 25
         job_info.error_message = None
-        job_info.created_at = datetime.now(timezone.utc)
-        job_info.started_at = datetime.now(timezone.utc)
+        job_info.created_at = datetime.now(UTC)
+        job_info.started_at = datetime.now(UTC)
         job_info.completed_at = None
         job_info.total_urls = 4
         job_info.processed_urls = 1
@@ -1144,7 +1145,7 @@ class TestBatchEndpointEdgeCases:
 
     def test_cancel_job_already_completed(self, api_client, mock_job_manager):
         """Test job cancellation when job is already completed."""
-        from datetime import datetime, timezone
+        from datetime import datetime
         from unittest.mock import MagicMock
 
         job_info = MagicMock()
@@ -1153,9 +1154,9 @@ class TestBatchEndpointEdgeCases:
         job_info.results_available = True
         job_info.progress = 100
         job_info.error_message = None
-        job_info.created_at = datetime.now(timezone.utc)
-        job_info.started_at = datetime.now(timezone.utc)
-        job_info.completed_at = datetime.now(timezone.utc)
+        job_info.created_at = datetime.now(UTC)
+        job_info.started_at = datetime.now(UTC)
+        job_info.completed_at = datetime.now(UTC)
         job_info.total_urls = 2
         job_info.processed_urls = 2
         job_info.successful_urls = 2

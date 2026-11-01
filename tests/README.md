@@ -217,9 +217,8 @@ tests/
 │   ├── env_fixtures.py
 │   └── mock_fixtures.py
 │
-├── conftest.py         # Root pytest configuration
-├── pytest.ini          # Pytest settings
-└── README.md           # This file
+├── conftest.py         # Root pytest configuration & offline fixture DNS
+└── README.md           # This file (pytest markers & options live in root pyproject.toml)
 ```
 
 ## Fixtures
@@ -239,43 +238,17 @@ from tests.fixtures.env_fixtures import env_with_redis
 
 ## CI/CD Integration
 
-### GitHub Actions Example
+### Google Cloud Build (`cloudbuild.yaml`)
 
-```yaml
-# .github/workflows/test.yml
-name: Tests
+Continuous integration and tag releases run via [`../cloudbuild.yaml`](../cloudbuild.yaml) (triggers defined in [`../ci/trigger.yaml`](../ci/trigger.yaml)):
 
-on: [push, pull_request]
-
-jobs:
-  smoke:
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v3
-      - name: Run smoke tests
-        run: |
-          pip install -e .
-          pytest -m smoke
-
-  unit:
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v3
-      - name: Run unit tests
-        run: |
-          pip install -e .
-          pytest -m unit
-
-  integration:
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v3
-      - name: Install Playwright
-        run: playwright install chromium
-      - name: Run integration tests
-        run: |
-          pip install -e .
-          pytest -m integration
+```bash
+# Exact fast verification steps executed in cloudbuild.yaml:
+uv sync --frozen
+uv run --no-sync ruff check src/ tests/ examples/
+uv run --no-sync ruff format --check src/ tests/ examples/
+uv run --no-sync mypy src/
+uv run --no-sync pytest -m "not (integration or e2e or network or requires_redis or requires_playwright)" -v --timeout=30
 ```
 
 ## Writing New Tests

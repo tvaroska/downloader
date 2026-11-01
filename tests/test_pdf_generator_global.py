@@ -4,7 +4,13 @@ from unittest.mock import AsyncMock, patch
 
 import pytest
 
-from src.downloader.pdf_generator import generate_pdf_from_url, get_pdf_generator
+from src.downloader.pdf_generator import (
+    cleanup_pdf_generator,
+    generate_pdf_from_url,
+    get_pdf_generator,
+    get_shared_pdf_generator,
+    set_shared_pdf_generator,
+)
 
 
 class TestGlobalPDFFunctions:
@@ -53,3 +59,18 @@ class TestGlobalPDFFunctions:
         async with get_pdf_generator() as generator:
             assert generator == existing_instance
             existing_instance.start.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_shared_pdf_generator_registration_and_cleanup(self):
+        """Test set_shared_pdf_generator unifies get_shared_pdf_generator and cleanup."""
+        mock_generator = AsyncMock()
+        set_shared_pdf_generator(mock_generator)
+        assert get_shared_pdf_generator() is mock_generator
+
+        async with get_pdf_generator() as yielded:
+            assert yielded is mock_generator
+            mock_generator.start.assert_not_called()
+
+        await cleanup_pdf_generator()
+        mock_generator.close.assert_called_once()
+        assert get_shared_pdf_generator() is None

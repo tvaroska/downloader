@@ -1,6 +1,7 @@
 """Tests for PDF generator browser pool functionality."""
 
-from unittest.mock import AsyncMock
+import asyncio
+from unittest.mock import AsyncMock, patch
 
 import pytest
 
@@ -128,3 +129,32 @@ class TestPDFGeneratorBrowserPool:
 
         context.close.assert_called_once()
         pool_instance.release_browser.assert_called_once_with(browser)
+
+    @pytest.mark.asyncio
+    async def test_ensure_started_concurrent_waits_for_pool_start(self):
+        """Concurrent ensure_started() callers must wait until BrowserPool.start() finishes."""
+        started_done = False
+        pool_instance = AsyncMock()
+
+        async def delayed_start():
+            nonlocal started_done
+            await asyncio.sleep(0.05)
+            started_done = True
+
+        pool_instance.start = AsyncMock(side_effect=delayed_start)
+
+        async def call_ensure_started(gen: PlaywrightPDFGenerator):
+            pool = await gen.ensure_started()
+            assert started_done, "ensure_started() returned before BrowserPool.start() completed"
+            return pool
+
+        with patch("src.downloader.pdf_generator.BrowserPool", return_value=pool_instance):
+            generator = PlaywrightPDFGenerator()
+            first_pool, second_pool = await asyncio.gather(
+                call_ensure_started(generator),
+                call_ensure_started(generator),
+            )
+
+        assert first_pool is pool_instance
+        assert second_pool is pool_instance
+        pool_instance.start.assert_called_once()

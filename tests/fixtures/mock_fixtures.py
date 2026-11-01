@@ -1,6 +1,6 @@
 """Mock fixtures for external dependencies."""
 
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
@@ -116,7 +116,7 @@ def mock_playwright():
 
         def create_browser():
             browser = AsyncMock()
-            browser.is_connected.return_value = True
+            browser.is_connected = MagicMock(return_value=True)
             browsers.append(browser)
             return browser
 
@@ -143,6 +143,7 @@ def mock_browser_pool():
         mock_pool_class.return_value = pool_instance
 
         browser = AsyncMock()
+        browser.is_connected = MagicMock(return_value=True)
         pool_instance.get_browser = AsyncMock(return_value=browser)
         pool_instance.release_browser = AsyncMock()
         pool_instance.create_context = AsyncMock()
@@ -186,13 +187,13 @@ def mock_apscheduler_job():
     job = MagicMock()
     job.id = "test-schedule-id"
     job.name = "Test Schedule"
-    job.next_run_time = datetime.now(timezone.utc) + timedelta(hours=1)
+    job.next_run_time = datetime.now(UTC) + timedelta(hours=1)
     job.kwargs = {
         "schedule_id": "test-schedule-id",
         "url": "https://example.com",
         "format": "text",
         "headers": None,
-        "created_at": datetime.now(timezone.utc).isoformat(),
+        "created_at": datetime.now(UTC).isoformat(),
     }
     job.trigger = MagicMock()
     # Simulating APScheduler CronTrigger fields (month, day, week, day_of_week, hour, minute, second)
@@ -226,8 +227,8 @@ def sample_schedule_execution():
         execution_id="exec-123",
         schedule_id="schedule-456",
         status=ExecutionStatus.COMPLETED,
-        started_at=datetime.now(timezone.utc) - timedelta(seconds=5),
-        completed_at=datetime.now(timezone.utc),
+        started_at=datetime.now(UTC) - timedelta(seconds=5),
+        completed_at=datetime.now(UTC),
         duration=5.0,
         success=True,
         content_size=1024,
@@ -243,8 +244,8 @@ def sample_failed_execution():
         execution_id="exec-789",
         schedule_id="schedule-456",
         status=ExecutionStatus.FAILED,
-        started_at=datetime.now(timezone.utc) - timedelta(seconds=2),
-        completed_at=datetime.now(timezone.utc),
+        started_at=datetime.now(UTC) - timedelta(seconds=2),
+        completed_at=datetime.now(UTC),
         duration=2.0,
         success=False,
         content_size=None,

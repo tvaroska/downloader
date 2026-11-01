@@ -4,7 +4,7 @@ import asyncio
 import base64
 import json
 import logging
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 from typing import Any
 
 from fastapi import APIRouter, Depends, HTTPException, Path, Request, Response
@@ -204,7 +204,7 @@ async def process_single_url_in_batch(
             status_code=400,
         )
 
-    except asyncio.TimeoutError:
+    except TimeoutError:
         duration = asyncio.get_event_loop().time() - start_time
         logger.error(f"[{request_id}] Request timeout after {timeout}s")
         return BatchURLResult(
@@ -414,13 +414,13 @@ async def submit_batch_job(
         estimated_completion = None
         if estimated_seconds < 300:
             estimated_completion = (
-                datetime.now(timezone.utc) + timedelta(seconds=estimated_seconds)
+                datetime.now(UTC) + timedelta(seconds=estimated_seconds)
             ).isoformat()
 
         return JobSubmissionResponse(
             job_id=job_id,
             status="pending",
-            created_at=datetime.now(timezone.utc).isoformat(),
+            created_at=datetime.now(UTC).isoformat(),
             total_urls=len(batch_request.urls),
             estimated_completion=estimated_completion,
         )

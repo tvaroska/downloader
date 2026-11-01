@@ -13,12 +13,15 @@ import sys
 from pathlib import Path
 from typing import Any
 
-from pythonjsonlogger import jsonlogger
+try:
+    from pythonjsonlogger.json import JsonFormatter
+except ImportError:  # pragma: no cover
+    from pythonjsonlogger.jsonlogger import JsonFormatter  # type: ignore[no-redef]
 
 from .config import LoggingConfig
 
 
-class CustomJsonFormatter(jsonlogger.JsonFormatter):
+class CustomJsonFormatter(JsonFormatter):
     """Custom JSON formatter that adds additional context fields."""
 
     def add_fields(

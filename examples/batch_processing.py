@@ -120,7 +120,7 @@ async def process_batch_request(urls: list[dict], batch_name: str, **kwargs) -> 
                     "status_code": response.status_code,
                 }
 
-    except asyncio.TimeoutError:
+    except TimeoutError:
         print(f"⏰ Batch '{batch_name}' timed out")
         return {"error": "Request timeout"}
     except Exception as e:

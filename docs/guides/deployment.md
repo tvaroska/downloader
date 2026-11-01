@@ -201,10 +201,10 @@ When `DOWNLOADER_KEY` is set, all API requests require authentication:
 
 ```bash
 # Using Bearer token
-curl -H "Authorization: Bearer your-api-key" http://localhost:80/download?url=...
+curl -H "Authorization: Bearer your-api-key" http://localhost:80/https://example.com
 
 # Using X-API-Key header
-curl -H "X-API-Key: your-api-key" http://localhost:80/download?url=...
+curl -H "X-API-Key: your-api-key" http://localhost:80/https://example.com
 ```
 
 ### SSRF Protection

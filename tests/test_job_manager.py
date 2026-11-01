@@ -1,7 +1,7 @@
 """Tests for the JobManager class."""
 
 import asyncio
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
@@ -118,7 +118,7 @@ class TestJobManager:
         job_info = JobInfo(
             job_id=job_id,
             status=JobStatus.RUNNING,
-            created_at=datetime.now(timezone.utc),
+            created_at=datetime.now(UTC),
             request_data={},
         )
         mock_redis_client.get.return_value = job_info.model_dump_json()
@@ -143,7 +143,7 @@ class TestJobManager:
         job_info = JobInfo(
             job_id=job_id,
             status=JobStatus.PENDING,
-            created_at=datetime.now(timezone.utc),
+            created_at=datetime.now(UTC),
             request_data={},
         )
         mock_redis_client.get.return_value = job_info.model_dump_json()
@@ -166,12 +166,18 @@ class TestJobManager:
     @patch("asyncio.create_task")
     async def test_start_background_job(self, mock_create_task, job_manager):
         """Test starting a background job."""
+
+        def _fake_create_task(coro):
+            coro.close()
+            return MagicMock()
+
+        mock_create_task.side_effect = _fake_create_task
         job_id = "test_job_id"
         job_processor = AsyncMock(return_value=([], {}))
         job_info = JobInfo(
             job_id=job_id,
             status=JobStatus.PENDING,
-            created_at=datetime.now(timezone.utc),
+            created_at=datetime.now(UTC),
             request_data={},
         )
         job_manager.redis_client.get.return_value = job_info.model_dump_json()
@@ -200,7 +206,7 @@ class TestJobManager:
         job_info = JobInfo(
             job_id=job_id,
             status=JobStatus.RUNNING,
-            created_at=datetime.now(timezone.utc),
+            created_at=datetime.now(UTC),
             request_data={},
         )
         job_manager.redis_client.get.return_value = job_info.model_dump_json()
@@ -335,8 +341,8 @@ class TestJobManagerResults:
     async def test_store_job_results_success(self, job_manager, mock_redis_client):
         """Test successful job results storage with duration calculation."""
         job_id = "test_job_id"
-        started = datetime.now(timezone.utc) - timedelta(seconds=10)
-        completed = datetime.now(timezone.utc)
+        started = datetime.now(UTC) - timedelta(seconds=10)
+        completed = datetime.now(UTC)
 
         job_info = JobInfo(
             job_id=job_id,
@@ -381,7 +387,7 @@ class TestJobManagerResults:
         job_info = JobInfo(
             job_id=job_id,
             status=JobStatus.COMPLETED,
-            created_at=datetime.now(timezone.utc),
+            created_at=datetime.now(UTC),
             started_at=None,  # No started_at
             completed_at=None,  # No completed_at
             request_data={},
@@ -398,7 +404,7 @@ class TestJobManagerResults:
     async def test_get_job_results_success(self, job_manager, mock_redis_client):
         """Test successful job results retrieval."""
         job_id = "test_job_id"
-        now = datetime.now(timezone.utc)
+        now = datetime.now(UTC)
         job_result = JobResult(
             job_id=job_id,
             status=JobStatus.COMPLETED,
@@ -454,7 +460,7 @@ class TestJobManagerRetryLogic:
         job_info = JobInfo(
             job_id=job_id,
             status=JobStatus.PENDING,
-            created_at=datetime.now(timezone.utc),
+            created_at=datetime.now(UTC),
             request_data={},
         )
         mock_redis_client.get.return_value = job_info.model_dump_json()
@@ -497,7 +503,7 @@ class TestJobManagerRetryLogic:
         job_info = JobInfo(
             job_id=job_id,
             status=JobStatus.PENDING,
-            created_at=datetime.now(timezone.utc),
+            created_at=datetime.now(UTC),
             request_data={},
         )
         mock_redis_client.get.return_value = job_info.model_dump_json()
@@ -537,7 +543,7 @@ class TestJobManagerRetryLogic:
         job_info = JobInfo(
             job_id=job_id,
             status=JobStatus.PENDING,
-            created_at=datetime.now(timezone.utc),
+            created_at=datetime.now(UTC),
             started_at=None,  # Not yet started
             request_data={},
         )
@@ -579,7 +585,7 @@ class TestJobManagerBackgroundLifecycle:
         job_info = JobInfo(
             job_id=job_id,
             status=JobStatus.PENDING,
-            created_at=datetime.now(timezone.utc),
+            created_at=datetime.now(UTC),
             request_data={},
         )
         mock_redis_client.get.return_value = job_info.model_dump_json()
@@ -611,7 +617,7 @@ class TestJobManagerBackgroundLifecycle:
         job_info = JobInfo(
             job_id=job_id,
             status=JobStatus.PENDING,
-            created_at=datetime.now(timezone.utc),
+            created_at=datetime.now(UTC),
             request_data={},
         )
         mock_redis_client.get.return_value = job_info.model_dump_json()
@@ -642,7 +648,7 @@ class TestJobManagerBackgroundLifecycle:
         job_info = JobInfo(
             job_id=job_id,
             status=JobStatus.PENDING,
-            created_at=datetime.now(timezone.utc),
+            created_at=datetime.now(UTC),
             request_data={},
         )
         mock_redis_client.get.return_value = job_info.model_dump_json()
@@ -674,7 +680,7 @@ class TestJobManagerBackgroundLifecycle:
         job_info = JobInfo(
             job_id=job_id,
             status=JobStatus.PENDING,
-            created_at=datetime.now(timezone.utc),
+            created_at=datetime.now(UTC),
             request_data={},
         )
         mock_redis_client.get.return_value = job_info.model_dump_json()

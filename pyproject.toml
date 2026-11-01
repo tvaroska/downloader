@@ -22,26 +22,13 @@ dependencies = [
     "apscheduler>=3.10.0",
 ]
 
-[project.optional-dependencies]
-dev = [
-    "pytest>=7.4.0",
-    "pytest-asyncio>=0.21.0",
-    "pytest-cov>=4.1.0",
-    "ruff>=0.1.0",
-    "mypy>=1.5.0",
-]
-
 [build-system]
 requires = ["hatchling"]
 build-backend = "hatchling.build"
 
-[tool.black]
-line-length = 100
-target-version = ["py310"]
-
 [tool.ruff]
 line-length = 100
-target-version = "py310"
+target-version = "py313"
 
 [tool.ruff.lint]
 select = [
@@ -67,12 +54,40 @@ skip-magic-trailing-comma = false
 line-ending = "auto"
 
 [tool.pytest.ini_options]
+minversion = "8.0"
 testpaths = ["tests"]
+python_files = ["test_*.py"]
+python_classes = ["Test*"]
+python_functions = ["test_*"]
+pythonpath = ["."]
 asyncio_mode = "auto"
-pythonpath = ["src"]
+timeout = 30
+timeout_method = "thread"
+addopts = [
+    "-v",
+    "--strict-markers",
+    "--tb=short",
+    "--show-capture=no",
+    "-ra",
+]
+markers = [
+    "smoke: Fast sanity checks (<3s total) - run on every commit",
+    "integration: Tests with Playwright/Redis dependencies (~15s)",
+    "e2e: Full system tests with Docker (~60s)",
+    "slow: Known slow tests (>5s individual)",
+    "network: Tests that require network access to external URLs",
+    "requires_redis: Tests requiring Redis instance",
+    "requires_playwright: Tests requiring Playwright browser",
+    "unit: Pure unit tests with no external dependencies",
+]
+filterwarnings = [
+    "ignore::DeprecationWarning:pythonjsonlogger.*",
+]
+log_cli = false
+log_cli_level = "INFO"
 
 [tool.mypy]
-python_version = "3.10"
+python_version = "3.13"
 warn_unused_configs = true
 disallow_untyped_defs = false
 check_untyped_defs = false

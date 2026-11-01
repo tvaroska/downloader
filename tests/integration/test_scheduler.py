@@ -8,7 +8,7 @@ Tests for:
 - Execution history
 """
 
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
@@ -87,7 +87,7 @@ class TestScheduleRoutes:
         """Test POST /schedules creates a schedule successfully."""
         mock_job = MagicMock()
         mock_job.id = "test-schedule-id"
-        mock_job.next_run_time = datetime.now(timezone.utc) + timedelta(hours=1)
+        mock_job.next_run_time = datetime.now(UTC) + timedelta(hours=1)
         override_scheduler._scheduler.add_job.return_value = mock_job
 
         request_data = {
@@ -157,13 +157,13 @@ class TestScheduleRoutes:
         mock_job = MagicMock()
         mock_job.id = "sched-123"
         mock_job.name = "Test Job"
-        mock_job.next_run_time = datetime.now(timezone.utc) + timedelta(hours=1)
+        mock_job.next_run_time = datetime.now(UTC) + timedelta(hours=1)
         mock_job.kwargs = {
             "schedule_id": "sched-123",
             "url": "https://example.com",
             "format": "text",
             "headers": None,
-            "created_at": datetime.now(timezone.utc).isoformat(),
+            "created_at": datetime.now(UTC).isoformat(),
         }
         mock_job.trigger = MagicMock()
         mock_job.trigger.fields = [MagicMock()] * 7  # APScheduler fields
@@ -186,13 +186,13 @@ class TestScheduleRoutes:
         mock_job = MagicMock()
         mock_job.id = "sched-123"
         mock_job.name = "Test Job"
-        mock_job.next_run_time = datetime.now(timezone.utc) + timedelta(hours=1)
+        mock_job.next_run_time = datetime.now(UTC) + timedelta(hours=1)
         mock_job.kwargs = {
             "schedule_id": "sched-123",
             "url": "https://example.com",
             "format": "markdown",
             "headers": {"Authorization": "Bearer token"},
-            "created_at": datetime.now(timezone.utc).isoformat(),
+            "created_at": datetime.now(UTC).isoformat(),
         }
         mock_job.trigger = MagicMock()
         mock_job.trigger.fields = [MagicMock()] * 7
@@ -258,7 +258,7 @@ class TestScheduleRoutes:
         """Test creating schedule with custom headers."""
         mock_job = MagicMock()
         mock_job.id = "test-schedule-id"
-        mock_job.next_run_time = datetime.now(timezone.utc) + timedelta(hours=1)
+        mock_job.next_run_time = datetime.now(UTC) + timedelta(hours=1)
         override_scheduler._scheduler.add_job.return_value = mock_job
 
         request_data = {
@@ -279,7 +279,7 @@ class TestScheduleRoutes:
         """Test that all output formats are accepted."""
         mock_job = MagicMock()
         mock_job.id = "test-schedule-id"
-        mock_job.next_run_time = datetime.now(timezone.utc) + timedelta(hours=1)
+        mock_job.next_run_time = datetime.now(UTC) + timedelta(hours=1)
         override_scheduler._scheduler.add_job.return_value = mock_job
 
         valid_formats = ["text", "html", "markdown", "pdf", "json", "raw"]
@@ -369,8 +369,8 @@ class TestExecutionHistory:
             execution_id="exec-1",
             schedule_id="sched-123",
             status=ExecutionStatus.COMPLETED,
-            started_at=datetime.now(timezone.utc) - timedelta(minutes=5),
-            completed_at=datetime.now(timezone.utc) - timedelta(minutes=4),
+            started_at=datetime.now(UTC) - timedelta(minutes=5),
+            completed_at=datetime.now(UTC) - timedelta(minutes=4),
             duration=60.0,
             success=True,
             content_size=1024,
@@ -877,8 +877,8 @@ class TestSchedulePersistence:
             job = scheduler_service.get_job("test-job-4")
             assert job.next_run_time is not None
             # Next run should be in the future (within ~1 minute)
-            assert job.next_run_time > datetime.now(timezone.utc)
-            assert job.next_run_time < datetime.now(timezone.utc) + timedelta(minutes=2)
+            assert job.next_run_time > datetime.now(UTC)
+            assert job.next_run_time < datetime.now(UTC) + timedelta(minutes=2)
         finally:
             await scheduler_service.shutdown()
 

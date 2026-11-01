@@ -2,7 +2,7 @@
 
 import logging
 import multiprocessing
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 
 from fastapi import APIRouter, Request, Response
 
@@ -79,7 +79,7 @@ async def get_live_metrics(
         http_stats = {"status": "error", "error": str(e)}
 
     return {
-        "timestamp": datetime.now(timezone.utc).isoformat(),
+        "timestamp": datetime.now(UTC).isoformat(),
         "concurrency": {
             "pdf": {
                 "limit": pdf_limit,

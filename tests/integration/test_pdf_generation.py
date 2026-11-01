@@ -71,12 +71,26 @@ class TestPlaywrightPDFGenerator:
         playwright_instance.stop.assert_called_once()
 
     @pytest.mark.asyncio
-    async def test_generate_pdf_not_initialized(self):
-        """Test PDF generation without initialization."""
-        generator = PlaywrightPDFGenerator()
+    async def test_generate_pdf_lazy_initializes_pool(self, mock_browser_pool):
+        """Test PDF generation lazily initializes browser pool when not yet started."""
+        pool_instance, browser = mock_browser_pool
 
-        with pytest.raises(PDFGeneratorError, match="Browser pool not initialized"):
-            await generator.generate_pdf("https://example.com")
+        context = AsyncMock()
+        page = AsyncMock()
+        browser.new_context = AsyncMock(return_value=context)
+        context.new_page = AsyncMock(return_value=page)
+        response = AsyncMock(status=200, status_text="OK")
+        page.goto = AsyncMock(return_value=response)
+        page.pdf = AsyncMock(return_value=b"%PDF-1.4 lazy")
+
+        generator = PlaywrightPDFGenerator()
+        assert generator.pool is None
+
+        result = await generator.generate_pdf("https://example.com")
+
+        assert result == b"%PDF-1.4 lazy"
+        assert generator.pool is pool_instance
+        pool_instance.start.assert_called_once()
 
 
 @pytest.mark.integration

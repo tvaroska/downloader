@@ -1,6 +1,6 @@
 """Tests for the job-related API endpoints."""
 
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 
 from src.downloader.dependencies import get_job_manager_dependency
 from src.downloader.job_manager import JobInfo, JobResult, JobStatus
@@ -15,7 +15,7 @@ class TestJobEndpoints:
             job_id=job_id,
             status=JobStatus.RUNNING,
             progress=50,
-            created_at=datetime.now(timezone.utc),
+            created_at=datetime.now(UTC),
             request_data={},
         )
         mock_job_manager.get_job_info.return_value = job_info
@@ -57,7 +57,7 @@ class TestJobEndpoints:
             job_id=job_id,
             status=JobStatus.COMPLETED,
             results_available=True,
-            created_at=datetime.now(timezone.utc),
+            created_at=datetime.now(UTC),
             request_data={},
         )
         job_result = JobResult(
@@ -66,8 +66,8 @@ class TestJobEndpoints:
             total_duration=10.5,
             results=[{"success": True}],
             summary={},
-            created_at=datetime.now(timezone.utc),
-            completed_at=datetime.now(timezone.utc),
+            created_at=datetime.now(UTC),
+            completed_at=datetime.now(UTC),
         )
         mock_job_manager.get_job_info.return_value = job_info
         mock_job_manager.get_job_results.return_value = job_result
@@ -92,7 +92,7 @@ class TestJobEndpoints:
             job_id=job_id,
             status=JobStatus.RUNNING,
             results_available=False,
-            created_at=datetime.now(timezone.utc),
+            created_at=datetime.now(UTC),
             request_data={},
         )
         mock_job_manager.get_job_info.return_value = job_info
@@ -114,7 +114,7 @@ class TestJobEndpoints:
         job_info = JobInfo(
             job_id=job_id,
             status=JobStatus.RUNNING,
-            created_at=datetime.now(timezone.utc),
+            created_at=datetime.now(UTC),
             request_data={},
         )
         mock_job_manager.get_job_info.return_value = job_info

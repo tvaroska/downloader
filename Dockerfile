@@ -1,12 +1,15 @@
 # Optimized production image
 FROM python:3.13-slim
 
+COPY --from=ghcr.io/astral-sh/uv:0.9.1 /uv /uvx /bin/
+
 # Set environment variables
 ENV PYTHONUNBUFFERED=1 \
     PYTHONDONTWRITEBYTECODE=1 \
-    PIP_NO_CACHE_DIR=1 \
-    PIP_DISABLE_PIP_VERSION_CHECK=1 \
-    PLAYWRIGHT_BROWSERS_PATH=/usr/local/share/playwright/browsers
+    UV_COMPILE_BYTECODE=1 \
+    UV_LINK_MODE=copy \
+    PLAYWRIGHT_BROWSERS_PATH=/usr/local/share/playwright/browsers \
+    PATH="/app/.venv/bin:$PATH"
 
 # Install system dependencies and build tools
 RUN apt-get update && apt-get install -y --no-install-recommends \
@@ -21,12 +24,12 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 
 WORKDIR /app
 
-# Copy project files for dependency installation
-COPY pyproject.toml README.md ./
+# Copy locked project metadata and source for deterministic dependency installation
+COPY pyproject.toml uv.lock README.md ./
 COPY src/ ./src/
 
-# Install Python dependencies from pyproject.toml (cleaner than hardcoded versions)
-RUN pip install --no-cache-dir . \
+# Install locked Python dependencies and Playwright Chromium
+RUN uv sync --frozen --no-dev --no-editable \
     && playwright install chromium \
     && playwright install-deps chromium \
     && apt-get update \

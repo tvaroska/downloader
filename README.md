@@ -41,6 +41,8 @@ Accept: {format}
 | `application/json` | JSON | Base64 content with metadata |
 | *No Accept header* | **Plain Text (Default)** | **Default format returns extracted article text** |
 
+> **Single- vs Multi-Format `Accept` Negotiation:** Requesting a single MIME type returns raw format bytes directly (`text/plain`, `text/markdown`, `text/html`, `application/pdf`, or the `application/json` envelope). Requesting multiple MIME types (for example `Accept: text/html, text/markdown`) returns a JSON object keyed by MIME type (`{"text/html": "...", "text/markdown": "..."}`).
+
 ### Background Batch Processing
 
 Submit jobs for processing multiple URLs asynchronously with progress tracking.
@@ -259,13 +261,13 @@ curl -X POST http://localhost:8000/batch \
 ### Using Docker
 
 ```bash
-# Run without authentication
-docker run -p 8000:8000 ghcr.io/tvaroska/downloader
+# Run without authentication (container listens on port 80)
+docker run -p 8000:80 us-central1-docker.pkg.dev/sites-470716/containers/downloader:latest
 
 # Run with API key and Redis
 docker run -e DOWNLOADER_KEY=your-secret-key \
   -e REDIS_URI=redis://host.docker.internal:6379 \
-  -p 8000:8000 ghcr.io/tvaroska/downloader
+  -p 8000:80 us-central1-docker.pkg.dev/sites-470716/containers/downloader:latest
 ```
 
 ## 📖 Usage Examples
@@ -308,26 +310,29 @@ curl -H "Accept: text/html" \
 
 ## 🧪 Testing
 
-The project uses a 3-tier test strategy for fast CI/CD:
+The project uses a 4-marker pytest strategy (`smoke`, `unit`, `integration`, `e2e`) for fast verification:
 
 ```bash
 # Quick smoke tests (<3s) - for rapid feedback
-uv run pytest -m smoke -v
+uv run --no-sync pytest -m smoke -v
 
-# Integration tests (~15s) - for component testing
-uv run pytest -m integration -v
+# Fast offline gate (smoke + unit)
+uv run --no-sync pytest -m "smoke or unit" -v
 
-# Full E2E tests (~60s) - for comprehensive validation
-uv run pytest -m e2e -v
+# Integration tests (~15s) - for component & Playwright testing
+uv run --no-sync pytest -m integration -v
+
+# Full E2E tests (~60s) - for comprehensive Docker + Redis validation
+uv run --no-sync pytest -m e2e -v
 
 # Run all tests with coverage
-uv run pytest --cov=src --cov-report=html
+uv run --no-sync pytest --cov=src --cov-report=html
 
 # Test specific functionality
-uv run pytest tests/api/test_download.py -v
+uv run --no-sync pytest tests/api/test_download.py -v
 ```
 
-**Test Statistics**: 248 tests (80 smoke, organized into smoke/integration/e2e tiers)
+**Test Statistics**: 764+ tests across `smoke`, `unit`, `integration`, and `e2e` tiers.
 
 ## 🏗️ Architecture
 
@@ -373,7 +378,7 @@ The service is configured via environment variables with sensible defaults:
 
 ### Security
 - `SSRF_BLOCK_PRIVATE_IPS`: Block private IPs (default: true)
-- `CORS_ALLOWED_ORIGINS`: Comma-separated origins (default: "*")
+- `CORS_ALLOWED_ORIGINS`: Comma-separated origins (default: `http://localhost:3000,http://localhost:8080` — localhost only; set explicitly in production)
 
 See `.env.example` for complete configuration reference.
 
@@ -386,7 +391,7 @@ See `.env.example` for complete configuration reference.
 - ✅ PDF generation with Playwright
 - ✅ Scheduled downloads with cron expressions and execution history
 - ✅ **Rate limiting with DoS protection** (NEW)
-- ✅ Comprehensive test suite (248 tests: 80 smoke, 3-tier strategy)
+- ✅ Comprehensive test suite (764+ tests across smoke, unit, integration, and e2e tiers)
 - ✅ SSRF protection and URL validation
 - ✅ Optional API key authentication
 - ✅ Production-ready Docker container

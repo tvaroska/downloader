@@ -27,6 +27,7 @@ class PlaywrightPDFGenerator:
         memory_limit_mb: int = 512,
     ):
         self.pool: BrowserPool | None = None
+        self._start_lock = asyncio.Lock()
         self.pool_config = BrowserConfig(
             pool_size=pool_size,
             memory_limit_mb=memory_limit_mb,
@@ -51,12 +52,24 @@ class PlaywrightPDFGenerator:
     async def start(self):
         """Initialize browser pool."""
         try:
-            self.pool = BrowserPool(config=self.pool_config)
-            await self.pool.start()
+            pool = BrowserPool(config=self.pool_config)
+            await pool.start()
+            self.pool = pool
             logger.info("PDF generator initialized with browser pool")
         except BrowserPoolError as e:
+            self.pool = None
             logger.error(f"Failed to initialize PDF generator: {e}")
             raise PDFGeneratorError(f"PDF generator initialization failed: {e}")
+
+    async def ensure_started(self) -> BrowserPool:
+        """Lazily initialize browser pool on first use under an async lock."""
+        if self.pool is not None:
+            return self.pool
+        async with self._start_lock:
+            if self.pool is None:
+                await self.start()
+        assert self.pool is not None
+        return self.pool
 
     async def close(self):
         """Close browser pool and cleanup."""
@@ -71,14 +84,13 @@ class PlaywrightPDFGenerator:
     @asynccontextmanager
     async def _get_browser_context(self):
         """Async context manager for automatic browser resource cleanup."""
-        if not self.pool:
-            raise PDFGeneratorError("Browser pool not initialized. Call start() first.")
+        pool = await self.ensure_started()
 
         browser = None
         context = None
         try:
             # Get browser from pool with O(1) selection
-            browser = await self.pool.get_browser()
+            browser = await pool.get_browser()
 
             # Create isolated context for this request (security)
             context = await browser.new_context(
@@ -161,7 +173,7 @@ class PlaywrightPDFGenerator:
                                 f"HTTP {response.status}: {response.status_text}"
                             )
 
-                    except asyncio.TimeoutError:
+                    except TimeoutError:
                         raise PDFGeneratorError(f"Timeout loading page: {url}")
 
                     # Wait for page to be fully loaded
@@ -254,8 +266,9 @@ async def get_pdf_generator():
     # Use lock to prevent multiple simultaneous initializations
     async with _initialization_lock:
         if _pdf_generator is None:
-            _pdf_generator = PlaywrightPDFGenerator(pool_size=2)  # Reduce pool size for Docker
-            await _pdf_generator.start()
+            generator = PlaywrightPDFGenerator(pool_size=2)  # Reduce pool size for Docker
+            await generator.start()
+            _pdf_generator = generator
 
     try:
         yield _pdf_generator
@@ -286,6 +299,12 @@ async def generate_pdf_from_url(url: str, options: dict[str, Any] | None = None)
     """
     async with get_pdf_generator() as generator:
         return await generator.generate_pdf(url, options)
+
+
+def set_shared_pdf_generator(generator: PlaywrightPDFGenerator | None) -> None:
+    """Register or clear the shared PDF generator instance."""
+    global _pdf_generator
+    _pdf_generator = generator
 
 
 def get_shared_pdf_generator() -> PlaywrightPDFGenerator | None:

@@ -18,7 +18,11 @@ from .http_client import HTTPClient
 from .job_manager import JobManager
 from .logging_config import get_logger, setup_logging
 from .middleware import MetricsMiddleware, get_system_metrics_collector
-from .pdf_generator import PlaywrightPDFGenerator
+from .pdf_generator import (
+    PlaywrightPDFGenerator,
+    cleanup_pdf_generator,
+    set_shared_pdf_generator,
+)
 from .ratelimit_middleware import RateLimitMiddleware
 from .scheduler import SchedulerService
 
@@ -68,8 +72,8 @@ async def lifespan(app: FastAPI):
     app.state.http_client = http_client
     logger.info("HTTP client initialized")
 
-    # Initialize PDF generator with browser pool
-    logger.info("Initializing PDF generator with browser pool...")
+    # Initialize PDF generator (browser pool starts lazily on first PDF/JS-render request)
+    logger.info("Configuring PDF generator (lazy browser pool)...")
     try:
         pdf_generator = PlaywrightPDFGenerator(
             pool_size=current_settings.pdf.pool_size,
@@ -77,15 +81,16 @@ async def lifespan(app: FastAPI):
             wait_until=current_settings.pdf.wait_until,
             memory_limit_mb=current_settings.pdf.browser_memory_limit_mb,
         )
-        await pdf_generator.__aenter__()
+        set_shared_pdf_generator(pdf_generator)
         app.state.pdf_generator = pdf_generator
         logger.info(
-            f"PDF generator initialized successfully (timeout={current_settings.pdf.page_load_timeout}ms, wait_until={current_settings.pdf.wait_until})"
+            f"PDF generator configured for lazy startup (pool_size={current_settings.pdf.pool_size}, timeout={current_settings.pdf.page_load_timeout}ms, wait_until={current_settings.pdf.wait_until})"
         )
     except Exception as e:
         logger.warning(
             f"PDF generator initialization failed: {e}. PDF generation will be unavailable."
         )
+        set_shared_pdf_generator(None)
         app.state.pdf_generator = None
 
     # Initialize semaphores for concurrency control
@@ -154,9 +159,10 @@ async def lifespan(app: FastAPI):
     # Close HTTP client
     await http_client.close()
 
-    # Close PDF generator if initialized
+    # Close PDF generator if initialized and clear shared singleton
     if app.state.pdf_generator:
-        await app.state.pdf_generator.__aexit__(None, None, None)
+        await app.state.pdf_generator.close()
+    await cleanup_pdf_generator()
 
     # Shutdown scheduler if initialized
     if app.state.scheduler:

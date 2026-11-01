@@ -9,7 +9,8 @@ install:
 
 # Format and lint code
 fmt:
-    uv run ruff check --fix
+    uv run ruff check --fix src/ tests/ examples/
+    uv run ruff format src/ tests/ examples/
 
 # Run tests
 test:

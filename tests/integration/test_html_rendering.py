@@ -68,7 +68,7 @@ class TestPlaywrightHTMLRendering:
         # Configure mock to timeout
         import asyncio
 
-        mock_page.goto.side_effect = asyncio.TimeoutError("Page load timeout")
+        mock_page.goto.side_effect = TimeoutError("Page load timeout")
 
         # Execute and expect exception
         url = "https://example.com/slow-page"
@@ -283,6 +283,7 @@ def mock_playwright_for_html():
     mock_pool.release_browser = AsyncMock()
 
     mock_generator.pool = mock_pool
+    mock_generator.ensure_started = AsyncMock(side_effect=lambda: mock_generator.pool)
 
     # Patch get_shared_pdf_generator
     with patch(

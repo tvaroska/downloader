@@ -136,7 +136,8 @@ class BrowserPool:
             if impl:
                 process = getattr(impl, "_browser_process", None)
                 if process:
-                    return process.pid
+                    pid = getattr(process, "pid", None)
+                    return pid if isinstance(pid, int) and not isinstance(pid, bool) else None
             return None
         except Exception:
             return None
@@ -183,7 +184,7 @@ class BrowserPool:
                 await asyncio.wait_for(browser.close(), timeout=self.config.close_timeout)
                 logger.debug(f"Browser closed gracefully (pid: {pid})")
                 return True
-        except asyncio.TimeoutError:
+        except TimeoutError:
             logger.warning(
                 f"Browser close timed out after {self.config.close_timeout}s (pid: {pid})"
             )
@@ -213,7 +214,7 @@ class BrowserPool:
                 self._browser_health[browser]["last_used"] = asyncio.get_event_loop().time()
 
             return browser
-        except asyncio.TimeoutError:
+        except TimeoutError:
             raise BrowserPoolError(
                 f"No browser available within timeout ({self.config.acquire_timeout}s)"
             )
@@ -296,7 +297,7 @@ class BrowserPool:
                         asyncio.gather(*close_tasks, return_exceptions=True),
                         timeout=pool_timeout,
                     )
-                except asyncio.TimeoutError:
+                except TimeoutError:
                     logger.error("Pool close timed out, some browsers may be orphaned")
 
             # Clear all data structures

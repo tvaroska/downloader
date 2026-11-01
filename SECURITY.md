@@ -4,9 +4,8 @@
 
 | Version | Supported          |
 | ------- | ------------------ |
-| 0.3.x   | :white_check_mark: |
-| 0.2.x   | :white_check_mark: |
-| < 0.2   | :x:                |
+| 0.5.x   | :white_check_mark: |
+| < 0.5   | :x:                |
 
 ## Reporting a Vulnerability
 
@@ -15,7 +14,7 @@ We take security vulnerabilities seriously. If you discover a security issue, pl
 ### How to Report
 
 1. **Do NOT** create a public GitHub issue for security vulnerabilities
-2. Use [GitHub Security Advisories](../../security/advisories/new) to report vulnerabilities privately
+2. Use [GitHub Security Advisories](https://github.com/tvaroska/downloader/security/advisories/new) to report vulnerabilities privately
 3. Include in your report:
    - Description of the vulnerability
    - Steps to reproduce

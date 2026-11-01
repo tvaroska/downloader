@@ -1,7 +1,5 @@
 """Tests for validation and SSRF protection functionality."""
 
-import socket
-
 import pytest
 
 from src.downloader.config import Settings, SSRFConfig
@@ -11,19 +9,6 @@ from src.downloader.validation import (
     sanitize_user_agent,
     validate_url,
 )
-
-
-@pytest.fixture(autouse=True)
-def _mock_example_com_dns(monkeypatch):
-    """Ensure example.com resolves deterministically even in offline sandboxes."""
-    orig_getaddrinfo = socket.getaddrinfo
-
-    def _getaddrinfo(host, port, *args, **kwargs):
-        if host == "example.com":
-            return [(socket.AF_INET, socket.SOCK_STREAM, 6, "", ("93.184.215.14", port or 0))]
-        return orig_getaddrinfo(host, port, *args, **kwargs)
-
-    monkeypatch.setattr(socket, "getaddrinfo", _getaddrinfo)
 
 
 @pytest.mark.smoke

@@ -31,7 +31,7 @@ steps:
         printf "Resolved commit=%s tag=%s\n" "$${SHA}" "$${CB_TAG}"
 
   - id: python-lint-typecheck-and-tests
-    name: ghcr.io/astral-sh/uv:0.9.1-python3.12-bookworm-slim
+    name: ghcr.io/astral-sh/uv:0.9.1-python3.13-bookworm-slim
     waitFor: ["-"]
     entrypoint: bash
     env:
@@ -46,7 +46,7 @@ steps:
         /workspace/.venv/bin/ruff check src/ tests/ examples/
         /workspace/.venv/bin/ruff format --check src/ tests/ examples/
         /workspace/.venv/bin/mypy src/
-        /workspace/.venv/bin/pytest tests/ -m "smoke or unit" -v --timeout=30
+        /workspace/.venv/bin/pytest tests/ -m "not (integration or e2e or network or requires_redis or requires_playwright)" -v --timeout=30
 
   - id: docker-build-and-push
     name: gcr.io/cloud-builders/docker

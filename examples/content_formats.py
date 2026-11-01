@@ -192,7 +192,7 @@ async def request_format(
 
             print(f"   ❌ Failed: {result.error}")
 
-    except asyncio.TimeoutError:
+    except TimeoutError:
         result.error = f"Request timeout after {TIMEOUT}s"
         print(f"   ⏰ Timeout: {result.error}")
 

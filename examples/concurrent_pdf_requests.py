@@ -182,7 +182,7 @@ async def generate_pdf_request(
             )
             print(f"❌ [{request_id:02d}] PDF generation failed: {error_msg}")
 
-    except asyncio.TimeoutError:
+    except TimeoutError:
         result.finish(success=False, error="Request timeout")
         print(f"⏰ [{request_id:02d}] PDF generation timed out after {REQUEST_TIMEOUT}s")
 

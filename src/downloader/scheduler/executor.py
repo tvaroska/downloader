@@ -9,7 +9,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import uuid
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Any
 
 from ..content_converter import convert_content_to_markdown, convert_content_to_text
@@ -151,7 +151,7 @@ class ScheduledJobExecutor:
         Returns:
             Execution record with success or failure status.
         """
-        started_at = datetime.now(timezone.utc)
+        started_at = datetime.now(UTC)
 
         try:
             # Validate URL
@@ -168,7 +168,7 @@ class ScheduledJobExecutor:
                 format=format,
             )
 
-            completed_at = datetime.now(timezone.utc)
+            completed_at = datetime.now(UTC)
             duration = (completed_at - started_at).total_seconds()
 
             # Calculate content size
@@ -193,7 +193,7 @@ class ScheduledJobExecutor:
             )
 
         except Exception as e:
-            completed_at = datetime.now(timezone.utc)
+            completed_at = datetime.now(UTC)
             duration = (completed_at - started_at).total_seconds()
 
             logger.warning(

@@ -5,7 +5,7 @@ import logging
 import os
 import time
 import uuid
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from enum import Enum
 from typing import Any
 
@@ -146,8 +146,8 @@ class JobManager:
             raise RuntimeError("Redis client not connected")
 
         job_id = str(uuid.uuid4())
-        now = datetime.now(timezone.utc)
-        expires_at = datetime.fromtimestamp(time.time() + self.job_ttl, timezone.utc)
+        now = datetime.now(UTC)
+        expires_at = datetime.fromtimestamp(time.time() + self.job_ttl, UTC)
 
         job_info = JobInfo(
             job_id=job_id,
@@ -223,7 +223,7 @@ class JobManager:
                     # Parse and update job info
                     job_info = JobInfo.model_validate_json(job_data)
                     job_info.status = status
-                    now = datetime.now(timezone.utc)
+                    now = datetime.now(UTC)
 
                     if status == JobStatus.RUNNING and job_info.started_at is None:
                         job_info.started_at = now
@@ -298,7 +298,7 @@ class JobManager:
             results=results,
             summary=summary,
             created_at=job_info.created_at,
-            completed_at=job_info.completed_at or datetime.now(timezone.utc),
+            completed_at=job_info.completed_at or datetime.now(UTC),
         )
 
         # Store results in Redis

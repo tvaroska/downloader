@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import logging
 import uuid
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from typing import TYPE_CHECKING
 
 from apscheduler.triggers.cron import CronTrigger
@@ -134,7 +134,7 @@ async def create_schedule(
     try:
         # Generate unique ID
         schedule_id = str(uuid.uuid4())
-        created_at = datetime.now(timezone.utc)
+        created_at = datetime.now(UTC)
 
         # Create cron trigger from expression
         trigger = CronTrigger.from_crontab(schedule_data.cron_expression)
@@ -219,7 +219,7 @@ async def list_schedules(
             if created_at_str:
                 created_at = datetime.fromisoformat(created_at_str)
             else:
-                created_at = datetime.now(timezone.utc)
+                created_at = datetime.now(UTC)
 
             schedules.append(
                 ScheduleResponse(
@@ -281,7 +281,7 @@ async def get_schedule(
         if created_at_str:
             created_at = datetime.fromisoformat(created_at_str)
         else:
-            created_at = datetime.now(timezone.utc)
+            created_at = datetime.now(UTC)
 
         return ScheduleResponse(
             id=job.id,
