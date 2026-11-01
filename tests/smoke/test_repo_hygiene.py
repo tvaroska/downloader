@@ -129,3 +129,15 @@ def test_all_relative_markdown_links_resolve() -> None:
             if not target.exists() or not target.is_relative_to(REPO_ROOT):
                 broken.append(f"{md_file.relative_to(REPO_ROOT)}: {raw_target}")
     assert not broken, "Broken relative Markdown links found:\n" + "\n".join(broken)
+
+
+@pytest.mark.smoke
+def test_uv_lock_uses_public_pypi_only() -> None:
+    """Ensure uv.lock only pins public PyPI registries so Cloud Build can fetch wheels."""
+    lock_file = REPO_ROOT / "uv.lock"
+    assert lock_file.exists(), "uv.lock must exist"
+    text = lock_file.read_text(encoding="utf-8")
+    registries = set(re.findall(r'registry\s*=\s*"([^"]+)"', text))
+    assert registries == {"https://pypi.org/simple"}, (
+        f"Non-public registry URLs found in uv.lock (run `uv lock --no-config --default-index https://pypi.org/simple`): {registries}"
+    )

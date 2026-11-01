@@ -72,7 +72,7 @@ CI/CD is defined exclusively in [`cloudbuild.yaml`](../../cloudbuild.yaml) and [
 
 - **`downloader-main` (push to `main`):** Runs `uv sync --frozen`, `ruff check`, `ruff format --check`, `mypy src/`, and fast `pytest`, then builds [`Dockerfile`](../../Dockerfile) (`python:3.13-slim` + `uv sync --frozen --no-dev --no-editable` + Playwright Chromium) and verifies `python -c "import src.downloader.main"` without pushing release tags.
 - **`downloader-tag` (annotated tag `vX.Y.Z`):** Runs the full verification gate and pushes `us-central1-docker.pkg.dev/sites-470716/containers/downloader:${TAG_NAME}` and `:latest` for Flux CD GitOps rollout to `https://download.tvaroska.sk`.
-- **Lockfile Release Rule:** Whenever bumping `version` in [`pyproject.toml`](../../pyproject.toml), always run `uv lock` and commit the updated `uv.lock` before tagging `vX.Y.Z`; otherwise `uv sync --frozen` in `cloudbuild.yaml` and `Dockerfile` will fail the tag build.
+- **Lockfile Release Rule:** Whenever bumping `version` in [`pyproject.toml`](../../pyproject.toml), always run `uv lock --no-config --default-index https://pypi.org/simple` and commit the updated `uv.lock` before tagging `vX.Y.Z`; otherwise `uv sync --frozen` in `cloudbuild.yaml` and `Dockerfile` will fail the tag build.
 
 ---
 
