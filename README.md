@@ -7,14 +7,15 @@ High-performance web service for programmatic URL content downloading with intel
 - **Direct URL Access**: Simple `/{url}` endpoint structure
 - **Background Batch Processing**: Asynchronous job-based processing with progress tracking
 - **Content Negotiation**: Multiple response formats via Accept headers
-- **PDF Generation**: JavaScript-rendered PDFs using Playwright
+- **Stateless-First Ethical Crawling**: Automatic `robots.txt` compliance, configurable `User-Agent`, and per-domain `Crawl-delay` throttling with bounded in-memory TTL/LRU caching (plus optional Redis coordination)
+- **PDF & SPA Rendering**: JavaScript-rendered PDFs and DOM extraction using Playwright with automatic browser recycling (`PDF_MAX_USES_PER_BROWSER=50`) and idle scale-to-zero (`PDF_IDLE_TIMEOUT=600s`)
 - **API Key Protection**: Optional authentication via environment variable
 - **Intelligent Extraction**: BeautifulSoup-powered article text extraction
-- **Security**: SSRF protection and URL validation
-- **Performance**: Async HTTP client with connection pooling
+- **Defense-in-Depth Security**: Pre-flight, redirect (`3xx`), and Playwright network-route SSRF protection, streaming `CONTENT_MAX_DOWNLOAD_SIZE` enforcement (`HTTP 413`), and active rate limiting (`HTTP 429` + `Retry-After`)
+- **Performance**: Async HTTP client with connection pooling and streaming bounds
 - **Scheduled Downloads**: Cron-based recurring downloads with execution history
-- **Production Ready**: Docker support with health checks
-- **Comprehensive Testing**: 100% test coverage for critical components
+- **Production Ready**: Non-root Docker container on unprivileged port `:8000` with structured JSON access logging (`method`, `path`, `status_code`)
+- **Comprehensive Testing**: Fast offline smoke/unit/hygiene verification plus integration and E2E tiers
 
 ## 📋 API Endpoints
 
@@ -261,13 +262,13 @@ curl -X POST http://localhost:8000/batch \
 ### Using Docker
 
 ```bash
-# Run without authentication (container listens on port 80)
-docker run -p 8000:80 us-central1-docker.pkg.dev/sites-470716/containers/downloader:latest
+# Run without authentication (container listens on unprivileged port 8000)
+docker run -p 8000:8000 us-central1-docker.pkg.dev/sites-470716/containers/downloader:latest
 
 # Run with API key and Redis
 docker run -e DOWNLOADER_KEY=your-secret-key \
   -e REDIS_URI=redis://host.docker.internal:6379 \
-  -p 8000:80 us-central1-docker.pkg.dev/sites-470716/containers/downloader:latest
+  -p 8000:8000 us-central1-docker.pkg.dev/sites-470716/containers/downloader:latest
 ```
 
 ## 📖 Usage Examples
@@ -296,17 +297,22 @@ curl -H "Accept: text/html" \
   "http://localhost:8000/https://example.com"
 ```
 
-## 🛡️ Security Features
+## 🛡️ Security & Ethical Crawling
 
-- **SSRF Protection**: Blocks localhost and private IP ranges (configurable)
-- **URL Validation**: Comprehensive input sanitization
-- **Rate Limiting**: Multi-tier limits with Redis/in-memory storage (NEW)
-  - Download endpoints: 60 requests/minute
-  - Batch endpoints: 20 requests/minute
-  - Status endpoints: 200 requests/minute
-- **API Key Authentication**: Optional Bearer token or X-API-Key header
-- **Non-root Container**: Docker runs with dedicated user account
-- **DoS Protection**: Configurable concurrency limits and timeouts
+- **Defense-in-Depth SSRF Protection**: Blocks localhost (`127.0.0.1`), RFC1918 private IPs, `file://` URLs, and cloud metadata (`169.254.169.254`) across initial DNS pre-flight, every `3xx` HTTP redirect hop, `robots.txt` fetches, and Playwright subresource routes (`context.route("**/*", ...)`).
+- **Stateless-First Ethical Crawling (`robots.txt` & `Crawl-delay`)**:
+  - Evaluates origin `/robots.txt` before `GET /{url}` and `POST /batch` using configurable `USER_AGENT` (`REST-API-Downloader/1.0` default) when `RESPECT_ROBOTS_TXT=true`.
+  - Uses a bounded in-memory TTL/LRU cache (`ROBOTS_CACHE_TTL=3600`, `ROBOTS_CACHE_MAX_SIZE=1000`) and per-domain monotonic delay slots out-of-the-box without Redis, upgrading automatically to shared Redis keys when `REDIS_URI` is set.
+  - Honors origin `Crawl-delay` directives capped at `MAX_CRAWL_DELAY` (`30.0s` default).
+  - Returns `HTTP 403` (`error_type: "robots_disallowed"`) when disallowed, and **fails open** with a structured warning log + cached sentinel when `/robots.txt` is unreachable, times out (`ROBOTS_FETCH_TIMEOUT=5.0s`), or is malformed.
+- **Streaming Download Size Guard**: Enforces `CONTENT_MAX_DOWNLOAD_SIZE` (`50MB` default) via `Content-Length` pre-checks and streaming byte counters, aborting oversized transfers immediately with `HTTP 413` (`error_type: "content_too_large"`).
+- **Active Moving-Window Rate Limiting**: Multi-tier limits (`RATELIMIT_STORAGE_URI → REDIS_URI → memory://`) emitting `X-RateLimit-{Limit,Remaining,Reset}` headers and `HTTP 429` (`rate_limit_exceeded`) with `Retry-After`:
+  - Download endpoints (`/{url}`): 60 requests/minute
+  - Batch endpoints (`/batch`, `/jobs/*`): 20 requests/minute
+  - Status endpoints (`/health`, `/metrics*`): 200 requests/minute
+  - Default endpoints: 100 requests/minute
+- **API Key Authentication**: Optional Bearer token or `X-API-Key` header
+- **Non-Root Unprivileged Container**: Listens on TCP `:8000` with isolated Playwright browser contexts, automatic browser recycling (`PDF_MAX_USES_PER_BROWSER=50`), and idle scale-to-zero (`PDF_IDLE_TIMEOUT=600s`)
 
 ## 🧪 Testing
 
@@ -358,51 +364,57 @@ The service is configured via environment variables with sensible defaults:
 - `REDIS_URI`: Redis connection string for job management and rate limiting
 - `ENVIRONMENT`: Runtime environment (development/staging/production)
 
-### HTTP Client
+### HTTP Client & Content Limits
 - `HTTP_MAX_CONNECTIONS`: Max total connections (default: 200)
 - `HTTP_REQUEST_TIMEOUT`: Request timeout in seconds (default: 30)
+- `CONTENT_MAX_DOWNLOAD_SIZE`: Streaming byte cap in bytes (default: 52428800 / 50MB; returns `HTTP 413` `content_too_large`)
 
-### Rate Limiting (NEW)
-- `RATELIMIT_ENABLED`: Enable rate limiting (default: true)
-- `RATELIMIT_DEFAULT_LIMIT`: Default limit (default: "100/minute")
-- `RATELIMIT_DOWNLOAD_LIMIT`: Download endpoint limit (default: "60/minute")
-- `RATELIMIT_BATCH_LIMIT`: Batch job limit (default: "20/minute")
+### Ethical Crawling
+- `USER_AGENT`: Outbound HTTP & Playwright `User-Agent` (default: `REST-API-Downloader/1.0`)
+- `RESPECT_ROBOTS_TXT`: Enforce `robots.txt` & `Crawl-delay` (default: `true`; returns `HTTP 403` `robots_disallowed`)
+- `ROBOTS_CACHE_TTL`: `robots.txt` cache TTL in seconds (default: `3600`)
+- `ROBOTS_CACHE_MAX_SIZE`: Bounded in-memory LRU cache capacity (default: `1000`)
+- `ROBOTS_FETCH_TIMEOUT`: Timeout in seconds for `/robots.txt` fetches (default: `5.0`)
+- `MAX_CRAWL_DELAY`: Cap on honored `Crawl-delay` in seconds (default: `30.0`)
+
+### Rate Limiting
+- `RATELIMIT_ENABLED`: Enable moving-window rate limiting (default: `true`)
+- `RATELIMIT_DEFAULT_LIMIT`: Default limit (default: `"100/minute"`)
+- `RATELIMIT_DOWNLOAD_LIMIT`: Download endpoint limit (default: `"60/minute"`)
+- `RATELIMIT_BATCH_LIMIT`: Batch job limit (default: `"20/minute"`)
+- `RATELIMIT_STATUS_LIMIT`: Status/metrics endpoint limit (default: `"200/minute"`)
 
 ### Batch Processing
 - `BATCH_CONCURRENCY`: Max concurrent batch requests (default: CPU×8, max 50)
 - `BATCH_MAX_URLS_PER_BATCH`: Max URLs per batch (default: 50)
 
-### PDF Generation
+### PDF & Browser Pool Lifecycle
 - `PDF_CONCURRENCY`: Max concurrent PDFs (default: CPU×2, max 12)
 - `PDF_PAGE_LOAD_TIMEOUT`: Playwright timeout in ms (default: 30000)
+- `PDF_MAX_USES_PER_BROWSER`: Recycle Chromium instance after N uses (default: 50)
+- `PDF_IDLE_TIMEOUT`: Close idle browser pool after N seconds / scale-to-zero (default: 600.0)
 
-### Security
-- `SSRF_BLOCK_PRIVATE_IPS`: Block private IPs (default: true)
+### Logging & Security
+- `LOG_JSON_LOGS`: Emit structured JSON logs with top-level `method`, `path`, and `status_code` on `uvicorn.access` (default: `false`; set `true` in production)
+- `SSRF_BLOCK_PRIVATE_IPS`: Block private IPs across direct, redirect, `robots.txt`, and Playwright requests (default: `true`)
 - `CORS_ALLOWED_ORIGINS`: Comma-separated origins (default: `http://localhost:3000,http://localhost:8080` — localhost only; set explicitly in production)
 
-See `.env.example` for complete configuration reference.
+See `.env.example` and [`docs/guides/configuration.md`](docs/guides/configuration.md) for the complete configuration reference.
 
-## 📦 Implementation Status
+## 📦 Implementation Status (`v0.6.0`)
 
 **✅ Production Ready Features:**
-- ✅ Direct URL endpoint structure (`/{url}`)
-- ✅ Content negotiation via Accept headers (text, markdown, HTML, JSON, PDF)
-- ✅ Background batch processing with job tracking
-- ✅ PDF generation with Playwright
-- ✅ Scheduled downloads with cron expressions and execution history
-- ✅ **Rate limiting with DoS protection** (NEW)
-- ✅ Comprehensive test suite (764+ tests across smoke, unit, integration, and e2e tiers)
-- ✅ SSRF protection and URL validation
-- ✅ Optional API key authentication
-- ✅ Production-ready Docker container
-- ✅ Structured logging with JSON support
-- ✅ Comprehensive configuration management (40+ settings)
-- ✅ Health check and metrics endpoints
+- ✅ Direct URL endpoint structure (`/{url}`) with `Accept` content negotiation (text, markdown, HTML, JSON, PDF)
+- ✅ Stateless-first ethical crawling (`robots.txt`, `Crawl-delay`, `HTTP 403` `robots_disallowed`, Prometheus `robots_*` metrics)
+- ✅ Streaming download size limits (`HTTP 413` `content_too_large`) and defense-in-depth SSRF protection (redirects + Playwright routes)
+- ✅ Active moving-window rate limiting (`HTTP 429` + `Retry-After` + `X-RateLimit-*`)
+- ✅ Lazy Playwright `BrowserPool` with max-use recycling (`50`) and idle scale-to-zero (`600s`)
+- ✅ Background batch processing and cron-based scheduled downloads (`REDIS_URI` mode)
+- ✅ Non-root Docker container on unprivileged port `:8000` with structured JSON access logging
+- ✅ Health check and Prometheus/live metrics endpoints
 
-**🚧 Roadmap (Next Steps):**
-- 🟠 High Priority (7-11 hours): HTTP client simplification, memory leak fixes, Docker improvements
-- 🟡 Performance (2-4 weeks): Redis caching, webhook notifications, OpenTelemetry
-- 🟢 Advanced (1-2 months): Enhanced content preprocessing, SDK libraries, GraphQL API
-- 🔵 Enterprise (3-6 months): OAuth2/JWT, multi-region deployment, AI-powered extraction
+**🚧 Roadmap (Deferred & Upcoming):**
+- 📋 **Sprint 5 (Deferred until multi-tenant deployment):** Per-API-key `QuotaConfig`, `GET /usage`, and tenant bandwidth accounting
+- 📋 **Sprint 6 Candidates:** Screenshot/PDF query toggle (`?output=screenshot|pdf`), webhook notifications, OCR (image-to-text), and typed client SDKs
 
-See `docs/roadmap.md` for detailed implementation timeline.
+See [`docs/roadmap.md`](docs/roadmap.md) and [`DECISIONS.md`](DECISIONS.md) for detailed milestones and architectural decisions.

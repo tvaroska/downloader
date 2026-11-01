@@ -4,7 +4,7 @@
 
 ## Overview
 
-This document outlines the strategic priorities and feature roadmap for the REST API Downloader service. Milestones are aligned with stateless-first Kubernetes operations (`REDIS_URI` optional for single-URL extraction, PDF rendering, and ethical crawling; required only for `/batch` and `/schedules`). Live task status lives exclusively in [TODO.md](../TODO.md).
+This document outlines the strategic priorities, completed releases, and deferred backlog for the REST API Downloader service. Milestones are aligned with stateless-first Kubernetes operations (`REDIS_URI` optional for single-URL extraction, PDF rendering, rate limiting, and ethical crawling; required only for `/batch` and `/schedules`). Architectural rationale lives in [DECISIONS.md](../DECISIONS.md) and public wire contracts live in [spec/contracts.md](../spec/contracts.md).
 
 ---
 
@@ -18,21 +18,22 @@ This document outlines the strategic priorities and feature roadmap for the REST
 | Phase 4: Security & Production | ✅ Complete | 100% |
 | Phase 5: Content Transformation | 🚧 Partial (OCR deferred) | 75% |
 | Phase 6: Browser Rendering | 🚧 Partial (Screenshots deferred) | 75% |
-| Phase 7: Ethical Crawling & Stateless Safety | 🚧 In Progress (Sprint 4) | 0% |
+| Phase 7: Ethical Crawling & Stateless Safety | ✅ Complete (`v0.6.0` — Sprint 4) | 100% |
 | Phase 8: Scheduling & Multi-Tenant Quotas | 🚧 Partial (Scheduling ✅; Quotas deferred to Sprint 5) | 50% |
 
 ---
 
 ## Current Focus
 
-### Active: Sprint 4 — Ethical Crawling & Stateless Safety
+### Completed: Sprint 4 — Ethical Crawling & Production Hardening (`v0.6.0`) ✅
 
-**Sprint 4** (Current): Ethical Crawling & Egress Protection
-- 7 tasks (`S4-be-1`..`S4-be-5`, `S4-test-1`, `S4-doc-1`), ~16 hours effort
+**Sprint 4** (Complete — 2026-11-01): Ethical Crawling, Egress Protection & Defense-in-Depth Hardening
+- 7 tasks completed (`S4-be-1`..`S4-be-5`, `S4-test-1`, `S4-doc-1`)
 - Configurable `USER_AGENT` and `RESPECT_ROBOTS_TXT` (`default: True`) across `HTTPClient` and Playwright
-- Stateless-first `robots.txt` evaluation (`urllib.robotparser`) with bounded in-memory TTL/LRU cache by default (TTL 1h, zero Redis dependency) and optional Redis cache backend when `REDIS_URI` is configured
-- Per-domain `Crawl-delay` throttling (in-memory timestamps by default + optional Redis coordination) and `HTTP 403` disallow responses
-- See [TODO.md](../TODO.md) for the live task checklist and acceptance criteria
+- Stateless-first `robots.txt` evaluation (`urllib.robotparser`) with bounded in-memory TTL/LRU cache by default (TTL 1h, zero Redis dependency), optional Redis backend when `REDIS_URI` is configured, and cached fail-open sentinels on unreachable origins
+- Per-domain `Crawl-delay` throttling (in-memory timestamps by default + optional Redis coordination), `HTTP 403` `robots_disallowed` responses, and Prometheus `robots_*` counters
+- Production hardening: streaming `CONTENT_MAX_DOWNLOAD_SIZE` (`HTTP 413` `content_too_large`), redirect & Playwright SSRF route blocking, active `RateLimitMiddleware` (`HTTP 429` + `Retry-After` + `X-RateLimit-*`), `BrowserPool` max-use recycling (`PDF_MAX_USES_PER_BROWSER=50`) & idle scale-to-zero (`PDF_IDLE_TIMEOUT=600s`), structured JSON `uvicorn.access` `path`/`method`/`status_code` fields, and unprivileged container port `:8000`
+- See [docs/features/ethical-crawling.md](features/ethical-crawling.md)
 
 ### Deferred Preview: Sprint 5 — Multi-Tenant Quotas
 
@@ -61,7 +62,10 @@ CI/CD pipeline, offline smoke/unit/hygiene verification gate (`tests/smoke/test_
 
 ---
 
-### 🚧 P1: Ethical Crawling & Stateless Safety (Phase 7 — Sprint 4 Current)
+### ✅ P1: Ethical Crawling & Stateless Safety (Phase 7 — Complete)
+
+**Completed:** 2026-11-01  
+**Archive:** [docs/features/ethical-crawling.md](features/ethical-crawling.md)
 
 **Goal**: Prevent egress abuse and IP bans via responsible `robots.txt` compliance and `Crawl-delay` pacing that work out-of-the-box in stateless single-key deployments as well as Redis-backed clusters.
 
@@ -69,21 +73,21 @@ CI/CD pipeline, offline smoke/unit/hygiene verification gate (`tests/smoke/test_
 
 | Feature | Priority | Complexity | Status |
 |---------|----------|------------|--------|
-| Configurable `USER_AGENT` & `RESPECT_ROBOTS_TXT` | P1 | Low | 🚧 Sprint 4 (`S4-be-1`) |
-| `robots.txt` parser + bounded in-memory TTL/LRU cache (optional Redis) | P1 | Medium | 🚧 Sprint 4 (`S4-be-2`) |
-| Per-domain `Crawl-delay` throttling (in-memory + optional Redis) | P1 | Medium | 🚧 Sprint 4 (`S4-be-3`) |
-| `GET /{url}` & `POST /batch` pre-flight enforcement | P1 | Medium | 🚧 Sprint 4 (`S4-be-4`) |
-| Structured `HTTP 403` disallow responses & metrics | P1 | Low | 🚧 Sprint 4 (`S4-be-5`) |
+| Configurable `USER_AGENT` & `RESPECT_ROBOTS_TXT` | P1 | Low | ✅ Complete (`S4-be-1`) |
+| `robots.txt` parser + bounded in-memory TTL/LRU cache (optional Redis) | P1 | Medium | ✅ Complete (`S4-be-2`) |
+| Per-domain `Crawl-delay` throttling (in-memory + optional Redis) | P1 | Medium | ✅ Complete (`S4-be-3`) |
+| `GET /{url}` & `POST /batch` pre-flight enforcement | P1 | Medium | ✅ Complete (`S4-be-4`) |
+| Structured `HTTP 403` disallow responses & metrics | P1 | Low | ✅ Complete (`S4-be-5`) |
 
-#### Planned Configuration & Wire Behavior
-- New settings in `src/downloader/config.py`: `RESPECT_ROBOTS_TXT` (`default: True`), `USER_AGENT` (`default: REST-API-Downloader/1.0`)
-- Cache backend chain: bounded in-memory TTL/LRU cache (TTL 1h) when `REDIS_URI` is unset; Redis shared cache when `REDIS_URI` is configured
-- Fail-open with structured warning log when `robots.txt` is unreachable; return `HTTP 403` with clear disallow reason when blocked (`spec/contracts.md` proposal in `S4-doc-1`)
+#### Delivered Configuration & Wire Behavior
+- Settings in `src/downloader/config.py` (`CrawlingConfig`): `RESPECT_ROBOTS_TXT` (`default: True`), `USER_AGENT` (`default: REST-API-Downloader/1.0`), `ROBOTS_CACHE_TTL` (`default: 3600`), `ROBOTS_CACHE_MAX_SIZE` (`default: 1000`), `ROBOTS_FETCH_TIMEOUT` (`default: 5.0`), `MAX_CRAWL_DELAY` (`default: 30.0`)
+- Cache backend chain: bounded in-memory TTL/LRU cache (TTL 1h) when `REDIS_URI` is unset; Redis shared cache (`robots:v1:{netloc}`) when `REDIS_URI` is configured
+- Fail-open with structured warning log + cached sentinel when `robots.txt` is unreachable; returns `HTTP 403` (`error_type: "robots_disallowed"`) when blocked
 
-#### Success Criteria
-- `robots.txt` and `Crawl-delay` enforced before single and batch downloads without requiring Redis
-- Caching reduces repeat `robots.txt` fetches by 90%+ per domain
-- 100% offline-sandbox-safe unit and mocked API test coverage (`S4-test-1`)
+#### Success Criteria Met
+- ✅ `robots.txt` and `Crawl-delay` enforced before single and batch downloads without requiring Redis
+- ✅ Caching eliminates repeat `robots.txt` fetches within TTL across memory and Redis backends
+- ✅ 100% offline-sandbox-safe unit and mocked API test coverage (`tests/unit/test_robots.py`, `tests/api/test_ethical_crawling.py`)
 
 **Core Archive:** [docs/features/downloader-core.md](features/downloader-core.md)
 
@@ -227,9 +231,10 @@ Canonical append-only rationale lives in [DECISIONS.md](../DECISIONS.md). Summar
 
 | Date | Decision | Rationale |
 |------|----------|-----------|
+| 2026-11-01 | Release `v0.6.0` (Sprint 4 Ethical Crawling + production hardening) & consolidate to Roadmap-first layout | Delivered stateless-first `robots.txt`/`Crawl-delay`, streaming `413`, redirect & Playwright SSRF guards, active `429` rate limits, browser recycling/scale-to-zero, `:8000` unprivileged port, and archived Sprint 4 into `docs/features/ethical-crawling.md` |
 | 2026-11-01 | Promote Ethical Crawling (stateless-first) to Sprint 4; defer Multi-Tenant Quotas to Sprint 5 | Production runs statelessly behind a single API key without Redis; ethical crawling protects live egress immediately via in-memory TTL cache + optional Redis |
 | 2026-11-01 | Lazy `PlaywrightPDFGenerator` pool + offline verification gate | Eliminates Chromium startup cost on non-browser paths and guarantees deterministic offline smoke/unit hygiene checks |
-| 2026-08-20 | Adopt gen-3 planning layout (`TODO.md` + protected `spec/` + `DECISIONS.md`) | Single source of truth for sprint status; contract changes proposed for review |
+| 2026-08-20 | Adopt structured `spec/` + `DECISIONS.md` + `docs/features/` archive layout | Separate status-free wire contracts (`spec/`) from roadmap milestones (`docs/roadmap.md`) and decision rationale (`DECISIONS.md`) |
 | 2026-01-21 | Sprint 3 (Scheduling API) complete | Cron scheduling, retries, and execution history delivered |
 | 2026-01-19 | Sprint 2 (Browser Rendering) complete | Playwright rendering, selector waits, and security isolation delivered |
 | 2026-01-18 | Sprint 1 (Content Transformation) & Sprint 0 (Production Readiness) complete | Markdown/plain-text extraction, `Accept` negotiation, and SSRF hardening delivered |
@@ -247,11 +252,11 @@ Canonical append-only rationale lives in [DECISIONS.md](../DECISIONS.md). Summar
 ### Release 0.5.0 — Scheduling & Stateless Hardening (Complete)
 - ✅ Cron-based scheduling CRUD & history API (`REDIS_URI` mode), explicit `503` stateless guards, and offline repo hygiene gate
 
-### Release 0.6.0 — Ethical Crawling & Stateless Safety (Current — Sprint 4)
-- Stateless-first `robots.txt` compliance (`urllib.robotparser`, bounded in-memory TTL/LRU cache default + optional Redis)
-- Configurable `USER_AGENT` and `RESPECT_ROBOTS_TXT` (`default: True`)
-- Per-domain `Crawl-delay` throttling and structured `HTTP 403` disallow responses
-- Target: Sprint 4 completion
+### Release 0.6.0 — Ethical Crawling & Production Hardening (Complete)
+- ✅ Stateless-first `robots.txt` compliance (`urllib.robotparser`, bounded in-memory TTL/LRU cache default + optional Redis)
+- ✅ Configurable `USER_AGENT` and `RESPECT_ROBOTS_TXT` (`default: True`)
+- ✅ Per-domain `Crawl-delay` throttling, structured `HTTP 403` (`robots_disallowed`) responses, and Prometheus `robots_*` metrics
+- ✅ Streaming `CONTENT_MAX_DOWNLOAD_SIZE` (`HTTP 413`), redirect & Playwright SSRF route blocking, active `RateLimitMiddleware` (`HTTP 429` + `Retry-After`), browser max-use recycling & idle scale-to-zero, JSON `uvicorn.access` `path` fields, and unprivileged container port `:8000`
 
 ### Release 0.7.0 — Multi-Tenant Quotas (Deferred — Sprint 5)
 - Per-API-key `QuotaConfig`, `GET /usage`, `X-RateLimit-*` headers, and `HTTP 429` `Retry-After` (with `memory://` + Redis parity when multi-key tenancy is needed)

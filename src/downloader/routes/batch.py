@@ -6,18 +6,28 @@ import json
 import logging
 from datetime import UTC, datetime, timedelta
 from typing import Any
+from urllib.parse import urlparse
 
 from fastapi import APIRouter, Depends, HTTPException, Path, Request, Response
 
 from ..auth import get_api_key
+from ..config import get_settings
 from ..content_converter import convert_content_to_markdown, convert_content_to_text
+from ..crawling import DomainThrottle, RobotsChecker, RobotsDisallowedError
 from ..dependencies import (
     BatchSemaphoreDep,
+    DomainThrottleDep,
     HTTPClientDep,
     JobManagerDep,
     PDFSemaphoreDep,
+    RobotsCheckerDep,
 )
-from ..http_client import HTTPClientError, HTTPTimeoutError, RequestPriority
+from ..http_client import (
+    ContentTooLargeError,
+    HTTPClientError,
+    HTTPTimeoutError,
+    RequestPriority,
+)
 from ..job_manager import JobStatus
 from ..models.responses import (
     BatchRequest,
@@ -44,6 +54,8 @@ async def process_single_url_in_batch(
     request_id: str,
     http_client,
     pdf_semaphore,
+    robots_checker: RobotsChecker | None = None,
+    domain_throttle: DomainThrottle | None = None,
 ) -> BatchURLResult:
     """
     Process a single URL within a batch request.
@@ -53,6 +65,8 @@ async def process_single_url_in_batch(
         default_format: Default format if not specified
         timeout: Timeout for this request
         request_id: Unique identifier for logging
+        robots_checker: Optional robots.txt evaluator
+        domain_throttle: Optional per-domain Crawl-delay throttle
 
     Returns:
         BatchURLResult with processing outcome
@@ -65,6 +79,27 @@ async def process_single_url_in_batch(
         logger.info(
             f"[{request_id}] Processing batch URL: {validated_url} (format: {format_to_use})"
         )
+
+        settings = get_settings()
+        if settings.crawling.respect_robots_txt:
+            active_checker = robots_checker
+            if active_checker is None:
+                from ..main import app as _app
+
+                active_checker = getattr(_app.state, "robots_checker", None)
+            if active_checker is not None:
+                crawl_delay = await active_checker.check_allowed(
+                    validated_url,
+                    settings.crawling.user_agent,
+                )
+                active_throttle = domain_throttle
+                if active_throttle is None:
+                    from ..main import app as _app
+
+                    active_throttle = getattr(_app.state, "domain_throttle", None)
+                if active_throttle is not None:
+                    domain = urlparse(validated_url).netloc
+                    await active_throttle.wait_if_needed(domain, crawl_delay)
 
         content, metadata = await asyncio.wait_for(
             http_client.download(validated_url, RequestPriority.LOW),
@@ -191,6 +226,19 @@ async def process_single_url_in_batch(
                 status_code=200,
             )
 
+    except RobotsDisallowedError as e:
+        duration = asyncio.get_event_loop().time() - start_time
+        logger.info(f"[{request_id}] Disallowed by robots.txt: {e}")
+        return BatchURLResult(
+            url=url_request.url,
+            success=False,
+            format=format_to_use,
+            duration=duration,
+            error=str(e),
+            error_type="robots_disallowed",
+            status_code=403,
+        )
+
     except URLValidationError as e:
         duration = asyncio.get_event_loop().time() - start_time
         logger.warning(f"[{request_id}] URL validation failed: {e}")
@@ -202,6 +250,19 @@ async def process_single_url_in_batch(
             error=str(e),
             error_type="validation_error",
             status_code=400,
+        )
+
+    except ContentTooLargeError as e:
+        duration = asyncio.get_event_loop().time() - start_time
+        logger.warning(f"[{request_id}] Content size limit exceeded: {e}")
+        return BatchURLResult(
+            url=url_request.url,
+            success=False,
+            format=format_to_use,
+            duration=duration,
+            error=str(e),
+            error_type="content_too_large",
+            status_code=413,
         )
 
     except TimeoutError:
@@ -279,6 +340,8 @@ async def process_background_batch_job(
     batch_semaphore,
     http_client,
     pdf_semaphore,
+    robots_checker: RobotsChecker | None = None,
+    domain_throttle: DomainThrottle | None = None,
 ) -> tuple[list[dict], dict]:
     """
     Process batch job in background.
@@ -290,6 +353,8 @@ async def process_background_batch_job(
         batch_semaphore: Batch concurrency semaphore
         http_client: HTTPClient instance
         pdf_semaphore: PDF concurrency semaphore
+        robots_checker: Optional robots.txt evaluator
+        domain_throttle: Optional per-domain Crawl-delay throttle
 
     Returns:
         Tuple of (results_list, summary_dict)
@@ -320,6 +385,8 @@ async def process_background_batch_job(
                     request_id=request_id,
                     http_client=http_client,
                     pdf_semaphore=pdf_semaphore,
+                    robots_checker=robots_checker,
+                    domain_throttle=domain_throttle,
                 )
                 return result
 
@@ -376,6 +443,8 @@ async def submit_batch_job(
     http_client: HTTPClientDep,
     batch_semaphore: BatchSemaphoreDep,
     pdf_semaphore: PDFSemaphoreDep,
+    robots_checker: RobotsCheckerDep,
+    domain_throttle: DomainThrottleDep,
     job_manager: JobManagerDep = None,
     api_key: str | None = Depends(get_api_key),
 ) -> JobSubmissionResponse:
@@ -412,6 +481,8 @@ async def submit_batch_job(
             batch_semaphore,
             http_client,
             pdf_semaphore,
+            robots_checker,
+            domain_throttle,
         )
 
         logger.info(f"[JOB-{job_id}] Submitted batch job with {len(batch_request.urls)} URLs")

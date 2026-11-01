@@ -35,6 +35,7 @@ class BrowserConfig:
         headless: Run browsers in headless mode
         close_timeout: Timeout in seconds for graceful browser close
         force_kill_timeout: Seconds to wait before SIGKILL after SIGTERM
+        max_uses_per_browser: Recycle browser after this many uses (0 disables recycling)
     """
 
     pool_size: int = 3
@@ -43,6 +44,7 @@ class BrowserConfig:
     headless: bool = True
     close_timeout: float = 5.0
     force_kill_timeout: float = 2.0
+    max_uses_per_browser: int = 50
 
     # Standard browser launch arguments
     launch_args: list[str] = field(
@@ -91,6 +93,7 @@ class BrowserPool:
         self._playwright: Playwright | None = None
         self._lock = asyncio.Lock()
         self._closed = False
+        self._recycled_count: int = 0
 
     @property
     def pool_size(self) -> int:
@@ -230,15 +233,27 @@ class BrowserPool:
             raise BrowserPoolError(f"Failed to get browser from pool: {e}")
 
     async def release_browser(self, browser: Browser):
-        """Release a browser back to the pool with health check."""
+        """Release a browser back to the pool with health check and max-use recycling."""
         if self._closed or browser not in self._all_browsers:
             return
 
         try:
             # Health check: ensure browser is still functional
             if await self._is_browser_healthy(browser):
-                # Return healthy browser to available queue
-                await self._available_browsers.put(browser)
+                usage_count = self._browser_health.get(browser, {}).get("usage_count", 0)
+                if (
+                    self.config.max_uses_per_browser > 0
+                    and usage_count >= self.config.max_uses_per_browser
+                ):
+                    logger.info(
+                        f"Recycling browser after {usage_count} uses "
+                        f"(max_uses_per_browser={self.config.max_uses_per_browser})"
+                    )
+                    self._recycled_count += 1
+                    await self._replace_browser(browser)
+                else:
+                    # Return healthy browser to available queue
+                    await self._available_browsers.put(browser)
             else:
                 # Replace unhealthy browser
                 logger.warning("Replacing unhealthy browser in pool")
@@ -269,8 +284,16 @@ class BrowserPool:
             # Close old browser with timeout, force-kill if necessary
             await self._close_browser_with_timeout(old_browser, pid)
 
+            if self._closed:
+                return
+
             # Create new browser
             new_browser = await self._launch_browser()
+            if self._closed:
+                await self._close_browser_with_timeout(
+                    new_browser, self._get_browser_pid(new_browser)
+                )
+                return
             self._all_browsers.add(new_browser)
             self._browser_health[new_browser] = {
                 "usage_count": 0,
@@ -337,6 +360,8 @@ class BrowserPool:
             "available_browsers": available_count,
             "busy_browsers": len(self._all_browsers) - available_count,
             "total_usage": total_usage,
+            "recycled_count": self._recycled_count,
+            "max_uses_per_browser": self.config.max_uses_per_browser,
             "pool_efficiency": (total_usage / max(len(self._all_browsers), 1))
             if self._all_browsers
             else 0,

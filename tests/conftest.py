@@ -4,10 +4,12 @@ This file auto-discovers and loads all fixtures from the fixtures/ directory,
 making them available to all tests throughout the test suite.
 """
 
+import errno
 import ipaddress
 import re
 import socket
 
+import anyio
 import pytest
 
 # Import all fixture modules to make them available globally
@@ -80,6 +82,40 @@ def _offline_fixture_dns(request: pytest.FixtureRequest, monkeypatch: pytest.Mon
         raise socket.gaierror(socket.EAI_NONAME, f"Name or service not known: {host_str}")
 
     monkeypatch.setattr(socket, "getaddrinfo", _getaddrinfo)
+
+    orig_anyio_connect_tcp = anyio.connect_tcp
+    orig_create_connection = socket.create_connection
+
+    def _is_loopback_target(host: object) -> bool:
+        host_str = (
+            host.decode("ascii", errors="ignore") if isinstance(host, bytes) else str(host or "")
+        ).strip("[]")
+        if host_str.lower() in _LOOPBACK_HOSTS:
+            return True
+        try:
+            return ipaddress.ip_address(host_str).is_loopback
+        except ValueError:
+            return False
+
+    async def _guarded_connect_tcp(remote_host, remote_port, *args, **kwargs):
+        if not _is_loopback_target(remote_host):
+            raise OSError(
+                errno.ENETUNREACH,
+                f"Network is unreachable (offline fixture guard blocked {remote_host}:{remote_port})",
+            )
+        return await orig_anyio_connect_tcp(remote_host, remote_port, *args, **kwargs)
+
+    def _guarded_create_connection(address, *args, **kwargs):
+        host = address[0] if isinstance(address, tuple) and address else ""
+        if not _is_loopback_target(host):
+            raise OSError(
+                errno.ENETUNREACH,
+                f"Network is unreachable (offline fixture guard blocked {address})",
+            )
+        return orig_create_connection(address, *args, **kwargs)
+
+    monkeypatch.setattr(anyio, "connect_tcp", _guarded_connect_tcp)
+    monkeypatch.setattr(socket, "create_connection", _guarded_create_connection)
 
 
 def pytest_collection_modifyitems(config, items):

@@ -157,6 +157,20 @@ class PDFConfig(BaseSettings):
         description="Memory limit per browser instance in MB",
     )
 
+    # Browser Recycling & Idle Scale-to-Zero
+    max_uses_per_browser: int = Field(
+        default=50,
+        ge=1,
+        le=10000,
+        description="Recycle browser instance after this many context uses to prevent V8 heap fragmentation",
+    )
+    idle_timeout: float = Field(
+        default=600.0,
+        ge=0.0,
+        le=86400.0,
+        description="Seconds of inactivity before closing idle browser pool (0 disables scale-to-zero)",
+    )
+
     model_config = SettingsConfigDict(env_prefix="PDF_")
 
 
@@ -508,6 +522,55 @@ class RateLimitConfig(BaseSettings):
     model_config = SettingsConfigDict(env_prefix="RATELIMIT_")
 
 
+class CrawlingConfig(BaseSettings):
+    """Ethical crawling configuration for robots.txt and Crawl-delay enforcement."""
+
+    user_agent: str = Field(
+        default="REST-API-Downloader/1.0",
+        alias="USER_AGENT",
+        description="User-Agent header sent for HTTP requests, robots.txt fetches, and browser contexts",
+    )
+    respect_robots_txt: bool = Field(
+        default=True,
+        alias="RESPECT_ROBOTS_TXT",
+        description="Evaluate origin robots.txt rules and Crawl-delay before downloading",
+    )
+    robots_cache_ttl: int = Field(
+        default=3600,
+        ge=60,
+        le=86400,
+        alias="ROBOTS_CACHE_TTL",
+        description="TTL in seconds for cached robots.txt rules and fail-open sentinels",
+    )
+    robots_cache_max_size: int = Field(
+        default=1000,
+        ge=10,
+        le=50000,
+        alias="ROBOTS_CACHE_MAX_SIZE",
+        description="Maximum number of origins stored in the in-memory LRU robots.txt cache",
+    )
+    robots_fetch_timeout: float = Field(
+        default=5.0,
+        ge=1.0,
+        le=60.0,
+        alias="ROBOTS_FETCH_TIMEOUT",
+        description="Timeout in seconds when fetching origin robots.txt",
+    )
+    max_crawl_delay: float = Field(
+        default=30.0,
+        ge=0.0,
+        le=300.0,
+        alias="MAX_CRAWL_DELAY",
+        description="Upper bound in seconds applied to origin Crawl-delay directives",
+    )
+
+    model_config = SettingsConfigDict(
+        populate_by_name=True,
+        case_sensitive=False,
+        extra="ignore",
+    )
+
+
 class Settings(BaseSettings):
     """Main application settings combining all configuration sections."""
 
@@ -532,6 +595,7 @@ class Settings(BaseSettings):
     ssrf: SSRFConfig = Field(default_factory=SSRFConfig)
     cors: CORSConfig = Field(default_factory=CORSConfig)
     ratelimit: RateLimitConfig = Field(default_factory=RateLimitConfig)
+    crawling: CrawlingConfig = Field(default_factory=CrawlingConfig)
 
     model_config = SettingsConfigDict(
         env_file=".env",

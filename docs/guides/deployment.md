@@ -1,8 +1,8 @@
 # Deployment Guide
 
-**Last Updated:** 2026-01-20
+**Last Updated:** 2026-11-01
 
-This guide covers deploying the REST API Downloader to production.
+This guide covers deploying the REST API Downloader (`v0.6.0`) to production.
 
 ## Prerequisites
 
@@ -65,12 +65,18 @@ CORS_ALLOWED_ORIGINS=https://yourdomain.com,https://api.yourdomain.com
 # Redis (enables batch processing)
 REDIS_URI=redis://redis:6379
 
-# Logging
+# Logging (emits top-level method, path, status_code on uvicorn.access)
 LOG_JSON_LOGS=true
 LOG_LEVEL=INFO
 
-# Performance (adjust based on your resources)
+# Ethical Crawling (stateless-first; uses Redis automatically when REDIS_URI is set)
+USER_AGENT=REST-API-Downloader/1.0
+RESPECT_ROBOTS_TXT=true
+
+# Performance & Browser Lifecycle (adjust based on your resources)
 PDF_CONCURRENCY=8
+PDF_MAX_USES_PER_BROWSER=50
+PDF_IDLE_TIMEOUT=600.0
 BATCH_CONCURRENCY=32
 ```
 
@@ -113,14 +119,16 @@ docker-compose -f docker-compose.yml -f docker-compose.prod.yml down
 
 ### Docker Standalone
 
+The production container runs as a non-root user and listens on unprivileged TCP port `:8000` (eliminating privileged port `sysctls`):
+
 ```bash
 # Build
 docker build -t downloader .
 
-# Run (with Redis)
+# Run (mapping host port 8000 -> container port 8000, or 80 -> 8000 behind a load balancer)
 docker run -d \
   --name downloader \
-  -p 80:80 \
+  -p 8000:8000 \
   -e ENVIRONMENT=production \
   -e DOWNLOADER_KEY=your-api-key \
   -e REDIS_URI=redis://redis-host:6379 \
@@ -143,14 +151,14 @@ uvicorn src.downloader.main:app --host 0.0.0.0 --port 8000
 ### Health Check Endpoint
 
 ```bash
-curl http://localhost:80/health
+curl http://localhost:8000/health
 ```
 
 **Expected Response** (200 OK):
 ```json
 {
   "status": "healthy",
-  "version": "0.5.0",
+  "version": "0.6.0",
   "environment": "production",
   "services": {
     "job_manager": {"available": true, "status": "connected"},
@@ -207,20 +215,21 @@ curl -H "Authorization: Bearer your-api-key" http://localhost:80/https://example
 curl -H "X-API-Key: your-api-key" http://localhost:80/https://example.com
 ```
 
-### SSRF Protection
+### SSRF & Egress Protection
 
-Enabled by default. Blocks:
-- Private IP ranges (10.x, 172.16-31.x, 192.168.x)
-- Localhost (127.0.0.1)
-- Cloud metadata endpoints (169.254.169.254)
+Enabled by default across initial DNS pre-flight, every `3xx` HTTP redirect hop, `robots.txt` fetches, and Playwright subresource routes (`context.route("**/*", ...)`). Blocks:
+- Private IP ranges (`10.x`, `172.16-31.x`, `192.168.x`)
+- Localhost (`127.0.0.1`, `localhost`) and `file://` URLs
+- Cloud metadata endpoints (`169.254.169.254`)
+- Disallowed `robots.txt` paths (`RESPECT_ROBOTS_TXT=true` -> `HTTP 403` `robots_disallowed`) and oversized responses (`CONTENT_MAX_DOWNLOAD_SIZE` -> `HTTP 413` `content_too_large`)
 
 ### Rate Limiting
 
-Default limits (configurable):
+Active moving-window limits (configurable; emits `X-RateLimit-{Limit,Remaining,Reset}` and `HTTP 429` + `Retry-After`):
 - General endpoints: 100/minute
-- Download endpoints: 60/minute
-- Batch creation: 20/minute
-- Status/metrics: 200/minute
+- Download endpoints (`/{url}`): 60/minute
+- Batch creation (`/batch`, `/jobs/*`): 20/minute
+- Status/metrics (`/health`, `/metrics*`): 200/minute
 
 ## Reverse Proxy Setup
 
@@ -266,7 +275,7 @@ docker-compose logs app
 
 ```bash
 # Test manually inside container
-docker exec -it downloader curl http://localhost:80/health
+docker exec -it downloader curl http://localhost:8000/health
 
 # Check if Redis is reachable (if configured)
 docker exec -it downloader redis-cli -h redis ping
@@ -274,10 +283,12 @@ docker exec -it downloader redis-cli -h redis ping
 
 ### High Memory Usage
 
-PDF generation is memory-intensive. Reduce:
+PDF generation is memory-intensive (`PlaywrightPDFGenerator` recycles Chromium after `PDF_MAX_USES_PER_BROWSER=50` uses and scales idle pools to zero after `PDF_IDLE_TIMEOUT=600s`). For tighter envelopes, reduce:
 ```bash
 PDF_CONCURRENCY=2
 PDF_POOL_SIZE=1
+PDF_MAX_USES_PER_BROWSER=25
+PDF_IDLE_TIMEOUT=120.0
 BATCH_CONCURRENCY=8
 ```
 

@@ -1,13 +1,22 @@
 """Single URL download endpoint."""
 
 import logging
+from urllib.parse import urlparse
 
 from fastapi import APIRouter, Depends, Header, HTTPException, Path, Query, Request, Response
 
 from ..auth import get_api_key
 from ..content_converter import SelectorTimeoutError
-from ..dependencies import HTTPClientDep, PDFSemaphoreDep
+from ..crawling import RobotsDisallowedError
+from ..dependencies import (
+    DomainThrottleDep,
+    HTTPClientDep,
+    PDFSemaphoreDep,
+    RobotsCheckerDep,
+    SettingsDep,
+)
 from ..http_client import (
+    ContentTooLargeError,
     DownloadError,
     HTTPClientError,
     HTTPTimeoutError,
@@ -37,7 +46,10 @@ router = APIRouter()
     "/{url:path}",
     responses={
         400: {"model": HTTPErrorResponse, "description": "Invalid URL or request"},
+        403: {"model": HTTPErrorResponse, "description": "Disallowed by origin robots.txt"},
         408: {"model": HTTPErrorResponse, "description": "Request timeout"},
+        413: {"model": HTTPErrorResponse, "description": "Response content exceeds size limit"},
+        429: {"model": HTTPErrorResponse, "description": "Rate limit exceeded"},
         500: {"model": HTTPErrorResponse, "description": "Internal server error"},
         502: {"model": HTTPErrorResponse, "description": "Upstream server error"},
         503: {"model": HTTPErrorResponse, "description": "Service temporarily unavailable"},
@@ -47,6 +59,9 @@ async def download_url(
     request: Request,
     http_client: HTTPClientDep,
     pdf_semaphore: PDFSemaphoreDep,
+    robots_checker: RobotsCheckerDep,
+    domain_throttle: DomainThrottleDep,
+    settings: SettingsDep,
     url: str = Path(..., description="The URL to download"),
     accept: str | None = Header(None, description="Accept header for content negotiation"),
     render: bool = Query(False, description="Force Playwright rendering, bypass auto-detection"),
@@ -57,74 +72,30 @@ async def download_url(
     ),
     api_key: str | None = Depends(get_api_key),
 ) -> Response:
-    """
-    Download content from a single URL with content negotiation.
-
-    Supports both single-format and multi-format requests:
-
-    **Single Format (existing behavior):**
-    - text/plain: Plain text extraction
-    - text/html: Original HTML
-    - text/markdown: Markdown conversion
-    - application/pdf: PDF generation
-    - application/json: JSON with base64 content
-
-    **Multi-Format (new feature):**
-    - Accept: text/html, text/markdown → Returns JSON with both formats
-    - Accept: text/plain, application/pdf → Returns JSON with text and base64 PDF
-    - Multiple Accept headers → Combines all requested formats
-
-    **Multi-Format Response Structure:**
-    {
-        "text/html": "<html content>",
-        "text/markdown": "# markdown content",
-        "application/pdf": "base64encodedpdf...",
-        "errors": {
-            "application/pdf": "Error message if failed"
-        }
-    }
-
-    **Query Parameters:**
-        render: Force Playwright browser rendering (default: false).
-                When true, bypasses auto-detection and renders with JavaScript.
-        wait_for: CSS selector to wait for before returning (default: null).
-                  When specified, implies render=true. Times out after 10 seconds.
-
-    Args:
-        url: URL to download
-        accept: Accept header for format selection
-        render: Force Playwright rendering, bypass auto-detection
-        wait_for: CSS selector to wait for before returning (implies render=true)
-        request: FastAPI request object (for accessing Accept headers)
-        api_key: API key for authentication (if enabled)
-
-    Returns:
-        Single format: Response in requested format with appropriate media type
-        Multi-format: JSON response with all requested formats
-
-    Raises:
-        HTTPException: For validation, timeout, or download errors
-    """
+    """Download content from a single URL with content negotiation and ethical crawling."""
     try:
         validated_url = validate_url(url)
         logger.info(f"Processing download request for: {validated_url}")
 
+        if settings.crawling.respect_robots_txt:
+            crawl_delay = await robots_checker.check_allowed(
+                validated_url,
+                settings.crawling.user_agent,
+            )
+            domain = urlparse(validated_url).netloc
+            await domain_throttle.wait_if_needed(domain, crawl_delay)
+
         content, metadata = await http_client.download(validated_url, RequestPriority.HIGH)
 
-        # If wait_for is specified, it implies render=true
         effective_render = render or (wait_for is not None)
-
-        # Check for multi-format request
         formats = parse_accept_headers(request.headers.getlist("accept"))
 
         if len(formats) > 1:
-            # Multi-format request
             logger.info(f"Multi-format request: {formats} (Accept: {accept})")
             return await handle_multi_format_response(
                 validated_url, content, metadata, formats, pdf_semaphore, effective_render, wait_for
             )
         else:
-            # Single format request (backward compatible)
             format_type = parse_accept_header(accept)
             logger.info(f"Requested format: {format_type} (Accept: {accept})")
 
@@ -143,11 +114,25 @@ async def download_url(
             else:
                 return await handle_raw_response(content, metadata)
 
+    except RobotsDisallowedError as e:
+        logger.info(f"Blocked by robots.txt for {url}: {e}")
+        raise HTTPException(
+            status_code=403,
+            detail=ErrorResponse(error=str(e), error_type="robots_disallowed").model_dump(),
+        )
+
     except URLValidationError as e:
         logger.warning(f"URL validation failed for {url}: {e}")
         raise HTTPException(
             status_code=400,
             detail=ErrorResponse(error=str(e), error_type="validation_error").model_dump(),
+        )
+
+    except ContentTooLargeError as e:
+        logger.warning(f"Content size limit exceeded for {url}: {e}")
+        raise HTTPException(
+            status_code=413,
+            detail=ErrorResponse(error=str(e), error_type="content_too_large").model_dump(),
         )
 
     except HTTPTimeoutError as e:

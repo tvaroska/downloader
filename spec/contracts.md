@@ -1,6 +1,6 @@
 # REST API Downloader - API Reference
 
-**Last Updated:** 2026-01-21
+**Last Updated:** 2026-11-01
 
 Complete API documentation for the REST API Downloader service.
 
@@ -110,7 +110,7 @@ Check service health and version information.
 ```json
 {
   "status": "healthy",
-  "version": "0.5.0"
+  "version": "0.6.0"
 }
 ```
 
@@ -511,6 +511,15 @@ downloader_request_duration_seconds_count 1234
 # HELP downloader_errors_total Total errors
 # TYPE downloader_errors_total counter
 downloader_errors_total 12
+# HELP robots_evaluations_total Total robots.txt evaluations
+# TYPE robots_evaluations_total counter
+robots_evaluations_total 850
+# HELP robots_cache_hits_total Total robots.txt cache hits
+# TYPE robots_cache_hits_total counter
+robots_cache_hits_total 790
+# HELP robots_disallowed_total Total URLs disallowed by robots.txt
+# TYPE robots_disallowed_total counter
+robots_disallowed_total 4
 ```
 
 **Status Codes:**
@@ -679,6 +688,38 @@ All errors return JSON responses with structured error information.
 }
 ```
 
+#### Ethical Crawling (`robots.txt`) Disallowed Errors (403 Forbidden)
+
+**Error Type:** `robots_disallowed`
+
+Returned on `GET /{url}` when `RESPECT_ROBOTS_TXT=true` and the origin's `/robots.txt` disallows the path for the configured `USER_AGENT` (`REST-API-Downloader/1.0` default). In `POST /batch`, disallowed URLs record `success: false`, `status_code: 403`, and the disallow message per item while allowed URLs in the same batch continue processing. When `/robots.txt` is unreachable, times out, returns `4xx`/`5xx`, or is malformed, the service **fails open** and caches an allow sentinel rather than blocking downloads.
+
+```json
+{
+  "detail": {
+    "success": false,
+    "error": "Disallowed by robots.txt for User-Agent 'REST-API-Downloader/1.0': https://example.com/private",
+    "error_type": "robots_disallowed"
+  }
+}
+```
+
+#### Content Size Limit Errors (413 Content Too Large)
+
+**Error Type:** `content_too_large`
+
+Returned on `GET /{url}` (and recorded with `status_code: 413` per item in `POST /batch`) when an upstream `Content-Length` header or streamed response body exceeds `CONTENT_MAX_DOWNLOAD_SIZE` (`52428800` bytes / 50MB default). Streaming transfers are aborted immediately without buffering the remainder of the response.
+
+```json
+{
+  "detail": {
+    "success": false,
+    "error": "Content size exceeds maximum allowed size of 52428800 bytes",
+    "error_type": "content_too_large"
+  }
+}
+```
+
 #### HTTP Client Errors
 
 **404 Not Found:**
@@ -787,15 +828,16 @@ When rate limiting is enabled, responses include the following headers:
 | `X-RateLimit-Limit` | Maximum requests allowed in the time window |
 | `X-RateLimit-Remaining` | Requests remaining in current window |
 | `X-RateLimit-Reset` | Unix timestamp when the rate limit resets |
+| `Retry-After` | Seconds until the client may retry (included on `429` responses) |
 
 ### Rate Limit Exceeded Response
 
-**429 Too Many Requests:**
+**429 Too Many Requests** (includes `Retry-After` and `X-RateLimit-*` response headers):
 ```json
 {
   "detail": {
     "success": false,
-    "error": "Rate limit exceeded. Try again later.",
+    "error": "Rate limit exceeded: 60 per 1 minute",
     "error_type": "rate_limit_exceeded"
   }
 }
@@ -815,21 +857,37 @@ Rate limits can be customized via environment variables:
 | `RATELIMIT_STORAGE_URI` | None | Redis URI for distributed limiting |
 | `RATELIMIT_HEADERS_ENABLED` | `true` | Include rate limit headers |
 
-## Security Features
+## Security & Ethical Crawling Features
 
 ### SSRF Protection
 
-The API automatically blocks requests to:
-- Localhost (`127.0.0.1`, `localhost`)
+The API enforces SSRF validation across initial URL pre-flight, every `3xx` HTTP redirect `Location` target (including relative redirects), `robots.txt` origin fetches, and Playwright subresource/navigation routes (`context.route("**/*", ...)`), blocking:
+- Localhost (`127.0.0.1`, `localhost`, `::1`)
 - Private IP ranges (`10.0.0.0/8`, `172.16.0.0/12`, `192.168.0.0/16`)
-- Link-local addresses (`169.254.0.0/16`)
+- Link-local & cloud metadata addresses (`169.254.0.0/16`, `169.254.169.254`)
+- Non-HTTP(S) schemes such as `file://` (Playwright inline `data:`, `blob:`, and `about:` resources remain allowed)
 
-### Input Validation
+### Stateless-First Ethical Crawling (`robots.txt` & `Crawl-delay`)
 
-- URL format validation
-- Scheme validation (only `http` and `https` allowed)
-- Content-length limits
-- User-Agent sanitization
+Before executing `GET /{url}` or each item in `POST /batch`, the service evaluates `{scheme}://{netloc}/robots.txt` and enforces per-domain `Crawl-delay` pacing when `RESPECT_ROBOTS_TXT=true`:
+
+| Environment Variable | Default | Description |
+|---------------------|---------|-------------|
+| `USER_AGENT` | `REST-API-Downloader/1.0` | `User-Agent` sent on HTTP fetches, `/robots.txt` lookups, and Playwright contexts |
+| `RESPECT_ROBOTS_TXT` | `true` | Enable `robots.txt` and `Crawl-delay` enforcement (`false` disables) |
+| `ROBOTS_CACHE_TTL` | `3600` | Cache TTL in seconds for parsed rules and fail-open sentinels |
+| `ROBOTS_CACHE_MAX_SIZE` | `1000` | Max origins in bounded in-memory LRU cache |
+| `ROBOTS_FETCH_TIMEOUT` | `5.0` | Timeout in seconds when fetching `/robots.txt` |
+| `MAX_CRAWL_DELAY` | `30.0` | Maximum `Crawl-delay` honored per domain in seconds |
+
+- **Storage backends:** Uses bounded in-memory TTL/LRU caching and per-domain monotonic slot locks by default when `REDIS_URI` is unset, and coordinates via Redis (`robots:v1:{netloc}`, `throttle:v1:{domain}`) when `REDIS_URI` is configured.
+- **Fail-open behavior:** Unreachable, timed-out, `4xx`/`5xx`, or malformed `robots.txt` responses fail open with a structured warning log and cache an allow sentinel for `ROBOTS_CACHE_TTL`.
+
+### Input & Streaming Size Validation
+
+- URL format validation and scheme sanitization (only `http` and `https` allowed)
+- Streaming `CONTENT_MAX_DOWNLOAD_SIZE` enforcement (`50MB` default -> `413` `content_too_large` via `Content-Length` pre-check and chunked byte counter)
+- `User-Agent` sanitization
 
 ## Content Extraction
 
@@ -1047,9 +1105,11 @@ The `wait_for` parameter has a 10-second timeout. If the selector is not found w
 
 ### Browser Session Limits
 
-- **Timeout:** 30 seconds per browser session
-- **Memory limit:** 512MB per browser context
-- **Concurrency:** Managed via internal browser pool
+- **Timeout:** 30 seconds per browser session (`PDF_PAGE_LOAD_TIMEOUT=30000`)
+- **Memory limit:** 512MB per browser context (`PDF_BROWSER_MEMORY_LIMIT_MB=512`)
+- **Instance recycling:** Automatic Chromium replacement after `50` uses (`PDF_MAX_USES_PER_BROWSER=50`) to prevent V8 heap fragmentation
+- **Idle scale-to-zero:** Browser pool closes automatically after `600` seconds of inactivity (`PDF_IDLE_TIMEOUT=600.0`) and restarts lazily on the next render or PDF request
+- **Concurrency:** Managed via internal browser pool and semaphore
 
 ### Python Example with Rendering
 

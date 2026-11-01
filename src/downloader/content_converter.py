@@ -9,7 +9,12 @@ from bs4 import BeautifulSoup, Tag
 from playwright.async_api import TimeoutError as PlaywrightTimeoutError
 
 from .config import get_settings
-from .pdf_generator import get_shared_pdf_generator
+from .pdf_generator import (
+    PlaywrightPDFGenerator,
+    get_shared_pdf_generator,
+    install_ssrf_route_guard,
+    resolve_browser_user_agent,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -308,17 +313,26 @@ async def convert_content_with_playwright_fallback(
         if not generator:
             raise Exception("PDF generator pool not initialized")
 
-        pool = await generator.ensure_started()
-        if not pool:
-            raise Exception("PDF generator pool not initialized")
+        is_real_generator = isinstance(generator, PlaywrightPDFGenerator)
+        if is_real_generator:
+            generator.mark_context_acquired()
 
-        browser = await pool.get_browser()
+        pool = None
+        browser = None
         context = None
-        page = None
 
         try:
+            pool = await generator.ensure_started()
+            if not pool:
+                raise Exception("PDF generator pool not initialized")
+
+            browser = await pool.get_browser()
+            gen_ua = getattr(generator, "user_agent", None)
+            effective_ua = resolve_browser_user_agent(gen_ua if isinstance(gen_ua, str) else None)
+
             # Create isolated context for this request
-            context = await pool.create_context(browser)
+            context = await pool.create_context(browser, user_agent=effective_ua)
+            await install_ssrf_route_guard(context)
             page = await context.new_page()
 
             logger.info(f"🌐 Loading page with Playwright: {url}")
@@ -349,10 +363,21 @@ async def convert_content_with_playwright_fallback(
             return _convert_html_to_format(html_content, output_format)
 
         finally:
-            # Cleanup in reverse order
+            # Cleanup in reverse order — guard each step so browser release and
+            # idle activity accounting always run even if Chromium disconnected.
             if context:
-                await context.close()
-            await pool.release_browser(browser)
+                try:
+                    await context.close()
+                except Exception as e:
+                    logger.warning(f"Error closing browser context: {e}")
+            active_pool = (generator.pool if is_real_generator else None) or pool
+            if browser is not None and active_pool is not None:
+                try:
+                    await active_pool.release_browser(browser)
+                except Exception as e:
+                    logger.warning(f"Error releasing browser to pool: {e}")
+            if is_real_generator:
+                generator.mark_context_released()
 
     except Exception as e:
         logger.error(f"Playwright {output_format} fallback failed for {url}: {e}")
@@ -386,17 +411,26 @@ async def render_html_with_playwright(
         if not generator:
             raise Exception("PDF generator pool not initialized")
 
-        pool = await generator.ensure_started()
-        if not pool:
-            raise Exception("PDF generator pool not initialized")
+        is_real_generator = isinstance(generator, PlaywrightPDFGenerator)
+        if is_real_generator:
+            generator.mark_context_acquired()
 
-        browser = await pool.get_browser()
+        pool = None
+        browser = None
         context = None
-        page = None
 
         try:
+            pool = await generator.ensure_started()
+            if not pool:
+                raise Exception("PDF generator pool not initialized")
+
+            browser = await pool.get_browser()
+            gen_ua = getattr(generator, "user_agent", None)
+            effective_ua = resolve_browser_user_agent(gen_ua if isinstance(gen_ua, str) else None)
+
             # Create isolated context
-            context = await pool.create_context(browser)
+            context = await pool.create_context(browser, user_agent=effective_ua)
+            await install_ssrf_route_guard(context)
             page = await context.new_page()
 
             logger.info(f"🌐 Loading page with Playwright: {url}")
@@ -434,10 +468,21 @@ async def render_html_with_playwright(
             return html_content.encode("utf-8")
 
         finally:
-            # Cleanup (same pattern)
+            # Cleanup in reverse order — guard each step so browser release and
+            # idle activity accounting always run even if Chromium disconnected.
             if context:
-                await context.close()
-            await pool.release_browser(browser)
+                try:
+                    await context.close()
+                except Exception as e:
+                    logger.warning(f"Error closing browser context: {e}")
+            active_pool = (generator.pool if is_real_generator else None) or pool
+            if browser is not None and active_pool is not None:
+                try:
+                    await active_pool.release_browser(browser)
+                except Exception as e:
+                    logger.warning(f"Error releasing browser to pool: {e}")
+            if is_real_generator:
+                generator.mark_context_released()
 
     except Exception as e:
         logger.error(f"Playwright HTML rendering failed for {url}: {e}")

@@ -9,6 +9,7 @@ This module configures Python logging with:
 
 import logging
 import logging.handlers
+import re
 import sys
 from pathlib import Path
 from typing import Any
@@ -19,6 +20,8 @@ except ImportError:  # pragma: no cover
     from pythonjsonlogger.jsonlogger import JsonFormatter  # type: ignore[no-redef]
 
 from .config import LoggingConfig
+
+_UVICORN_ACCESS_RE = re.compile(r'"([A-Z]+)\s+(\S+)\s+HTTP/[^"]+"\s+(\d{3})')
 
 
 class CustomJsonFormatter(JsonFormatter):
@@ -37,6 +40,27 @@ class CustomJsonFormatter(JsonFormatter):
         log_record["logger"] = record.name
         log_record["level"] = record.levelname
         log_record["timestamp"] = self.formatTime(record, self.datefmt)
+
+        # Extract structured HTTP fields for uvicorn.access so Cloud Logging filters match jsonPayload.path
+        if record.name == "uvicorn.access":
+            if isinstance(record.args, tuple) and len(record.args) >= 5:
+                method = str(record.args[1])
+                raw_path = str(record.args[2])
+                path = raw_path.split("?", 1)[0]
+                raw_status = record.args[4]
+                try:
+                    status_code: int | str = int(str(raw_status))
+                except (TypeError, ValueError):
+                    status_code = str(raw_status)
+                log_record.setdefault("method", method)
+                log_record.setdefault("path", path)
+                log_record.setdefault("status_code", status_code)
+            else:
+                match = _UVICORN_ACCESS_RE.search(record.getMessage())
+                if match:
+                    log_record.setdefault("method", match.group(1))
+                    log_record.setdefault("path", match.group(2).split("?", 1)[0])
+                    log_record.setdefault("status_code", int(match.group(3)))
 
         # Add exception info if present
         if record.exc_info:

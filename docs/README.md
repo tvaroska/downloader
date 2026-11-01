@@ -1,6 +1,6 @@
 # Documentation
 
-**Last Updated:** 2026-01-20
+**Last Updated:** 2026-11-01
 
 Technical documentation for the REST API Downloader.
 
@@ -13,16 +13,17 @@ Technical documentation for the REST API Downloader.
 - **[Deployment Guide](./guides/deployment.md)** - Production deployment runbook with Docker, configuration, and security
 - **[Configuration Management](./guides/configuration.md)** - Comprehensive guide to Pydantic Settings-based configuration system
 - **[Monitoring Implementation](./guides/monitoring.md)** - Production monitoring setup with Prometheus and Grafana
+- **[Scheduling Guide](./guides/scheduling.md)** - Cron-based scheduled download setup and usage
 
 ### Strategic Planning
-- **[Product Roadmap](./roadmap.md)** - Strategic priorities and feature roadmap
-- **[Feature History](./features/)** - Completed feature documentation
+- **[Product Roadmap](./roadmap.md)** - Canonical strategic priorities, release milestones, and deferred backlog
+- **[Feature History](./features/)** - Completed sprint and feature archives
 
 ### Quick Links
 - **[README](../README.md)** - Project overview and getting started guide
 - **[Examples](../examples/README.md)** - Practical usage examples
 - **[Requirements (spec/)](../spec/)** - API contracts and product requirements (the WHAT)
-- **[TODO](../TODO.md)** - Live sprint status · **[Decisions](../DECISIONS.md)** · **[Critical paths](../CRITICAL.md)**
+- **[Roadmap](./roadmap.md)** - Strategic backlog · **[Decisions](../DECISIONS.md)** · **[Critical paths](../CRITICAL.md)**
 
 ## Documentation Structure
 
@@ -75,6 +76,11 @@ monitoring/
 - Review [Product Roadmap](./roadmap.md) - strategic priorities
 
 ## Recent Updates
+
+### November 2026 (`v0.6.0`)
+- Delivered Sprint 4 Ethical Crawling (`robots.txt` compliance, `Crawl-delay` throttling, `HTTP 403` `robots_disallowed`, and Prometheus `robots_*` metrics) — archived in [docs/features/ethical-crawling.md](./features/ethical-crawling.md)
+- Documented `v0.6.0` production hardening (`HTTP 413` streaming `CONTENT_MAX_DOWNLOAD_SIZE`, redirect & Playwright SSRF route blocking, active `HTTP 429` rate limiting, browser pool recycling & idle scale-to-zero, JSON `uvicorn.access` fields, and unprivileged container port `:8000`)
+- Consolidated project tracking to pure Roadmap-first ([docs/roadmap.md](./roadmap.md) + [DECISIONS.md](../DECISIONS.md))
 
 ### January 2026
 - Reorganized documentation structure (merged doc/ into docs/)

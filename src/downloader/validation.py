@@ -6,8 +6,6 @@ import re
 import socket
 from urllib.parse import urlparse
 
-import httpx
-
 from .config import Settings, get_settings
 
 logger = logging.getLogger(__name__)
@@ -281,7 +279,8 @@ def sanitize_user_agent(user_agent: str | None = None) -> str:
     if user_agent:
         # Remove potentially harmful characters
         sanitized = re.sub(r"[^\w\s\-\.\(\)/;:,]", "", user_agent)
-        return sanitized[:200]  # Limit length
+        if sanitized:
+            return sanitized[:200]  # Limit length
 
     # Default user agent
-    return f"REST-API-Downloader/{httpx.__version__}"
+    return "REST-API-Downloader/1.0"

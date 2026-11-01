@@ -37,8 +37,11 @@ uv run --no-sync mypy src/
 uv run --no-sync pytest -m "not (integration or e2e or network or requires_redis or requires_playwright)"
 ```
 
-- `tests/conftest.py` provides deterministic offline DNS resolution for fixture domains (`example.com`, `test.com`, `success.com`, `fail.com`, `google.com`, `localhost` -> `127.0.0.1`, unknown -> `socket.gaierror`) so SSRF loopback and DNS-failure unit tests stay real without live network calls.
-- `PlaywrightPDFGenerator` initializes its Chromium `BrowserPool` lazily on first `generate_pdf()` or `render_html_with_playwright()` call, keeping mocked `TestClient(app)` tests sub-second with zero Chromium subprocesses.
+- `tests/conftest.py` provides deterministic offline DNS resolution for fixture domains (`example.com`, `test.com`, `success.com`, `fail.com`, `google.com`, `localhost` -> `127.0.0.1`, unknown -> `socket.gaierror`) and blocks accidental outbound TCP connections unless `@pytest.mark.network` or `@pytest.mark.e2e` is set, so SSRF loopback, DNS-failure, and `RobotsChecker` fail-open unit tests stay 100% deterministic offline and unsandboxed.
+- `PlaywrightPDFGenerator` initializes its Chromium `BrowserPool` lazily on first `generate_pdf()` or `render_html_with_playwright()` call, recycles browsers after `PDF_MAX_USES_PER_BROWSER` (`50`), and scales idle pools back to `None` after `PDF_IDLE_TIMEOUT` (`600s`), keeping mocked `TestClient(app)` tests sub-second with zero Chromium subprocesses.
+- `RobotsChecker` (`src/downloader/crawling/robots.py`) uses its own dedicated SSRF-validated HTTP fetcher (never consuming mocked `HTTPClientDep` calls), caches rules in a bounded in-memory TTL/LRU `OrderedDict` by default (upgrading to Redis when `REDIS_URI` is set), returns `HTTP 403` (`robots_disallowed`) when blocked, and fails open with cached sentinels when `/robots.txt` is unreachable.
+- `HTTPClient` enforces `CONTENT_MAX_DOWNLOAD_SIZE` via `Content-Length` pre-checks and streaming chunk counters (`HTTP 413` `content_too_large`) and re-validates every `3xx` redirect `Location` target via `validate_url()`. Playwright contexts also attach `install_ssrf_route_guard` (`context.route("**/*", ...)`) blocking private/loopback/metadata IPs and `file://` URLs.
+- `RateLimitMiddleware` actively enforces moving-window limits (`HTTP 429` `rate_limit_exceeded` + `Retry-After` + `X-RateLimit-*` headers) and resets in-memory storage on app lifespan startup so sequential `TestClient(app)` runs stay isolated.
 - Use `just fmt` to apply both `ruff check --fix` and `ruff format` across `src/`, `tests/`, and `examples/`.
 
 ---
@@ -70,16 +73,17 @@ docker stop downloader-redis
 
 CI/CD is defined exclusively in [`cloudbuild.yaml`](../../cloudbuild.yaml) and [`ci/trigger.yaml`](../../ci/trigger.yaml):
 
-- **`downloader-main` (push to `main`):** Runs `uv sync --frozen`, `ruff check`, `ruff format --check`, `mypy src/`, and fast `pytest`, then builds [`Dockerfile`](../../Dockerfile) (`python:3.13-slim` + `uv sync --frozen --no-dev --no-editable` + Playwright Chromium) and verifies `python -c "import src.downloader.main"` without pushing release tags.
-- **`downloader-tag` (annotated tag `vX.Y.Z`):** Runs the full verification gate and pushes `us-central1-docker.pkg.dev/sites-470716/containers/downloader:${TAG_NAME}` and `:latest` for Flux CD GitOps rollout to `https://download.tvaroska.sk`.
+- **`downloader-main` (push to `main`):** Runs `uv sync --frozen`, `ruff check`, `ruff format --check`, `mypy src/`, and fast `pytest`, then builds [`Dockerfile`](../../Dockerfile) (`python:3.13-slim`, non-root user on unprivileged port `:8000`, `uv sync --frozen --no-dev --no-editable` + Playwright Chromium) and verifies `python -c "import src.downloader.main"` without pushing release tags.
+- **`downloader-tag` (annotated tag `vX.Y.Z`):** Runs the full verification gate and pushes `us-central1-docker.pkg.dev/sites-470716/containers/downloader:${TAG_NAME}` and `:latest` for Flux CD GitOps rollout to `https://download.tvaroska.sk` (`Service/download` maps `:80 -> targetPort: 8000`; `CustomJsonFormatter` emits top-level `path="/health"` on `uvicorn.access` for log filtering).
 - **Lockfile Release Rule:** Whenever bumping `version` in [`pyproject.toml`](../../pyproject.toml), always run `uv lock --no-config --default-index https://pypi.org/simple` and commit the updated `uv.lock` before tagging `vX.Y.Z`; otherwise `uv sync --frozen` in `cloudbuild.yaml` and `Dockerfile` will fail the tag build.
+- **Roadmap-First Backlog:** Release milestones and deferred items live in [`docs/roadmap.md`](../../docs/roadmap.md) with architectural rationale in [`DECISIONS.md`](../../DECISIONS.md) and completed sprint archives in `docs/features/*.md`.
 
 ---
 
 ## 5. `CRITICAL.md` Escalation & `.secrets.baseline` Hygiene
 
-1. **Protected Paths ([`CRITICAL.md`](../../CRITICAL.md)):** Any change touching `spec/`, `src/downloader/auth.py`, `src/downloader/validation.py`, `src/downloader/config.py`, `src/downloader/quota/*`, `src/downloader/ratelimit_middleware.py`, `src/downloader/browser/`, `Dockerfile`, `docker-compose.prod.yml`, `cloudbuild.yaml`, or `ci/trigger.yaml` requires explicit security and contract review before commit. `spec/` is status-free and protected — propose contract updates for review rather than editing `spec/` unprompted.
+1. **Protected Paths ([`CRITICAL.md`](../../CRITICAL.md)):** Any change touching `spec/`, `src/downloader/auth.py`, `src/downloader/validation.py`, `src/downloader/http_client.py`, `src/downloader/crawling/*`, `src/downloader/config.py`, `src/downloader/quota/*`, `src/downloader/ratelimit_middleware.py`, `src/downloader/browser/`, `src/downloader/pdf_generator.py`, `src/downloader/content_converter.py`, `Dockerfile`, `docker-compose.prod.yml`, `cloudbuild.yaml`, or `ci/trigger.yaml` requires explicit security and contract review before commit. `spec/` is status-free and protected — propose contract updates for review rather than editing `spec/` unprompted.
 2. **Secrets Baseline ([`.secrets.baseline`](../../.secrets.baseline)):** Pre-commit runs `detect-secrets`. When tracked files with allowlisted false-positive placeholders move or change line numbers, regenerate cleanly rather than hand-editing JSON hashes or line numbers:
    ```bash
-   uv run --no-sync detect-secrets scan --update .secrets.baseline
+   uv run --no-sync detect-secrets scan --baseline .secrets.baseline
    ```

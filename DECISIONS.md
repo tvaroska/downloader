@@ -6,6 +6,43 @@ history — supersede an old decision with a new entry that references it.
 
 ---
 
+## 2026-11-01 — `v0.6.0` Ethical Crawling, production hardening & Roadmap-first consolidation
+
+- **Decision (Stateless-first Ethical Crawling & `Crawl-delay` — completes Sprint 4):**
+  Shipped `CrawlingConfig` (`USER_AGENT`, `RESPECT_ROBOTS_TXT`, `ROBOTS_CACHE_TTL`,
+  `ROBOTS_CACHE_MAX_SIZE`, `ROBOTS_FETCH_TIMEOUT`, `MAX_CRAWL_DELAY`), `RobotsChecker`
+  (`src/downloader/crawling/robots.py`), and `DomainThrottle`
+  (`src/downloader/crawling/throttle.py`). Both default to bounded in-memory LRU/TTL
+  state (`OrderedDict` + per-domain monotonic slot locks) when `REDIS_URI` is unset
+  and coordinate via Redis (`robots:v1:{netloc}`, `throttle:v1:{domain}`) when
+  configured. `RobotsChecker` uses its own SSRF-validated fetcher rather than the
+  route `HTTPClientDep`, fails open with cached sentinels when origins are unreachable
+  or malformed, and maps disallowed URLs to `HTTP 403` (`robots_disallowed`).
+- **Decision (Defense-in-depth HTTP, SSRF, Playwright, rate-limit, logging & `:8000` hardening):**
+  - Enforced streaming `CONTENT_MAX_DOWNLOAD_SIZE` in `HTTPClient` (aborting oversized
+    `Content-Length` headers pre-read and chunked streams mid-flight -> `HTTP 413`
+    `content_too_large`) and re-validated every `3xx` redirect `Location` hop via
+    `validate_url()` (`SSRFProtectionError`).
+  - Added Playwright `context.route("**/*", ...)` SSRF interception across
+    `pdf_generator.py` and `content_converter.py` (blocking RFC1918, loopback,
+    link-local/cloud metadata `169.254.169.254`, and `file://` subresources), browser
+    recycling at `PDF_MAX_USES_PER_BROWSER=50`, and idle pool scale-to-zero after
+    `PDF_IDLE_TIMEOUT=600s`.
+  - Activated moving-window enforcement in `RateLimitMiddleware` (`HTTP 429`
+    `rate_limit_exceeded` + `Retry-After` + `X-RateLimit-*` headers, matching
+    `/http...` paths to `download_limit`).
+  - Extracted top-level `method`, `path`, and `status_code` fields on `uvicorn.access`
+    records in `CustomJsonFormatter`, and moved the container listener from `:80` to
+    unprivileged `:8000` (eliminating privileged port `sysctls`).
+- **Decision (Pure Roadmap-first consolidation — supersedes `TODO.md` tracker from 2026-08-20):**
+  With Sprint 4 (`S4-be-1..5`, `S4-test-1`, `S4-doc-1`) complete and `0` active open
+  sprint tasks remaining, archived Sprint 4 into `docs/features/ethical-crawling.md`
+  and removed root `TODO.md`. Roadmap milestones and deferred backlog items now live
+  exclusively in `docs/roadmap.md`, architectural rationale in `DECISIONS.md`, and
+  wire contracts in `spec/contracts.md`.
+
+---
+
 ## 2026-11-01 — Stateless-first Sprint 4 re-alignment & offline verification gate
 
 - **Decision (Sprint 4 vs. Sprint 5 re-ordering — supersedes 2026-01-21 roadmap order):**

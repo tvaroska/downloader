@@ -158,6 +158,11 @@ class MetricsCollector:
             "total_requests": total_requests,
             "total_errors": total_errors,
             "endpoints": endpoints,
+            "crawling": {
+                "robots_evaluations_total": int(self._counters.get("robots_evaluations_total", 0)),
+                "robots_cache_hits_total": int(self._counters.get("robots_cache_hits_total", 0)),
+                "robots_disallowed_total": int(self._counters.get("robots_disallowed_total", 0)),
+            },
         }
 
         for endpoint, perf in self._performance_metrics.items():
@@ -232,6 +237,21 @@ class MetricsCollector:
         lines.append("# TYPE downloader_gauge gauge")
         for name, value in self._gauges.items():
             lines.append(f'downloader_gauge{{name="{name}"}} {value}')
+        lines.append("")
+
+        # Ethical crawling counters
+        robots_evals = int(self._counters.get("robots_evaluations_total", 0))
+        robots_hits = int(self._counters.get("robots_cache_hits_total", 0))
+        robots_disallowed = int(self._counters.get("robots_disallowed_total", 0))
+        lines.append("# HELP robots_evaluations_total Total robots.txt evaluations")
+        lines.append("# TYPE robots_evaluations_total counter")
+        lines.append(f"robots_evaluations_total {robots_evals}")
+        lines.append("# HELP robots_cache_hits_total Total robots.txt cache hits")
+        lines.append("# TYPE robots_cache_hits_total counter")
+        lines.append(f"robots_cache_hits_total {robots_hits}")
+        lines.append("# HELP robots_disallowed_total Total URLs disallowed by robots.txt")
+        lines.append("# TYPE robots_disallowed_total counter")
+        lines.append(f"robots_disallowed_total {robots_disallowed}")
 
         return "\n".join(lines)
 
@@ -370,3 +390,21 @@ def record_html_rendering_success(original_size: int, rendered_size: int):
     if original_size > 0:
         size_ratio = rendered_size / original_size
         set_gauge("html_rendering_latest_size_ratio", size_ratio)
+
+
+# Ethical crawling metrics
+
+
+def record_robots_evaluation() -> None:
+    """Record a robots.txt evaluation."""
+    increment_counter("robots_evaluations_total")
+
+
+def record_robots_cache_hit() -> None:
+    """Record a cache hit when evaluating robots.txt."""
+    increment_counter("robots_cache_hits_total")
+
+
+def record_robots_disallowed() -> None:
+    """Record a URL blocked by robots.txt."""
+    increment_counter("robots_disallowed_total")

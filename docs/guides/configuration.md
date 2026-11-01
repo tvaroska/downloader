@@ -1,6 +1,6 @@
 # Configuration Management Implementation
 
-**Last Updated:** 2026-01-20
+**Last Updated:** 2026-11-01
 
 ## Summary
 
@@ -43,18 +43,21 @@ Implemented comprehensive configuration management system using Pydantic Setting
 
 ## 📁 Files Created
 
-### 1. `src/downloader/config.py` (445 lines)
+### 1. `src/downloader/config.py` (45+ settings)
 Centralized configuration using Pydantic Settings with:
 
-- **HTTPClientConfig**: Connection pooling, timeouts, concurrency
-- **PDFConfig**: PDF generation settings, Playwright configuration
+- **HTTPClientConfig**: Connection pooling, timeouts, concurrency, redirect SSRF limits
+- **PDFConfig**: PDF generation settings, Playwright concurrency, `PDF_MAX_USES_PER_BROWSER` (`50`), and `PDF_IDLE_TIMEOUT` (`600s` scale-to-zero)
 - **BatchConfig**: Batch processing limits and concurrency
-- **ContentConfig**: Download size limits, cache settings
+- **ContentConfig**: Streaming `CONTENT_MAX_DOWNLOAD_SIZE` (`50MB` -> `HTTP 413`), cache settings, JS-heavy domain heuristics
+- **CrawlingConfig**: Stateless-first ethical crawling (`USER_AGENT`, `RESPECT_ROBOTS_TXT`, `ROBOTS_CACHE_TTL`, `ROBOTS_CACHE_MAX_SIZE`, `ROBOTS_FETCH_TIMEOUT`, `MAX_CRAWL_DELAY`)
 - **RedisConfig**: Redis connection and pooling
+- **SchedulerConfig**: Cron worker and misfire settings
 - **AuthConfig**: API key authentication
-- **LoggingConfig**: Log levels, formats, rotation
-- **SSRFConfig**: Security settings for SSRF protection
+- **LoggingConfig**: Log levels, JSON formatting (`CustomJsonFormatter` emitting top-level `method`, `path`, `status_code` on `uvicorn.access`), rotation
+- **SSRFConfig**: Security settings for pre-flight, redirect, `robots.txt`, and Playwright SSRF protection
 - **CORSConfig**: CORS allowed origins
+- **RateLimitConfig**: Moving-window rate limit tiers (`HTTP 429` + `Retry-After` + `X-RateLimit-*`)
 - **Settings**: Main settings class combining all configs
 
 **Key Features**:
@@ -399,7 +402,9 @@ This implementation addresses:
 
 ---
 
-## Rate Limiting Storage Fallback
+## Rate Limiting Storage Fallback & Enforcement
+
+`RateLimitMiddleware` enforces moving-window rate limits (`status_limit` for `/health*` and `/metrics*`, `batch_limit` for `/batch*` and `/jobs*`, `download_limit` for `/{url}` downloads, and `default_limit` for other endpoints) and emits `X-RateLimit-Limit`, `X-RateLimit-Remaining`, and `X-RateLimit-Reset` headers (plus `HTTP 429` `rate_limit_exceeded` and `Retry-After` when exceeded).
 
 The rate limiter storage backend is resolved using a three-step fallback chain:
 
@@ -413,6 +418,32 @@ storage_uri = settings.ratelimit.storage_uri or settings.redis.redis_uri or "mem
 ```
 
 > **Tip:** For production multi-instance deployments, ensure at least `REDIS_URI` is configured so rate limits are enforced globally.
+
+---
+
+## Ethical Crawling, Browser Recycling & Streaming Guards (`v0.6.0`)
+
+### Stateless-First Ethical Crawling (`CrawlingConfig`)
+
+| Environment Variable | Default | Range | Description |
+|---------------------|---------|-------|-------------|
+| `USER_AGENT` | `REST-API-Downloader/1.0` | string | Outbound `User-Agent` sent by `HTTPClient`, `RobotsChecker`, and Playwright contexts |
+| `RESPECT_ROBOTS_TXT` | `true` | bool | Evaluate `/robots.txt` and `Crawl-delay` before `GET /{url}` and `POST /batch` (`false` opts out) |
+| `ROBOTS_CACHE_TTL` | `3600` | `60..86400` | TTL in seconds for cached `robots.txt` rules and fail-open sentinels |
+| `ROBOTS_CACHE_MAX_SIZE` | `1000` | `10..50000` | Max origins retained in bounded in-memory `OrderedDict` LRU cache |
+| `ROBOTS_FETCH_TIMEOUT` | `5.0` | `1.0..60.0` | Timeout in seconds when fetching origin `/robots.txt` |
+| `MAX_CRAWL_DELAY` | `30.0` | `0.0..300.0` | Maximum `Crawl-delay` honored per domain in seconds |
+
+- **Cache & Throttle Backend Parity:** When `REDIS_URI` is unset, `RobotsChecker` and `DomainThrottle` operate 100% in-memory with bounded LRU state. When `REDIS_URI` is configured, rules and domain delay slots coordinate across pods via `robots:v1:{netloc}` and `throttle:v1:{domain}`, falling back cleanly to memory on Redis errors.
+- **Disallowed vs Fail-Open Behavior:** Disallowed URLs return `HTTP 403` (`error_type: "robots_disallowed"` on `GET /{url}`, or per-URL `status_code=403` in `/batch`). Unreachable, timed-out, `4xx`/`5xx`, or malformed `robots.txt` responses fail open with a structured warning log and cache an `allow_all` sentinel for `ROBOTS_CACHE_TTL`.
+
+### Browser Pool Recycling & Scale-to-Zero (`PDFConfig`)
+- **`PDF_MAX_USES_PER_BROWSER` (`default: 50`, `1..10000`):** Automatically replaces a Chromium instance once its usage count reaches `50` to prevent V8 heap fragmentation on long-lived pods.
+- **`PDF_IDLE_TIMEOUT` (`default: 600.0`, `0.0..86400.0`):** Closes the shared `BrowserPool` after 10 minutes of zero active contexts (`scale-to-zero`) and lazily re-initializes Chromium on the next PDF or rendered-HTML request.
+
+### Streaming Size Limit & Structured Access Logs
+- **`CONTENT_MAX_DOWNLOAD_SIZE` (`default: 52428800` / 50MB):** `HTTPClient` checks `Content-Length` headers prior to reading body bytes and counts chunks during streaming downloads, aborting immediately with `HTTP 413` (`content_too_large`) when exceeded.
+- **`LOG_JSON_LOGS=true` (`CustomJsonFormatter`):** Automatically extracts top-level `method`, `path` (query-stripped, e.g. `"/health"`), and `status_code` fields on `uvicorn.access` records so log ingestion filters can match health probes cleanly.
 
 ---
 

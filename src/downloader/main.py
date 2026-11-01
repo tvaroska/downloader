@@ -17,6 +17,7 @@ from . import __version__
 from .api import router
 from .auth import get_auth_status
 from .config import get_settings
+from .crawling import DomainThrottle, RobotsChecker
 from .http_client import HTTPClient
 from .job_manager import JobManager
 from .logging_config import get_logger, setup_logging
@@ -26,7 +27,7 @@ from .pdf_generator import (
     cleanup_pdf_generator,
     set_shared_pdf_generator,
 )
-from .ratelimit_middleware import RateLimitMiddleware
+from .ratelimit_middleware import RateLimitMiddleware, reset_rate_limiter
 from .scheduler import SchedulerService
 
 # Load settings and configure logging
@@ -52,6 +53,7 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     # Store settings in app state (call get_settings() to support test env reloading)
     current_settings = get_settings()
     app.state.settings = current_settings
+    reset_rate_limiter(limiter)
 
     # Log configuration validation messages
     logger.info(f"Starting {current_settings.app_name} v{__version__}")
@@ -69,8 +71,14 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     http_client = HTTPClient(
         timeout=current_settings.http.request_timeout,
         max_redirects=current_settings.http.max_redirects,
+        user_agent=current_settings.crawling.user_agent,
         max_concurrent=current_settings.http.max_concurrent_api,
         max_concurrent_batch=current_settings.http.max_concurrent_batch,
+        max_download_size=current_settings.content.max_download_size,
+        max_connections=current_settings.http.max_connections,
+        max_keepalive_connections=current_settings.http.max_keepalive_connections,
+        keepalive_expiry=current_settings.http.keepalive_expiry,
+        http2=current_settings.http.http2_enabled,
     )
     app.state.http_client = http_client
     logger.info("HTTP client initialized")
@@ -83,6 +91,9 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
             page_load_timeout=current_settings.pdf.page_load_timeout,
             wait_until=current_settings.pdf.wait_until,
             memory_limit_mb=current_settings.pdf.browser_memory_limit_mb,
+            max_uses_per_browser=current_settings.pdf.max_uses_per_browser,
+            idle_timeout=current_settings.pdf.idle_timeout,
+            user_agent=current_settings.crawling.user_agent,
         )
         set_shared_pdf_generator(pdf_generator)
         app.state.pdf_generator = pdf_generator
@@ -144,6 +155,22 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         app.state.execution_storage = None
         logger.info("Scheduler not initialized (Redis not configured)")
 
+    # Initialize stateless-first ethical crawling (uses Redis when available, memory otherwise)
+    redis_client = app.state.job_manager.redis_client if app.state.job_manager else None
+    app.state.robots_checker = RobotsChecker(
+        user_agent=current_settings.crawling.user_agent,
+        robots_cache_ttl=current_settings.crawling.robots_cache_ttl,
+        robots_cache_max_size=current_settings.crawling.robots_cache_max_size,
+        robots_fetch_timeout=current_settings.crawling.robots_fetch_timeout,
+        max_crawl_delay=current_settings.crawling.max_crawl_delay,
+        redis_client=redis_client,
+    )
+    app.state.domain_throttle = DomainThrottle(
+        max_crawl_delay=current_settings.crawling.max_crawl_delay,
+        max_size=current_settings.crawling.robots_cache_max_size,
+        redis_client=redis_client,
+    )
+
     # Start system metrics collection
     logger.info("Starting system metrics collection...")
     system_metrics = get_system_metrics_collector()
@@ -157,6 +184,10 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
 
     # Stop metrics collection
     await system_metrics.stop()
+
+    # Close robots checker client
+    if getattr(app.state, "robots_checker", None):
+        await app.state.robots_checker.close()
 
     # Close HTTP client
     await http_client.close()
@@ -288,6 +319,8 @@ async def health_check(request: Request) -> dict[str, Any]:
             "batch_concurrency": batch_limit,
             "max_download_size_mb": app_settings.content.max_download_size / 1024 / 1024,
             "cpu_cores": multiprocessing.cpu_count(),
+            "respect_robots_txt": get_settings().crawling.respect_robots_txt,
+            "user_agent": get_settings().crawling.user_agent,
         },
         "services": {
             "job_manager": job_manager_status,

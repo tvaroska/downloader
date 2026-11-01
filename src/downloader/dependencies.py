@@ -13,6 +13,7 @@ from fastapi import Depends, Request
 from slowapi import Limiter
 
 from .config import Settings, get_settings
+from .crawling import DomainThrottle, RobotsChecker
 from .http_client import HTTPClient
 from .job_manager import JobManager
 from .pdf_generator import PlaywrightPDFGenerator
@@ -187,6 +188,41 @@ async def get_execution_storage_dependency(request: Request) -> ExecutionStorage
     return getattr(request.app.state, "execution_storage", None)
 
 
+async def get_robots_checker(request: Request) -> RobotsChecker:
+    """Get or lazily initialize the RobotsChecker instance from app state."""
+    checker: RobotsChecker | None = getattr(request.app.state, "robots_checker", None)
+    if checker is None:
+        cfg = get_settings().crawling
+        job_manager: JobManager | None = getattr(request.app.state, "job_manager", None)
+        redis_client = job_manager.redis_client if job_manager is not None else None
+        checker = RobotsChecker(
+            user_agent=cfg.user_agent,
+            robots_cache_ttl=cfg.robots_cache_ttl,
+            robots_cache_max_size=cfg.robots_cache_max_size,
+            robots_fetch_timeout=cfg.robots_fetch_timeout,
+            max_crawl_delay=cfg.max_crawl_delay,
+            redis_client=redis_client,
+        )
+        request.app.state.robots_checker = checker
+    return checker
+
+
+async def get_domain_throttle(request: Request) -> DomainThrottle:
+    """Get or lazily initialize the DomainThrottle instance from app state."""
+    throttle: DomainThrottle | None = getattr(request.app.state, "domain_throttle", None)
+    if throttle is None:
+        cfg = get_settings().crawling
+        job_manager: JobManager | None = getattr(request.app.state, "job_manager", None)
+        redis_client = job_manager.redis_client if job_manager is not None else None
+        throttle = DomainThrottle(
+            max_crawl_delay=cfg.max_crawl_delay,
+            max_size=cfg.robots_cache_max_size,
+            redis_client=redis_client,
+        )
+        request.app.state.domain_throttle = throttle
+    return throttle
+
+
 # Type aliases for cleaner route signatures
 SettingsDep = Annotated[Settings, Depends(get_settings_dependency)]
 HTTPClientDep = Annotated[HTTPClient, Depends(get_http_client)]
@@ -197,3 +233,5 @@ BatchSemaphoreDep = Annotated[asyncio.Semaphore, Depends(get_batch_semaphore)]
 RateLimiterDep = Annotated[Limiter, Depends(get_rate_limiter)]
 SchedulerDep = Annotated[SchedulerService | None, Depends(get_scheduler_dependency)]
 ExecutionStorageDep = Annotated[ExecutionStorage | None, Depends(get_execution_storage_dependency)]
+RobotsCheckerDep = Annotated[RobotsChecker, Depends(get_robots_checker)]
+DomainThrottleDep = Annotated[DomainThrottle, Depends(get_domain_throttle)]
