@@ -8,6 +8,8 @@ Tests for:
 - ScheduledJobExecutor content processing
 """
 
+import base64
+import json
 from datetime import UTC, datetime, timedelta
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -869,7 +871,7 @@ class TestScheduledJobExecutorProcessContent:
 
     @pytest.mark.asyncio
     async def test_process_content_json_format(self, executor):
-        """Test JSON format returns raw bytes."""
+        """Test JSON format returns serialized JSON envelope with base64 content."""
         content = b'{"key": "value"}'
         metadata = {"content_type": "application/json"}
 
@@ -880,7 +882,13 @@ class TestScheduledJobExecutorProcessContent:
             format="json",
         )
 
-        assert result == content
+        assert isinstance(result, str)
+        envelope = json.loads(result)
+        assert envelope["success"] is True
+        assert envelope["url"] == "https://example.com"
+        assert envelope["size"] == len(content)
+        assert envelope["content_type"] == "application/json"
+        assert base64.b64decode(envelope["content"]) == content
 
     @pytest.mark.asyncio
     async def test_process_content_raw_format(self, executor):

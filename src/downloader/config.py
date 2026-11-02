@@ -5,9 +5,11 @@ All environment variables and magic numbers are documented here with their ratio
 """
 
 import multiprocessing
-from typing import Literal
+import os
+import sys
+from typing import Any, Literal
 
-from pydantic import Field, field_validator
+from pydantic import Field, PrivateAttr, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 from . import __version__
@@ -361,13 +363,31 @@ class SchedulerConfig(BaseSettings):
 class AuthConfig(BaseSettings):
     """Authentication configuration."""
 
+    _explicit_api_key: bool = PrivateAttr(default=False)
+    _loaded_from_env: bool = PrivateAttr(default=False)
+
     api_key: str | None = Field(
         default=None,
         alias="DOWNLOADER_KEY",
         description="API key for authentication (if None, auth is disabled)",
     )
 
-    model_config = SettingsConfigDict(case_sensitive=True)
+    model_config = SettingsConfigDict(
+        case_sensitive=True,
+        populate_by_name=True,
+        env_file=".env",
+        env_file_encoding="utf-8",
+        extra="ignore",
+    )
+
+    def __init__(self, **values: Any) -> None:
+        explicit = "api_key" in values or "DOWNLOADER_KEY" in values
+        from_env = not explicit and "DOWNLOADER_KEY" in os.environ
+        if "_env_file" not in values and "pytest" in sys.modules:
+            values["_env_file"] = None
+        super().__init__(**values)
+        self._explicit_api_key = explicit
+        self._loaded_from_env = from_env
 
 
 class LoggingConfig(BaseSettings):
@@ -519,7 +539,26 @@ class RateLimitConfig(BaseSettings):
         description="Include rate limit headers in responses (X-RateLimit-*)",
     )
 
+    trusted_proxies: list[str] = Field(
+        default=[
+            "127.0.0.1",
+            "::1",
+            "10.0.0.0/8",
+            "172.16.0.0/12",
+            "192.168.0.0/16",
+        ],
+        description="Trusted reverse-proxy IPs or CIDRs allowed to supply X-Forwarded-For",
+    )
+
     model_config = SettingsConfigDict(env_prefix="RATELIMIT_")
+
+    @field_validator("trusted_proxies", mode="before")
+    @classmethod
+    def parse_trusted_proxies(cls, v: Any) -> Any:
+        """Parse comma-separated proxy IPs/CIDRs from environment variable."""
+        if isinstance(v, str):
+            return [item.strip() for item in v.split(",") if item.strip()]
+        return v
 
 
 class CrawlingConfig(BaseSettings):

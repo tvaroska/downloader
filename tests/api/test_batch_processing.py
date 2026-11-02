@@ -510,7 +510,9 @@ class TestProcessSingleUrlInBatch:
         """Test URL validation error handling."""
         url_request = BatchURLRequest(url="invalid-url", format="text")
 
-        with patch("src.downloader.routes.batch.validate_url") as mock_validate:
+        with patch(
+            "src.downloader.routes.batch.validate_url_async", new_callable=AsyncMock
+        ) as mock_validate:
             mock_validate.side_effect = URLValidationError("Invalid URL format")
 
             result = await process_single_url_in_batch(
@@ -765,7 +767,12 @@ class TestProcessBackgroundBatchJob:
         assert summary["success_rate"] == 100.0
         assert summary["total_duration"] > 0
 
-        mock_job_manager.update_job_status.assert_called_once()
+        assert mock_job_manager.update_job_status.call_count == 3
+        final_kwargs = mock_job_manager.update_job_status.call_args.kwargs
+        assert final_kwargs["progress"] == 100
+        assert final_kwargs["processed_urls"] == 3
+        assert final_kwargs["successful_urls"] == 3
+        assert final_kwargs["failed_urls"] == 0
 
     @pytest.mark.asyncio
     async def test_all_urls_fail(self, mock_job_manager, batch_semaphore, pdf_semaphore):
@@ -825,7 +832,11 @@ class TestProcessBackgroundBatchJob:
             timeout_per_url=30,
         )
 
-        with patch("src.downloader.routes.batch.validate_url", side_effect=lambda url: url):
+        with patch(
+            "src.downloader.routes.batch.validate_url_async",
+            new_callable=AsyncMock,
+            side_effect=lambda url: url,
+        ):
             results, summary = await process_background_batch_job(
                 job_id="test-job-3",
                 batch_request=batch_request,
@@ -847,7 +858,11 @@ class TestProcessBackgroundBatchJob:
     ):
         """Test that job status is updated correctly."""
         batch_request = BatchRequest(
-            urls=[BatchURLRequest(url="https://example.com")],
+            urls=[
+                BatchURLRequest(url="https://example.com"),
+                BatchURLRequest(url="https://test.com"),
+                BatchURLRequest(url="https://success.com"),
+            ],
             default_format="html",
             concurrency_limit=5,
             timeout_per_url=30,
@@ -862,12 +877,15 @@ class TestProcessBackgroundBatchJob:
             pdf_semaphore=pdf_semaphore,
         )
 
-        mock_job_manager.update_job_status.assert_called_once()
+        assert mock_job_manager.update_job_status.call_count == 3
+        final_kwargs = mock_job_manager.update_job_status.call_args.kwargs
+        assert final_kwargs["progress"] == 100
+        assert final_kwargs["processed_urls"] == 3
+        assert final_kwargs["successful_urls"] == 3
+        assert final_kwargs["failed_urls"] == 0
         call_args = mock_job_manager.update_job_status.call_args
         assert call_args[0][0] == "test-job-4"
         assert call_args[0][1] == JobStatus.RUNNING
-        assert call_args[1]["progress"] == 100
-        assert call_args[1]["processed_urls"] == 1
 
     @pytest.mark.asyncio
     async def test_results_aggregation(

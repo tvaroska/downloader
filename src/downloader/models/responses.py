@@ -47,15 +47,17 @@ class BatchRequest(BaseModel):
     """Request model for batch processing."""
 
     urls: list[BatchURLRequest] = Field(
-        ..., min_length=1, max_length=50, description="List of URLs to process"
+        ..., min_length=1, max_length=1000, description="List of URLs to process"
     )
     default_format: str = Field(
         "text", description="Default format for URLs without explicit format"
     )
     concurrency_limit: int | None = Field(
-        10, ge=1, le=20, description="Maximum concurrent requests"
+        None, ge=1, le=100, description="Maximum concurrent requests"
     )
-    timeout_per_url: int | None = Field(30, ge=5, le=120, description="Timeout per URL in seconds")
+    timeout_per_url: int | None = Field(
+        None, ge=5, le=300, description="Timeout per URL in seconds"
+    )
 
 
 class BatchURLResult(BaseModel):

@@ -11,6 +11,29 @@ from urllib.parse import urlparse
 
 logger = logging.getLogger(__name__)
 
+_RESERVE_SLOT_LUA = """
+local key = KEYS[1]
+local now_wall = tonumber(ARGV[1])
+local delay = tonumber(ARGV[2])
+local raw = redis.call('GET', key)
+local next_wall = 0.0
+if raw then
+  local parsed = tonumber(raw)
+  if parsed then
+    next_wall = parsed
+  end
+end
+local wait_s = 0.0
+local new_next = now_wall + delay
+if now_wall < next_wall then
+  wait_s = next_wall - now_wall
+  new_next = next_wall + delay
+end
+local ttl_ms = math.max(1, math.floor((new_next - now_wall) * 1000 + 0.5))
+redis.call('PSETEX', key, ttl_ms, tostring(new_next))
+return tostring(wait_s)
+"""
+
 
 class DomainThrottle:
     """Enforces per-domain Crawl-delay pacing across single and batch downloads."""
@@ -76,6 +99,14 @@ class DomainThrottle:
         assert self.redis_client is not None
         redis_key = f"throttle:v1:{domain_key}"
         now_wall = time.time()
+
+        if hasattr(self.redis_client, "eval"):
+            raw_wait = await self.redis_client.eval(
+                _RESERVE_SLOT_LUA, 1, redis_key, str(now_wall), str(delay)
+            )
+            if isinstance(raw_wait, bytes):
+                raw_wait = raw_wait.decode("utf-8", errors="ignore")
+            return max(0.0, float(raw_wait))
 
         raw_val = await self.redis_client.get(redis_key)
         if isinstance(raw_val, bytes):

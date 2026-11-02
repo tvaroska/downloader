@@ -20,6 +20,7 @@ from ..models.schedule import (
     ScheduleResponse,
 )
 from ..scheduler import SchedulerService
+from ..validation import URLValidationError, sanitize_custom_headers, validate_url_async
 
 if TYPE_CHECKING:
     from ..scheduler import ScheduledJobExecutor
@@ -132,6 +133,9 @@ async def create_schedule(
     svc = _require_scheduler(scheduler)
 
     try:
+        validated_url = await validate_url_async(schedule_data.url)
+        sanitized_headers = sanitize_custom_headers(schedule_data.headers)
+
         # Generate unique ID
         schedule_id = str(uuid.uuid4())
         created_at = datetime.now(UTC)
@@ -142,9 +146,9 @@ async def create_schedule(
         # Store schedule metadata in job's kwargs for later retrieval
         job_kwargs = {
             "schedule_id": schedule_id,
-            "url": schedule_data.url,
+            "url": validated_url,
             "format": schedule_data.format,
-            "headers": schedule_data.headers,
+            "headers": sanitized_headers,
             "created_at": created_at.isoformat(),
         }
 
@@ -167,16 +171,16 @@ async def create_schedule(
         return ScheduleResponse(
             id=schedule_id,
             name=schedule_data.name,
-            url=schedule_data.url,
+            url=validated_url,
             cron_expression=schedule_data.cron_expression,
             format=schedule_data.format,
-            headers=schedule_data.headers,
+            headers=sanitized_headers,
             enabled=schedule_data.enabled,
             created_at=created_at,
             next_run_time=job.next_run_time,
         )
 
-    except ValueError as e:
+    except (ValueError, URLValidationError) as e:
         # Cron validation error (should be caught by Pydantic, but handle here too)
         raise HTTPException(
             status_code=400,

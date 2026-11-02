@@ -40,7 +40,7 @@ from ..models.responses import (
 )
 from ..pdf_generator import PDFGeneratorError, generate_pdf_from_url
 from ..services.content_processor import _playwright_fallback_for_content
-from ..validation import URLValidationError, validate_url
+from ..validation import URLValidationError, sanitize_custom_headers, validate_url_async
 
 logger = logging.getLogger(__name__)
 
@@ -75,7 +75,8 @@ async def process_single_url_in_batch(
     format_to_use = url_request.format or default_format
 
     try:
-        validated_url = validate_url(url_request.url)
+        validated_url = await validate_url_async(url_request.url)
+        sanitized_headers = sanitize_custom_headers(url_request.custom_headers)
         logger.info(
             f"[{request_id}] Processing batch URL: {validated_url} (format: {format_to_use})"
         )
@@ -88,9 +89,13 @@ async def process_single_url_in_batch(
 
                 active_checker = getattr(_app.state, "robots_checker", None)
             if active_checker is not None:
+                effective_ua = next(
+                    (v for k, v in (sanitized_headers or {}).items() if k.lower() == "user-agent"),
+                    settings.crawling.user_agent,
+                )
                 crawl_delay = await active_checker.check_allowed(
                     validated_url,
-                    settings.crawling.user_agent,
+                    effective_ua,
                 )
                 active_throttle = domain_throttle
                 if active_throttle is None:
@@ -101,21 +106,59 @@ async def process_single_url_in_batch(
                     domain = urlparse(validated_url).netloc
                     await active_throttle.wait_if_needed(domain, crawl_delay)
 
+        if format_to_use == "pdf":
+            async with pdf_semaphore:
+                pdf_content = await asyncio.wait_for(
+                    generate_pdf_from_url(validated_url),
+                    timeout=timeout,
+                )
+
+            content_b64 = base64.b64encode(pdf_content).decode("utf-8")
+            duration = asyncio.get_event_loop().time() - start_time
+            return BatchURLResult(
+                url=url_request.url,
+                success=True,
+                format=format_to_use,
+                content_base64=content_b64,
+                size=len(pdf_content),
+                content_type="application/pdf",
+                duration=duration,
+                status_code=200,
+            )
+
+        if sanitized_headers:
+            download_coro = http_client.download(
+                validated_url, RequestPriority.LOW, headers=sanitized_headers
+            )
+        else:
+            download_coro = http_client.download(validated_url, RequestPriority.LOW)
+
         content, metadata = await asyncio.wait_for(
-            http_client.download(validated_url, RequestPriority.LOW),
+            download_coro,
             timeout=timeout,
         )
 
         if format_to_use == "text":
             processed_content = convert_content_to_text(content, metadata["content_type"])
-            processed_content = await _playwright_fallback_for_content(
-                validated_url,
-                processed_content,
-                content,
-                metadata["content_type"],
-                "text",
-                request_id,
-            )
+            if not processed_content.strip():
+                async with pdf_semaphore:
+                    processed_content = await _playwright_fallback_for_content(
+                        validated_url,
+                        processed_content,
+                        content,
+                        metadata["content_type"],
+                        "text",
+                        request_id,
+                    )
+            else:
+                processed_content = await _playwright_fallback_for_content(
+                    validated_url,
+                    processed_content,
+                    content,
+                    metadata["content_type"],
+                    "text",
+                    request_id,
+                )
 
             duration = asyncio.get_event_loop().time() - start_time
             return BatchURLResult(
@@ -131,14 +174,25 @@ async def process_single_url_in_batch(
 
         elif format_to_use == "markdown":
             processed_content = convert_content_to_markdown(content, metadata["content_type"])
-            processed_content = await _playwright_fallback_for_content(
-                validated_url,
-                processed_content,
-                content,
-                metadata["content_type"],
-                "markdown",
-                request_id,
-            )
+            if not processed_content.strip():
+                async with pdf_semaphore:
+                    processed_content = await _playwright_fallback_for_content(
+                        validated_url,
+                        processed_content,
+                        content,
+                        metadata["content_type"],
+                        "markdown",
+                        request_id,
+                    )
+            else:
+                processed_content = await _playwright_fallback_for_content(
+                    validated_url,
+                    processed_content,
+                    content,
+                    metadata["content_type"],
+                    "markdown",
+                    request_id,
+                )
 
             duration = asyncio.get_event_loop().time() - start_time
             return BatchURLResult(
@@ -153,10 +207,7 @@ async def process_single_url_in_batch(
             )
 
         elif format_to_use == "html":
-            if "html" in metadata["content_type"].lower():
-                processed_content = content.decode("utf-8", errors="ignore")
-            else:
-                processed_content = content.decode("utf-8", errors="ignore")
+            processed_content = content.decode("utf-8", errors="ignore")
 
             duration = asyncio.get_event_loop().time() - start_time
             return BatchURLResult(
@@ -166,23 +217,6 @@ async def process_single_url_in_batch(
                 content=processed_content,
                 size=len(content),
                 content_type=metadata["content_type"],
-                duration=duration,
-                status_code=200,
-            )
-
-        elif format_to_use == "pdf":
-            async with pdf_semaphore:
-                pdf_content = await generate_pdf_from_url(validated_url)
-
-            content_b64 = base64.b64encode(pdf_content).decode("utf-8")
-            duration = asyncio.get_event_loop().time() - start_time
-            return BatchURLResult(
-                url=url_request.url,
-                success=True,
-                format=format_to_use,
-                content_base64=content_b64,
-                size=len(pdf_content),
-                content_type="application/pdf",
                 duration=duration,
                 status_code=200,
             )
@@ -308,6 +342,19 @@ async def process_single_url_in_batch(
 
     except PDFGeneratorError as e:
         duration = asyncio.get_event_loop().time() - start_time
+        if e.status_code is not None and 400 <= e.status_code < 500:
+            logger.warning(
+                f"[{request_id}] Upstream HTTP {e.status_code} during PDF generation: {e}"
+            )
+            return BatchURLResult(
+                url=url_request.url,
+                success=False,
+                format=format_to_use,
+                duration=duration,
+                error=str(e),
+                error_type="http_error",
+                status_code=e.status_code,
+            )
         logger.error(f"[{request_id}] PDF generation failed: {e}")
         return BatchURLResult(
             url=url_request.url,
@@ -365,16 +412,27 @@ async def process_background_batch_job(
         f"[JOB-{job_id}] Starting background batch processing: {len(batch_request.urls)} URLs"
     )
 
+    settings = get_settings()
     concurrency_limit = (
-        batch_request.concurrency_limit if batch_request.concurrency_limit is not None else 10
+        batch_request.concurrency_limit
+        if batch_request.concurrency_limit is not None
+        else min(10, settings.batch.concurrency)
     )
     timeout_per_url = (
-        batch_request.timeout_per_url if batch_request.timeout_per_url is not None else 30
+        batch_request.timeout_per_url
+        if batch_request.timeout_per_url is not None
+        else settings.batch.default_timeout_per_url
     )
     request_semaphore = asyncio.Semaphore(concurrency_limit)
+    progress_lock = asyncio.Lock()
+    total_urls = max(1, len(batch_request.urls))
+    processed_count = 0
+    success_count = 0
+    fail_count = 0
 
     async def process_with_semaphore(url_request: BatchURLRequest, index: int) -> BatchURLResult:
         """Process a single URL with concurrency control."""
+        nonlocal processed_count, success_count, fail_count
         async with request_semaphore:
             async with batch_semaphore:
                 request_id = f"JOB-{job_id}-{index + 1:02d}"
@@ -388,7 +446,24 @@ async def process_background_batch_job(
                     robots_checker=robots_checker,
                     domain_throttle=domain_throttle,
                 )
-                return result
+        async with progress_lock:
+            processed_count += 1
+            if result.success:
+                success_count += 1
+            else:
+                fail_count += 1
+            try:
+                await job_manager.update_job_status(
+                    job_id,
+                    JobStatus.RUNNING,
+                    progress=int(processed_count * 100 / total_urls),
+                    processed_urls=processed_count,
+                    successful_urls=success_count,
+                    failed_urls=fail_count,
+                )
+            except Exception as exc:
+                logger.warning(f"[JOB-{job_id}] Incremental progress update failed: {exc}")
+        return result
 
     tasks = [
         process_with_semaphore(url_request, i) for i, url_request in enumerate(batch_request.urls)
@@ -402,14 +477,15 @@ async def process_background_batch_job(
     failed_results = [r for r in results if not r.success]
     success_rate = (len(successful_results) / len(results)) * 100 if results else 0
 
-    await job_manager.update_job_status(
-        job_id,
-        JobStatus.RUNNING,
-        progress=100,
-        processed_urls=len(results),
-        successful_urls=len(successful_results),
-        failed_urls=len(failed_results),
-    )
+    if not results:
+        await job_manager.update_job_status(
+            job_id,
+            JobStatus.RUNNING,
+            progress=100,
+            processed_urls=0,
+            successful_urls=0,
+            failed_urls=0,
+        )
 
     logger.info(
         f"[JOB-{job_id}] Batch completed: {len(successful_results)}/{len(results)} successful "
@@ -459,15 +535,29 @@ async def submit_batch_job(
             ).model_dump(),
         )
 
-    if len(batch_request.urls) > 50:
+    active_settings = getattr(request.app.state, "settings", None) or get_settings()
+    max_urls = active_settings.batch.max_urls_per_batch
+    if len(batch_request.urls) > max_urls:
         logger.warning(f"Too many URLs requested: {len(batch_request.urls)}")
         raise HTTPException(
             status_code=400,
             detail=ErrorResponse(
-                error="Too many URLs in batch request. Maximum is 50 URLs.",
+                error=f"Too many URLs in batch request. Maximum is {max_urls} URLs.",
                 error_type="validation_error",
             ).model_dump(),
         )
+
+    try:
+        for item in batch_request.urls:
+            item.custom_headers = sanitize_custom_headers(item.custom_headers)
+    except URLValidationError as e:
+        raise HTTPException(
+            status_code=400,
+            detail=ErrorResponse(
+                error=str(e),
+                error_type="validation_error",
+            ).model_dump(),
+        ) from e
 
     try:
         request_data = batch_request.model_dump()
@@ -502,6 +592,8 @@ async def submit_batch_job(
             estimated_completion=estimated_completion,
         )
 
+    except HTTPException:
+        raise
     except Exception as e:
         logger.exception(f"Failed to submit batch job: {e}")
         raise HTTPException(

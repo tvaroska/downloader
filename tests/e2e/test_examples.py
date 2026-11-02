@@ -127,13 +127,20 @@ class TestEndpoints:
         assert data["status"] == "healthy"
 
     def test_metrics_endpoint(self, app_base_url):
-        """Test that metrics endpoint is accessible."""
+        """Test that metrics endpoints require API key when auth is enabled."""
         import requests
 
-        response = requests.get(f"{app_base_url}/metrics")
+        unauth = requests.get(f"{app_base_url}/metrics")
+        assert unauth.status_code == 401
+
+        headers = {"Authorization": "Bearer test-api-key-e2e"}
+        response = requests.get(f"{app_base_url}/metrics", headers=headers)
         assert response.status_code == 200
-        data = response.json()
-        assert "uptime" in data
+        assert "downloader_uptime_seconds" in response.text
+
+        perf = requests.get(f"{app_base_url}/metrics/performance", headers=headers)
+        assert perf.status_code == 200
+        assert "uptime_seconds" in perf.json()
 
     def test_download_endpoint(self, app_base_url):
         """Test basic download functionality."""

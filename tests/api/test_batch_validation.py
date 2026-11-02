@@ -19,9 +19,15 @@ class TestBatchValidation:
             response = api_client.post("/batch", json={"urls": []})
             assert response.status_code == 422
 
-            # Too many URLs - this will be caught by Pydantic validation
-            urls = [{"url": f"https://example{i}.com"} for i in range(51)]
-            response = api_client.post("/batch", json={"urls": urls})
+            # Exceeds default BATCH_MAX_URLS_PER_BATCH (50) -> 400 validation_error
+            urls_51 = [{"url": f"https://example{i}.com"} for i in range(51)]
+            response = api_client.post("/batch", json={"urls": urls_51})
+            assert response.status_code == 400
+            assert response.json()["detail"]["error_type"] == "validation_error"
+
+            # Exceeds Pydantic hard ceiling (1000) -> 422
+            urls_1001 = [{"url": f"https://example{i}.com"} for i in range(1001)]
+            response = api_client.post("/batch", json={"urls": urls_1001})
             assert response.status_code == 422
         finally:
             app.dependency_overrides.pop(get_job_manager_dependency, None)

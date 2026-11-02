@@ -228,7 +228,7 @@ class TestRateLimitMiddlewareEnforcement:
         assert mw._get_rate_limit_for_path("/health") == settings.ratelimit.status_limit
         assert mw._get_rate_limit_for_path("/metrics/live") == settings.ratelimit.status_limit
         assert mw._get_rate_limit_for_path("/batch") == settings.ratelimit.batch_limit
-        assert mw._get_rate_limit_for_path("/jobs/abc/status") == settings.ratelimit.batch_limit
+        assert mw._get_rate_limit_for_path("/jobs/abc/status") == settings.ratelimit.status_limit
         assert mw._get_rate_limit_for_path("/schedules") == settings.ratelimit.default_limit
 
     def test_enforces_http_429_retry_after_and_ratelimit_headers(

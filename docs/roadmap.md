@@ -1,6 +1,6 @@
 # REST API Downloader - Strategic Roadmap
 
-**Last Updated:** 2026-11-01
+**Last Updated:** 2026-11-02
 
 ## Overview
 
@@ -24,6 +24,13 @@ This document outlines the strategic priorities, completed releases, and deferre
 ---
 
 ## Current Focus
+
+### Completed: Release `v0.6.1` — Security, Single-Fetch Browser & Stateful Pipeline Hardening ✅
+
+**Release `v0.6.1`** (Complete — 2026-11-02): Defense-in-Depth SSRF Pinning, Single-Fetch Playwright Pipeline & Stateful Parity
+- **Track A (Browser & Single-Fetch Pipeline):** Eliminated redundant pre-flight HTTP fetches on `Accept: application/pdf` and `?render=true` / `?wait_for=` across `text/html`, `text/plain`, `text/markdown`, and multi-format requests; unified all Chromium pathways under `pdf_semaphore` (`503` fail-fast on explicit `?render=true`/PDF, graceful static degradation on auto-detect/empty-body fallback); removed the unconditional `2s` sleep in `generate_pdf`; wired `ContentConfig` flags and monotonic-TTL `BoundedCache`
+- **Track B (Auth, SSRF Pinning & Rate Limits):** Restored `.env` loading in `AuthConfig` with `secrets.compare_digest` verification; required API key auth on `/metrics*` when `DOWNLOADER_KEY` is set and disabled `/docs`, `/redoc`, and `/openapi.json` (`HTTP 404`) in `ENVIRONMENT=production`; implemented `SSRFSafeNetworkBackend` / `SSRFSafeHTTPTransport` (`trust_env=False`, DNS-pinned `connect_tcp` preventing DNS-rebinding TOCTOU, non-blocking `asyncio.to_thread` DNS resolution, and hex/octal/int/mapped-IPv6/`*.localhost` blocks); added right-to-left `RATELIMIT_TRUSTED_PROXIES` `X-Forwarded-For` client IP resolution and auth vs unauth bucket isolation
+- **Track C & D (Stateful `/batch`, `/schedules` & Redis Atomicity):** Added creation-time SSRF & custom header sanitization (`HTTP 400`) on `POST /schedules` and `POST /batch`, `robots.txt` + `DomainThrottle` + non-retryable policy short-circuit + per-attempt `SCHEDULER_MAX_WORKERS` semaphore + JSON `content_size` accounting in `ScheduledJobExecutor`, atomic Lua `DomainThrottle` Redis slot reservation, `(scheme, netloc)` `robots:v2:{scheme}:{netloc}` cache isolation, and incremental `/batch` progress updates
 
 ### Completed: Sprint 4 — Ethical Crawling & Production Hardening (`v0.6.0`) ✅
 
@@ -231,6 +238,7 @@ Canonical append-only rationale lives in [DECISIONS.md](../DECISIONS.md). Summar
 
 | Date | Decision | Rationale |
 |------|----------|-----------|
+| 2026-11-02 | Release `v0.6.1` (DNS-pinned SSRF transport, single-fetch Playwright pipeline, `/metrics*` auth & prod OpenAPI disablement, and `/batch` + `/schedules` hardening) | Closed DNS-rebinding TOCTOU, XFF spoofing, unauthenticated `/metrics*` exposure, duplicate HTTP+Chromium fetches, and stateful `/batch` + `/schedules` configuration/crawling gaps while preserving stateless GKE defaults |
 | 2026-11-01 | Release `v0.6.0` (Sprint 4 Ethical Crawling + production hardening) & consolidate to Roadmap-first layout | Delivered stateless-first `robots.txt`/`Crawl-delay`, streaming `413`, redirect & Playwright SSRF guards, active `429` rate limits, browser recycling/scale-to-zero, `:8000` unprivileged port, and archived Sprint 4 into `docs/features/ethical-crawling.md` |
 | 2026-11-01 | Promote Ethical Crawling (stateless-first) to Sprint 4; defer Multi-Tenant Quotas to Sprint 5 | Production runs statelessly behind a single API key without Redis; ethical crawling protects live egress immediately via in-memory TTL cache + optional Redis |
 | 2026-11-01 | Lazy `PlaywrightPDFGenerator` pool + offline verification gate | Eliminates Chromium startup cost on non-browser paths and guarantees deterministic offline smoke/unit hygiene checks |
@@ -257,6 +265,12 @@ Canonical append-only rationale lives in [DECISIONS.md](../DECISIONS.md). Summar
 - ✅ Configurable `USER_AGENT` and `RESPECT_ROBOTS_TXT` (`default: True`)
 - ✅ Per-domain `Crawl-delay` throttling, structured `HTTP 403` (`robots_disallowed`) responses, and Prometheus `robots_*` metrics
 - ✅ Streaming `CONTENT_MAX_DOWNLOAD_SIZE` (`HTTP 413`), redirect & Playwright SSRF route blocking, active `RateLimitMiddleware` (`HTTP 429` + `Retry-After`), browser max-use recycling & idle scale-to-zero, JSON `uvicorn.access` `path` fields, and unprivileged container port `:8000`
+
+### Release 0.6.1 — Security, Single-Fetch Browser & Stateful Pipeline Hardening (Complete)
+- ✅ DNS-pinned `SSRFSafeHTTPTransport` (`trust_env=False`), async DNS resolution, and hex/octal/int/mapped-IPv6/`*.localhost` SSRF blocks
+- ✅ Single-fetch Playwright pipeline across `?render=true`, `?wait_for=`, and `Accept: application/pdf` (`GET /{url}`, `/batch`, `/schedules`), unified `pdf_semaphore` concurrency, and live `ContentConfig` / TTL cache wiring
+- ✅ Constant-time API key verification, `/metrics*` auth enforcement, `ENVIRONMENT=production` `404` on `/docs`/`/redoc`/`/openapi.json`, right-to-left `RATELIMIT_TRUSTED_PROXIES` `X-Forwarded-For` parsing, and auth/unauth rate-limit isolation
+- ✅ Creation-time SSRF & custom header validation on `/schedules` and `/batch`, `ScheduledJobExecutor` `robots.txt` + `Crawl-delay` + per-attempt `max_workers` semaphore, atomic Redis Lua `DomainThrottle`, and `robots:v2:{scheme}:{netloc}` cache keys
 
 ### Release 0.7.0 — Multi-Tenant Quotas (Deferred — Sprint 5)
 - Per-API-key `QuotaConfig`, `GET /usage`, `X-RateLimit-*` headers, and `HTTP 429` `Retry-After` (with `memory://` + Redis parity when multi-key tenancy is needed)

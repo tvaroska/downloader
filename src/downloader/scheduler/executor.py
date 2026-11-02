@@ -7,17 +7,22 @@ retry handling, content processing, and result storage.
 from __future__ import annotations
 
 import asyncio
+import base64
+import json
 import logging
 import uuid
 from collections.abc import Mapping
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Any
+from urllib.parse import urlparse
 
+from ..config import get_settings
 from ..content_converter import convert_content_to_markdown, convert_content_to_text
+from ..crawling import DomainThrottle, RobotsChecker
 from ..http_client import RequestPriority
 from ..models.schedule import ExecutionStatus, ScheduleExecution
 from ..pdf_generator import generate_pdf_from_url
-from ..validation import validate_url
+from ..validation import sanitize_custom_headers, validate_url_async
 
 if TYPE_CHECKING:
     from ..http_client import HTTPClient
@@ -30,24 +35,15 @@ logger = logging.getLogger(__name__)
 # Retry configuration
 MAX_ATTEMPTS = 3
 RETRY_DELAYS = [5, 15, 30]  # seconds between retries
+_NON_RETRYABLE_PREFIXES = (
+    "URLValidationError:",
+    "SSRFProtectionError:",
+    "RobotsDisallowedError:",
+)
 
 
 class ScheduledJobExecutor:
-    """Executes scheduled download jobs with retry and result storage.
-
-    This class handles the actual download execution when APScheduler triggers
-    a scheduled job. It includes:
-    - Download execution with timeout
-    - Content format conversion (text, markdown, html, pdf, json, raw)
-    - Retry logic with exponential backoff
-    - Execution result storage in Redis
-
-    Attributes:
-        http_client: HTTP client for downloading content.
-        storage: Redis storage for execution records.
-        pdf_generator: Optional PDF generator for PDF format.
-        pdf_semaphore: Optional semaphore for PDF concurrency control.
-    """
+    """Executes scheduled download jobs with retry and result storage."""
 
     def __init__(
         self,
@@ -55,19 +51,18 @@ class ScheduledJobExecutor:
         storage: ExecutionStorage,
         pdf_generator: PlaywrightPDFGenerator | None = None,
         pdf_semaphore: asyncio.Semaphore | None = None,
+        robots_checker: RobotsChecker | None = None,
+        domain_throttle: DomainThrottle | None = None,
+        max_workers: int = 10,
     ) -> None:
-        """Initialize the executor.
-
-        Args:
-            http_client: HTTP client for downloading content.
-            storage: Redis storage for execution records.
-            pdf_generator: Optional PDF generator for PDF format.
-            pdf_semaphore: Optional semaphore for PDF concurrency control.
-        """
         self.http_client = http_client
         self.storage = storage
         self.pdf_generator = pdf_generator
         self.pdf_semaphore = pdf_semaphore
+        self.robots_checker = robots_checker
+        self.domain_throttle = domain_throttle
+        self.max_workers = max(1, max_workers)
+        self._worker_semaphore = asyncio.Semaphore(self.max_workers)
 
     async def execute(
         self,
@@ -76,20 +71,7 @@ class ScheduledJobExecutor:
         format: str,
         headers: dict[str, str] | None,
     ) -> ScheduleExecution:
-        """Execute a scheduled download with retry logic.
-
-        Attempts to download the URL up to MAX_ATTEMPTS times with exponential
-        backoff between retries. Each attempt is stored in the execution history.
-
-        Args:
-            schedule_id: The schedule identifier.
-            url: URL to download.
-            format: Output format (text, markdown, html, pdf, json, raw).
-            headers: Optional custom HTTP headers.
-
-        Returns:
-            The final execution result (success or final failure).
-        """
+        """Execute a scheduled download with retry logic."""
         execution_id = str(uuid.uuid4())
         attempt = 0
         execution: ScheduleExecution | None = None
@@ -106,13 +88,20 @@ class ScheduledJobExecutor:
                 attempt=attempt,
             )
 
-            # Store every attempt in history
             await self.storage.store_execution(execution)
 
             if execution.success:
                 return execution
 
-            # Don't retry on the last attempt
+            if execution.error_message and execution.error_message.startswith(
+                _NON_RETRYABLE_PREFIXES
+            ):
+                logger.info(
+                    f"[SCHEDULE-{schedule_id}] Non-retryable policy error on attempt {attempt}: "
+                    f"{execution.error_message}"
+                )
+                return execution
+
             if attempt < MAX_ATTEMPTS:
                 delay = RETRY_DELAYS[attempt - 1]
                 logger.info(
@@ -121,13 +110,11 @@ class ScheduledJobExecutor:
                 )
                 await asyncio.sleep(delay)
 
-        # All attempts failed
         logger.error(
             f"[SCHEDULE-{schedule_id}] All {MAX_ATTEMPTS} attempts failed: "
             f"{execution.error_message if execution else 'Unknown error'}"
         )
 
-        # execution is guaranteed to be set here since we enter the loop at least once
         assert execution is not None
         return execution
 
@@ -140,105 +127,110 @@ class ScheduledJobExecutor:
         headers: dict[str, str] | None,
         attempt: int,
     ) -> ScheduleExecution:
-        """Execute a single download attempt.
+        """Execute a single download attempt bounded by the worker semaphore."""
+        async with self._worker_semaphore:
+            started_at = datetime.now(UTC)
 
-        Args:
-            execution_id: Unique identifier for this execution.
-            schedule_id: The schedule identifier.
-            url: URL to download.
-            format: Output format.
-            headers: Optional custom HTTP headers.
-            attempt: Current attempt number (1-based).
+            try:
+                validated_url = await validate_url_async(url)
+                sanitized_headers = sanitize_custom_headers(headers)
 
-        Returns:
-            Execution record with success or failure status.
-        """
-        started_at = datetime.now(UTC)
+                cfg = get_settings()
+                if self.robots_checker is not None and cfg.crawling.respect_robots_txt:
+                    effective_ua = next(
+                        (
+                            v
+                            for k, v in (sanitized_headers or {}).items()
+                            if k.lower() == "user-agent"
+                        ),
+                        cfg.crawling.user_agent,
+                    )
+                    crawl_delay = await self.robots_checker.check_allowed(
+                        validated_url, effective_ua
+                    )
+                    if self.domain_throttle is not None:
+                        await self.domain_throttle.wait_if_needed(
+                            urlparse(validated_url).netloc, crawl_delay
+                        )
 
-        try:
-            # Validate URL
-            validated_url = validate_url(url)
+                if format == "pdf":
+                    processed = await self._process_content(
+                        url=validated_url,
+                        content=b"",
+                        metadata=None,
+                        format="pdf",
+                    )
+                else:
+                    if sanitized_headers:
+                        content, metadata = await self.http_client.download(
+                            validated_url, RequestPriority.LOW, headers=sanitized_headers
+                        )
+                    else:
+                        content, metadata = await self.http_client.download(
+                            validated_url, RequestPriority.LOW
+                        )
 
-            # Download content
-            content, metadata = await self.http_client.download(validated_url, RequestPriority.LOW)
+                    processed = await self._process_content(
+                        url=validated_url,
+                        content=content,
+                        metadata=metadata,
+                        format=format,
+                    )
 
-            # Process content based on format
-            processed = await self._process_content(
-                url=validated_url,
-                content=content,
-                metadata=metadata,
-                format=format,
-            )
+                completed_at = datetime.now(UTC)
+                duration = (completed_at - started_at).total_seconds()
 
-            completed_at = datetime.now(UTC)
-            duration = (completed_at - started_at).total_seconds()
+                if isinstance(processed, str):
+                    content_size: int | None = len(processed.encode("utf-8"))
+                elif isinstance(processed, bytes):
+                    content_size = len(processed)
+                else:
+                    content_size = None
 
-            # Calculate content size
-            if isinstance(processed, str):
-                content_size = len(processed.encode("utf-8"))
-            elif isinstance(processed, bytes):
-                content_size = len(processed)
-            else:
-                content_size = None
+                return ScheduleExecution(
+                    execution_id=execution_id,
+                    schedule_id=schedule_id,
+                    status=ExecutionStatus.COMPLETED,
+                    started_at=started_at,
+                    completed_at=completed_at,
+                    duration=duration,
+                    success=True,
+                    content_size=content_size,
+                    error_message=None,
+                    attempt=attempt,
+                )
 
-            return ScheduleExecution(
-                execution_id=execution_id,
-                schedule_id=schedule_id,
-                status=ExecutionStatus.COMPLETED,
-                started_at=started_at,
-                completed_at=completed_at,
-                duration=duration,
-                success=True,
-                content_size=content_size,
-                error_message=None,
-                attempt=attempt,
-            )
+            except Exception as e:
+                completed_at = datetime.now(UTC)
+                duration = (completed_at - started_at).total_seconds()
 
-        except Exception as e:
-            completed_at = datetime.now(UTC)
-            duration = (completed_at - started_at).total_seconds()
+                logger.warning(
+                    f"[SCHEDULE-{schedule_id}] Attempt {attempt} failed: {type(e).__name__}: {e}"
+                )
 
-            logger.warning(
-                f"[SCHEDULE-{schedule_id}] Attempt {attempt} failed: {type(e).__name__}: {e}"
-            )
-
-            return ScheduleExecution(
-                execution_id=execution_id,
-                schedule_id=schedule_id,
-                status=ExecutionStatus.FAILED,
-                started_at=started_at,
-                completed_at=completed_at,
-                duration=duration,
-                success=False,
-                content_size=None,
-                error_message=f"{type(e).__name__}: {e}",
-                attempt=attempt,
-            )
+                return ScheduleExecution(
+                    execution_id=execution_id,
+                    schedule_id=schedule_id,
+                    status=ExecutionStatus.FAILED,
+                    started_at=started_at,
+                    completed_at=completed_at,
+                    duration=duration,
+                    success=False,
+                    content_size=None,
+                    error_message=f"{type(e).__name__}: {e}",
+                    attempt=attempt,
+                )
 
     async def _process_content(
         self,
         url: str,
         content: bytes,
-        metadata: ResponseMetadata | Mapping[str, Any],
+        metadata: ResponseMetadata | Mapping[str, Any] | None,
         format: str,
     ) -> str | bytes:
-        """Process downloaded content based on output format.
-
-        Mirrors the content processing logic from routes/batch.py for consistency.
-
-        Args:
-            url: The validated URL that was downloaded.
-            content: Raw downloaded content.
-            metadata: Download metadata including content_type.
-            format: Output format.
-
-        Returns:
-            Processed content as string or bytes.
-
-        Raises:
-            RuntimeError: If PDF generation is requested but not available.
-        """
-        content_type = metadata.get("content_type", "application/octet-stream")
+        """Process downloaded content based on output format."""
+        meta = metadata or {}
+        content_type = meta.get("content_type", "application/octet-stream")
 
         if format == "text":
             return convert_content_to_text(content, content_type)
@@ -256,13 +248,21 @@ class ScheduledJobExecutor:
                 return await generate_pdf_from_url(url)
 
         elif format == "json":
-            # Return raw content as bytes (caller can encode to base64)
-            return content
+            content_b64 = base64.b64encode(content).decode("utf-8")
+            return json.dumps(
+                {
+                    "success": True,
+                    "url": meta.get("url", url),
+                    "size": meta.get("size", len(content)),
+                    "content_type": content_type,
+                    "content": content_b64,
+                    "metadata": dict(meta),
+                }
+            )
 
         elif format == "raw":
             return content
 
         else:
-            # Unknown format - return raw content
             logger.warning(f"Unknown format '{format}', returning raw content")
             return content

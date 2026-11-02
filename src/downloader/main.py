@@ -6,8 +6,14 @@ from collections.abc import AsyncIterator, Awaitable
 from contextlib import asynccontextmanager
 from typing import Any, cast
 
-from fastapi import FastAPI, Request
+from fastapi import FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.openapi.docs import (
+    get_redoc_html,
+    get_swagger_ui_html,
+    get_swagger_ui_oauth2_redirect_html,
+)
+from fastapi.responses import HTMLResponse, JSONResponse
 from slowapi import Limiter, _rate_limit_exceeded_handler
 from slowapi.errors import RateLimitExceeded
 from slowapi.util import get_remote_address
@@ -93,7 +99,7 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
             memory_limit_mb=current_settings.pdf.browser_memory_limit_mb,
             max_uses_per_browser=current_settings.pdf.max_uses_per_browser,
             idle_timeout=current_settings.pdf.idle_timeout,
-            user_agent=current_settings.crawling.user_agent,
+            user_agent=None,
         )
         set_shared_pdf_generator(pdf_generator)
         app.state.pdf_generator = pdf_generator
@@ -114,46 +120,20 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         f"Concurrency semaphores initialized (PDF={current_settings.pdf.concurrency}, BATCH={current_settings.batch.concurrency})"
     )
 
-    # Initialize job manager and scheduler if Redis is configured
+    # Initialize job manager first when Redis is configured so crawling + scheduler share its pool
+    job_manager: JobManager | None = None
     if current_settings.redis.redis_uri:
         logger.info("Initializing job manager with Redis...")
-        job_manager = JobManager(current_settings.redis.redis_uri)
+        job_manager = JobManager(
+            current_settings.redis.redis_uri,
+            max_connections=current_settings.redis.max_connections,
+        )
         await job_manager.connect()
         app.state.job_manager = job_manager
         logger.info("Job manager initialized")
-
-        logger.info("Initializing scheduler...")
-        scheduler_service = SchedulerService(
-            redis_uri=current_settings.redis.redis_uri,
-            settings=current_settings.scheduler,
-        )
-        await scheduler_service.start()
-        app.state.scheduler = scheduler_service
-        logger.info("Scheduler initialized")
-
-        # Initialize executor for scheduled job execution
-        from .routes.schedules import set_executor as set_schedules_executor
-        from .scheduler import ExecutionStorage, ScheduledJobExecutor
-
-        if job_manager.redis_client is None:
-            raise RuntimeError("JobManager connected without initializing redis_client")
-        execution_storage = ExecutionStorage(job_manager.redis_client)
-        executor = ScheduledJobExecutor(
-            http_client=http_client,
-            storage=execution_storage,
-            pdf_generator=app.state.pdf_generator,
-            pdf_semaphore=app.state.pdf_semaphore,
-        )
-        scheduler_service.set_executor(executor)
-        set_schedules_executor(executor)
-        app.state.execution_storage = execution_storage
-        logger.info("Scheduler executor initialized")
     else:
         app.state.job_manager = None
         logger.info("Job manager not initialized (Redis not configured)")
-        app.state.scheduler = None
-        app.state.execution_storage = None
-        logger.info("Scheduler not initialized (Redis not configured)")
 
     # Initialize stateless-first ethical crawling (uses Redis when available, memory otherwise)
     redis_client = app.state.job_manager.redis_client if app.state.job_manager else None
@@ -170,6 +150,41 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         max_size=current_settings.crawling.robots_cache_max_size,
         redis_client=redis_client,
     )
+
+    # Initialize scheduler & executor after ethical crawling helpers are available
+    if current_settings.redis.redis_uri and job_manager is not None:
+        logger.info("Initializing scheduler...")
+        scheduler_service = SchedulerService(
+            redis_uri=current_settings.redis.redis_uri,
+            settings=current_settings.scheduler,
+        )
+        await scheduler_service.start()
+        app.state.scheduler = scheduler_service
+        logger.info("Scheduler initialized")
+
+        from .routes.schedules import set_executor as set_schedules_executor
+        from .scheduler import ExecutionStorage, ScheduledJobExecutor
+
+        if job_manager.redis_client is None:
+            raise RuntimeError("JobManager connected without initializing redis_client")
+        execution_storage = ExecutionStorage(job_manager.redis_client)
+        executor = ScheduledJobExecutor(
+            http_client=http_client,
+            storage=execution_storage,
+            pdf_generator=app.state.pdf_generator,
+            pdf_semaphore=app.state.pdf_semaphore,
+            robots_checker=app.state.robots_checker,
+            domain_throttle=app.state.domain_throttle,
+            max_workers=current_settings.scheduler.max_workers,
+        )
+        scheduler_service.set_executor(executor)
+        set_schedules_executor(executor)
+        app.state.execution_storage = execution_storage
+        logger.info("Scheduler executor initialized")
+    else:
+        app.state.scheduler = None
+        app.state.execution_storage = None
+        logger.info("Scheduler not initialized (Redis not configured)")
 
     # Start system metrics collection
     logger.info("Starting system metrics collection...")
@@ -208,13 +223,14 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     logger.info("All services shut down successfully")
 
 
-# Create FastAPI app
+# Create FastAPI app (interactive docs mounted explicitly below to return 404 in production)
 app = FastAPI(
     title="REST API Downloader",
     description="High-performance web service for programmatic URL content downloading",
     version=__version__,
-    docs_url="/docs",
-    redoc_url="/redoc",
+    docs_url=None,
+    redoc_url=None,
+    openapi_url=None,
     lifespan=lifespan,
 )
 
@@ -236,6 +252,44 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+
+def _require_non_prod_docs(request: Request) -> Any:
+    active_settings = getattr(request.app.state, "settings", None) or get_settings()
+    if active_settings.environment == "production":
+        raise HTTPException(status_code=404, detail="Not Found")
+    return active_settings
+
+
+@app.get("/openapi.json", include_in_schema=False)
+async def custom_openapi(request: Request) -> JSONResponse:
+    _require_non_prod_docs(request)
+    return JSONResponse(app.openapi())
+
+
+@app.get("/docs", include_in_schema=False)
+async def custom_swagger_ui(request: Request) -> HTMLResponse:
+    active_settings = _require_non_prod_docs(request)
+    return get_swagger_ui_html(
+        openapi_url="/openapi.json",
+        title=f"{active_settings.app_name} - Swagger UI",
+        oauth2_redirect_url="/docs/oauth2-redirect",
+    )
+
+
+@app.get("/docs/oauth2-redirect", include_in_schema=False)
+async def custom_swagger_redirect(request: Request) -> HTMLResponse:
+    _require_non_prod_docs(request)
+    return get_swagger_ui_oauth2_redirect_html()
+
+
+@app.get("/redoc", include_in_schema=False)
+async def custom_redoc(request: Request) -> HTMLResponse:
+    active_settings = _require_non_prod_docs(request)
+    return get_redoc_html(
+        openapi_url="/openapi.json",
+        title=f"{active_settings.app_name} - ReDoc",
+    )
 
 
 @app.get("/health")
@@ -319,8 +373,8 @@ async def health_check(request: Request) -> dict[str, Any]:
             "batch_concurrency": batch_limit,
             "max_download_size_mb": app_settings.content.max_download_size / 1024 / 1024,
             "cpu_cores": multiprocessing.cpu_count(),
-            "respect_robots_txt": get_settings().crawling.respect_robots_txt,
-            "user_agent": get_settings().crawling.user_agent,
+            "respect_robots_txt": app_settings.crawling.respect_robots_txt,
+            "user_agent": app_settings.crawling.user_agent,
         },
         "services": {
             "job_manager": job_manager_status,
@@ -339,7 +393,7 @@ async def health_check(request: Request) -> dict[str, Any]:
     return health_info
 
 
-# Include API router (must be after specific routes like /health)
+# Include API router (must be after specific routes like /health and /docs)
 app.include_router(router)
 
 

@@ -57,24 +57,33 @@ class MetricsMiddleware(BaseHTTPMiddleware):
 
     def _normalize_path(self, path: str) -> str:
         """Normalize URL path for metrics grouping."""
-        # Handle different endpoint patterns
         if path.startswith("/batch"):
             return "/batch"
-        elif path == "/health":
+        if path == "/health":
             return "/health"
-        elif path == "/metrics":
+        if path in {"/metrics", "/metrics/performance", "/metrics/health-score", "/metrics/live"}:
+            return path
+        if path.startswith("/metrics/"):
             return "/metrics"
-        elif path.startswith("/jobs/"):
+        if path == "/schedules":
+            return "/schedules"
+        if path.startswith("/schedules/"):
+            return (
+                "/schedules/{schedule_id}/history"
+                if path.endswith("/history")
+                else "/schedules/{schedule_id}"
+            )
+        if path.startswith("/jobs/"):
             return "/jobs/{job_id}"
-        elif path.startswith("/status/"):
+        if path.startswith("/status/"):
             return "/status/{job_id}"
-        elif path.startswith("/results/"):
+        if path.startswith("/results/"):
             return "/results/{job_id}"
-        elif path == "/":
+        if path in {"/docs", "/docs/oauth2-redirect", "/redoc", "/openapi.json"}:
+            return path
+        if path == "/":
             return "/"
-        else:
-            # For URL downloads - group as /download
-            return "/download"
+        return "/download"
 
 
 class SystemMetricsCollector:

@@ -2,10 +2,13 @@
 
 from __future__ import annotations
 
+import hashlib
+import ipaddress
 import logging
 import math
 import re
 import time
+import weakref
 from collections.abc import Callable
 from typing import Any, cast
 
@@ -17,19 +20,40 @@ from limits.strategies import FixedWindowRateLimiter, MovingWindowRateLimiter, R
 from slowapi import Limiter
 from starlette.middleware.base import BaseHTTPMiddleware
 
+from .auth import extract_request_api_key, is_auth_enabled, verify_api_key
 from .config import Settings, get_settings
 from .models.responses import ErrorResponse
 
 logger = logging.getLogger(__name__)
 
-_SKIP_PATHS = frozenset({"/docs", "/redoc", "/openapi.json"})
-_ACTIVE_MIDDLEWARES: list[RateLimitMiddleware] = []
+_SKIP_PATHS = frozenset({"/docs", "/docs/oauth2-redirect", "/redoc", "/openapi.json"})
+_ACTIVE_MIDDLEWARES: weakref.WeakSet[RateLimitMiddleware] = weakref.WeakSet()
 
 
 def _make_strategy(storage: Storage) -> RateLimiter:
     if isinstance(storage, MovingWindowSupport):
         return MovingWindowRateLimiter(storage)
     return FixedWindowRateLimiter(storage)
+
+
+def _is_valid_ip(value: str) -> bool:
+    try:
+        ipaddress.ip_address(value)
+        return True
+    except ValueError:
+        return False
+
+
+def _compile_trusted_networks(
+    proxies: list[str],
+) -> tuple[ipaddress.IPv4Network | ipaddress.IPv6Network, ...]:
+    networks: list[ipaddress.IPv4Network | ipaddress.IPv6Network] = []
+    for entry in proxies:
+        try:
+            networks.append(ipaddress.ip_network(entry, strict=False))
+        except ValueError:
+            logger.warning(f"Ignoring invalid RATELIMIT_TRUSTED_PROXIES entry: {entry!r}")
+    return tuple(networks)
 
 
 def reset_rate_limiter(limiter: Limiter | None = None) -> None:
@@ -53,7 +77,12 @@ class RateLimitMiddleware(BaseHTTPMiddleware):
         self.limiter = limiter
         self._init_settings = get_settings()
         self.settings = self._init_settings
-        self.rate_limits = self._build_rate_limit_patterns(self.settings)
+        self.rate_limits: list[tuple[str, re.Pattern[str], str]] = self._build_rate_limit_patterns(
+            self.settings
+        )
+        self._trusted_networks: tuple[ipaddress.IPv4Network | ipaddress.IPv6Network, ...] = (
+            _compile_trusted_networks(self.settings.ratelimit.trusted_proxies)
+        )
 
         self._fallback_memory_storage = MemoryStorage()
         self._fallback_strategy: RateLimiter = MovingWindowRateLimiter(
@@ -65,7 +94,7 @@ class RateLimitMiddleware(BaseHTTPMiddleware):
         if isinstance(limiter_storage, Storage):
             self._storages[str(limiter_uri)] = (limiter_storage, _make_strategy(limiter_storage))
 
-        _ACTIVE_MIDDLEWARES.append(self)
+        _ACTIVE_MIDDLEWARES.add(self)
 
     def reset(self) -> None:
         """Reset all in-memory storages held by this middleware."""
@@ -77,41 +106,42 @@ class RateLimitMiddleware(BaseHTTPMiddleware):
                 except Exception:
                     pass
 
-    def _active_settings(self) -> Settings:
-        latest = get_settings()
+    def _active_settings(self, request: Request | None = None) -> Settings:
+        app_obj = getattr(request, "app", None) if request is not None else None
+        state_obj = getattr(app_obj, "state", None)
+        candidate = getattr(state_obj, "settings", None)
+        latest = candidate if isinstance(candidate, Settings) else get_settings()
         if latest is not self._init_settings:
             self._init_settings = latest
             self.settings = latest
-        self.rate_limits = self._build_rate_limit_patterns(self.settings)
+            self.rate_limits = self._build_rate_limit_patterns(self.settings)
+            self._trusted_networks = _compile_trusted_networks(
+                self.settings.ratelimit.trusted_proxies
+            )
         return self.settings
 
     def _build_rate_limit_patterns(
         self, settings: Settings | None = None
-    ) -> list[tuple[re.Pattern[str], str]]:
+    ) -> list[tuple[str, re.Pattern[str], str]]:
         cfg = settings if settings is not None else self.settings
         if not cfg.ratelimit.enabled:
             return []
 
         return [
-            (re.compile(r"^/(health|metrics)(/.*)?$"), cfg.ratelimit.status_limit),
-            (re.compile(r"^/(batch|jobs)(/.*)?$"), cfg.ratelimit.batch_limit),
-            (re.compile(r"^/(schedules(/.*)?|)$"), cfg.ratelimit.default_limit),
-            (re.compile(r"^/.+$"), cfg.ratelimit.download_limit),
+            ("status", re.compile(r"^/(health|metrics|jobs)(/.*)?$"), cfg.ratelimit.status_limit),
+            ("batch", re.compile(r"^/batch(/.*)?$"), cfg.ratelimit.batch_limit),
+            ("default", re.compile(r"^/(schedules(/.*)?|)$"), cfg.ratelimit.default_limit),
+            ("download", re.compile(r"^/.+$"), cfg.ratelimit.download_limit),
         ]
 
-    def _classify_path(self, path: str) -> tuple[str, str] | None:
-        cfg = self._active_settings()
+    def _classify_path(self, path: str, request: Request | None = None) -> tuple[str, str] | None:
+        cfg = self._active_settings(request)
         if not cfg.ratelimit.enabled:
             return None
 
-        if re.match(r"^/(health|metrics)(/.*)?$", path):
-            return "status", cfg.ratelimit.status_limit
-        if re.match(r"^/(batch|jobs)(/.*)?$", path):
-            return "batch", cfg.ratelimit.batch_limit
-        if re.match(r"^/(schedules(/.*)?|)$", path):
-            return "default", cfg.ratelimit.default_limit
-        if re.match(r"^/.+$", path):
-            return "download", cfg.ratelimit.download_limit
+        for bucket, pattern, limit_str in self.rate_limits:
+            if pattern.match(path):
+                return bucket, limit_str
         return "default", cfg.ratelimit.default_limit
 
     def _get_rate_limit_for_path(self, path: str) -> str | None:
@@ -133,32 +163,77 @@ class RateLimitMiddleware(BaseHTTPMiddleware):
             logger.warning(f"Failed to initialize rate-limit storage {uri}, using memory: {exc}")
             return self._fallback_strategy
 
-    def _extract_client_key(self, request: Request) -> str:
-        key_func = getattr(self.limiter, "_key_func", None)
-        if callable(key_func):
-            try:
-                key = key_func(request)
-                if key:
-                    return str(key)
-            except Exception:
-                pass
+    def _is_trusted_ip(self, ip_str: str) -> bool:
+        try:
+            ip_obj = ipaddress.ip_address(ip_str)
+        except ValueError:
+            return False
+        return any(ip_obj in net for net in self._trusted_networks)
+
+    def _resolve_client_ip(self, request: Request, cfg: Settings) -> str:
+        _ = cfg
+        peer_ip: str | None = None
         if request.client and request.client.host:
-            return request.client.host
-        return "127.0.0.1"
+            peer_ip = request.client.host
+        else:
+            key_func = getattr(self.limiter, "_key_func", None)
+            if callable(key_func):
+                try:
+                    key = key_func(request)
+                    if key:
+                        peer_ip = str(key)
+                except Exception:
+                    pass
+        if not peer_ip:
+            peer_ip = "127.0.0.1"
+
+        if self._is_trusted_ip(peer_ip):
+            xff = request.headers.get("x-forwarded-for")
+            if xff:
+                valid_hops = [h.strip() for h in xff.split(",") if _is_valid_ip(h.strip())]
+                if valid_hops:
+                    for hop in reversed(valid_hops):
+                        if not self._is_trusted_ip(hop):
+                            return hop
+                    return valid_hops[0]
+
+        return peer_ip
+
+    def _resolve_bucket_and_key(
+        self,
+        request: Request,
+        path: str,
+        bucket: str,
+        limit_str: str,
+        cfg: Settings,
+    ) -> tuple[str, str, str]:
+        client_ip = self._resolve_client_ip(request, cfg)
+        if path != "/health" and is_auth_enabled(cfg):
+            token = extract_request_api_key(request)
+            if token and verify_api_key(token, cfg):
+                digest = hashlib.sha256(token.encode("utf-8")).hexdigest()[:16]
+                return bucket, limit_str, f"key:{digest}:{client_ip}"
+            return "unauth", cfg.ratelimit.default_limit, f"ip:{client_ip}"
+        return bucket, limit_str, f"ip:{client_ip}"
+
+    def _extract_client_key(self, request: Request) -> str:
+        return self._resolve_client_ip(request, self._active_settings(request))
 
     async def dispatch(self, request: Request, call_next: Callable[..., Any]) -> Response:
         path = request.url.path
         if path in _SKIP_PATHS:
             return await call_next(request)
 
-        classified = self._classify_path(path)
+        classified = self._classify_path(path, request)
         if classified is None:
             return await call_next(request)
 
         bucket, limit_str = classified
         cfg = self.settings
-        item = limits.parse(limit_str)
-        client_key = self._extract_client_key(request)
+        bucket, effective_limit_str, client_key = self._resolve_bucket_and_key(
+            request, path, bucket, limit_str, cfg
+        )
+        item = limits.parse(effective_limit_str)
         strategy = self._get_strategy(cfg)
 
         try:

@@ -6,7 +6,7 @@ This file is the canonical operating brief for all coding agents (**Antigravity 
 
 REST API Downloader — a high-performance FastAPI web service for programmatic URL content downloading with intelligent article extraction, stateless-first ethical crawling (`robots.txt` + `Crawl-delay`), headless Chromium rendering, and Redis-backed batch/scheduled jobs.
 
-- **Version:** 0.6.0
+- **Version:** 0.6.1
 - **Stack:** Python 3.13+, FastAPI, httpx, Redis, Playwright
 - **Registry:** `us-central1-docker.pkg.dev/sites-470716/containers/downloader` (Cloud Build CI/CD via [`cloudbuild.yaml`](cloudbuild.yaml) + GKE Autopilot / Flux CD GitOps)
 - **Production domain:** `https://download.tvaroska.sk`
@@ -56,7 +56,8 @@ src/downloader/
 ├── main.py                  # FastAPI app, lifespan, middleware setup
 ├── config.py                # Pydantic Settings (45+ configurable params)
 ├── auth.py                  # API key authentication (Bearer / X-API-Key)
-├── validation.py            # URL sanitization + DNS/IP SSRF protection
+├── validation.py            # URL & custom header sanitization + async DNS/IP SSRF protection
+├── ssrf_transport.py        # DNS-pinned httpcore network backend & httpx transport (trust_env=False)
 ├── http_client.py           # Async httpx client, redirect SSRF & streaming size guard
 ├── pdf_generator.py         # Lazy Playwright PDF generator, idle reaper & SSRF route guard
 ├── job_manager.py           # Redis-based batch job tracking
@@ -102,7 +103,7 @@ src/downloader/
 
 **`Accept` Content Negotiation Wire Contract (`GET /{url}`):**
 - **Single format (`Accept` omitted or 1 MIME type):** Returns raw payload bytes directly with the matching `Content-Type` — `text/plain` (default), `text/markdown`, `text/html`, `application/pdf`, or `application/json` (base64 content + metadata). Callers sending `Accept: text/html` receive raw HTML bytes (`response.text`), **not** JSON.
-- **Multi-format (`2+` MIME types, e.g. `Accept: text/html, text/markdown`):** Returns `application/json` mapping each requested MIME type to its rendered body (`{"text/html": "...", "text/markdown": "...", "errors": {...}}`).
+- **Multi-format (`2+` MIME types, e.g. `Accept: text/html, text/markdown`):** Returns `application/json` mapping each requested MIME type to its rendered body (`{"text/html": "...", "text/markdown": "..."}`, including `"errors": {...}` only when one or more requested formats fail).
 
 ## Testing Strategy
 
@@ -127,29 +128,29 @@ src/downloader/
 
 Key variables (see `.env.example` for full list):
 
-- `DOWNLOADER_KEY`: API key for authentication (optional)
+- `DOWNLOADER_KEY`: API key for authentication (optional; when set, required on all endpoints except `GET /health`, including `/metrics*`)
 - `REDIS_URI`: Redis connection string (required for `/batch` and `/schedules`; optional shared cache/throttle for rate limits and `robots.txt`)
-- `ENVIRONMENT`: `development` / `staging` / `production`
+- `ENVIRONMENT`: `development` / `staging` / `production` (`/docs`, `/redoc`, and `/openapi.json` return `HTTP 404` when `production`)
 - `CORS_ALLOWED_ORIGINS`: Comma-separated origins (default: `http://localhost:3000,http://localhost:8080,http://127.0.0.1:3000,http://127.0.0.1:8080`)
 - `USER_AGENT`: Outbound HTTP & Playwright `User-Agent` (default: `REST-API-Downloader/1.0`)
-- `RESPECT_ROBOTS_TXT`: Enforce `robots.txt` & `Crawl-delay` pre-flight (default: `true`; returns `HTTP 403` `robots_disallowed` when blocked, fails open when unreachable)
+- `RESPECT_ROBOTS_TXT`: Enforce `robots.txt` & `Crawl-delay` pre-flight across `GET /{url}`, `POST /batch`, and `/schedules` (default: `true`; returns `HTTP 403` `robots_disallowed` when blocked, fails open when unreachable)
 - `ROBOTS_CACHE_TTL` / `ROBOTS_CACHE_MAX_SIZE` / `ROBOTS_FETCH_TIMEOUT` / `MAX_CRAWL_DELAY`: `robots.txt` cache TTL (`3600s`), bounded LRU size (`1000`), fetch timeout (`5.0s`), and `Crawl-delay` cap (`30.0s`)
 - `CONTENT_MAX_DOWNLOAD_SIZE`: Streaming byte cap (default: `52428800` / 50MB; returns `HTTP 413` `content_too_large`)
 - `HTTP_MAX_CONNECTIONS`: Max HTTP connections (default: 200)
 - `HTTP_REQUEST_TIMEOUT`: Request timeout in seconds (default: 30)
-- `RATELIMIT_ENABLED`: Enable moving-window rate limiting (default: `true`; returns `HTTP 429` + `Retry-After` + `X-RateLimit-*`)
-- `BATCH_CONCURRENCY`: Max concurrent batch requests (default: CPU×8, max 50)
-- `PDF_CONCURRENCY` / `PDF_MAX_USES_PER_BROWSER` / `PDF_IDLE_TIMEOUT`: Max concurrent PDFs (default: CPU×2, max 12), browser recycling cap (`50`), and idle scale-to-zero timeout (`600s`)
-- `SSRF_BLOCK_PRIVATE_IPS`: Block private/loopback/link-local IPs across direct, redirect, `robots.txt`, and Playwright requests (default: `true`)
+- `RATELIMIT_ENABLED` / `RATELIMIT_TRUSTED_PROXIES`: Enable moving-window rate limiting (default: `true`; returns `HTTP 429` + `Retry-After` + `X-RateLimit-*`) and trusted proxy CIDRs for right-to-left `X-Forwarded-For` client IP resolution
+- `BATCH_CONCURRENCY` / `BATCH_MAX_URLS_PER_BATCH`: Max concurrent batch requests (default: CPU×8, max 50) and max URLs per batch submission (default: 50, hard ceiling: 1000)
+- `PDF_CONCURRENCY` / `PDF_MAX_USES_PER_BROWSER` / `PDF_IDLE_TIMEOUT`: Max concurrent browser sessions across PDF and Playwright HTML rendering (default: CPU×2, max 12), browser recycling cap (`50`), and idle scale-to-zero timeout (`600s`)
+- `SSRF_BLOCK_PRIVATE_IPS`: Block private/loopback/link-local IPs across DNS-pinned `httpcore` sockets, `3xx` redirects, `robots.txt`, `/schedules`, and Playwright requests (default: `true`)
 
 ## Security
 
-- Defense-in-depth SSRF protection (pre-flight DNS resolution, `3xx` redirect hop re-validation, `robots.txt` validation, and Playwright `context.route("**/*", ...)` interception; blocks localhost, RFC1918 private IPs, `file://`, and `169.254.169.254` cloud metadata)
-- Stateless-first ethical crawling (`robots.txt` compliance, `Crawl-delay` throttling, `HTTP 403` `robots_disallowed`, bounded in-memory TTL/LRU cache)
+- Defense-in-depth SSRF protection (async DNS resolution + DNS-pinned `SSRFSafeHTTPTransport` with `trust_env=False`, `3xx` redirect hop re-validation, `robots.txt` & `/schedules` validation, and Playwright `context.route("**/*", ...)` interception; blocks localhost, `*.localhost`, hex/octal/integer/IPv4-mapped-IPv6 private IPs, `file://`, and `169.254.169.254` cloud metadata)
+- Stateless-first ethical crawling (`robots.txt` compliance across `GET /{url}`, `/batch`, and `/schedules`, atomic Redis Lua `Crawl-delay` throttling, `HTTP 403` `robots_disallowed`, bounded in-memory TTL/LRU cache)
 - Streaming download size guard (`CONTENT_MAX_DOWNLOAD_SIZE` -> `HTTP 413` `content_too_large` before buffering oversized streams)
-- Optional API key authentication (`Authorization: Bearer` or `X-API-Key` header)
+- Constant-time API key authentication (`Authorization: Bearer` or `X-API-Key` header via `secrets.compare_digest` across download, batch, schedule, and `/metrics*` endpoints; `/docs`, `/redoc`, and `/openapi.json` disabled in `ENVIRONMENT=production`)
 - Localhost-only default CORS origins
-- Active moving-window rate limiting (`60/min` download, `20/min` batch, `200/min` status, `100/min` default -> `HTTP 429` + `Retry-After`)
+- Active moving-window rate limiting (`60/min` download, `20/min` batch, `200/min` status/jobs/metrics, `100/min` default -> `HTTP 429` + `Retry-After`, right-to-left trusted-proxy `X-Forwarded-For` resolution, and auth vs unauth bucket isolation)
 - Non-root Docker container listening on unprivileged port `:8000` with isolated, auto-recycling Playwright browser contexts
 
 ## Planning & Backlog Workflow (Roadmap-First)

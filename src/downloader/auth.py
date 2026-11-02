@@ -2,11 +2,15 @@
 
 import logging
 import os
+import secrets
+import sys
+from collections.abc import Mapping
+from pathlib import Path
 
 from fastapi import Depends, HTTPException, Request, status
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 
-from .config import Settings
+from .config import AuthConfig, Settings, get_settings
 
 logger = logging.getLogger(__name__)
 
@@ -21,45 +25,73 @@ class APIKeyError(Exception):
     pass
 
 
+def _resolve_configured_api_key(settings: Settings | None = None) -> str | None:
+    """Resolve the active API key consistently across explicit Settings, os.environ, and .env."""
+    active = settings if isinstance(settings, Settings) else get_settings()
+    raw: str | None = None
+    if isinstance(active, Settings):
+        if getattr(active.auth, "_explicit_api_key", False):
+            raw = active.auth.api_key
+        elif "DOWNLOADER_KEY" in os.environ:
+            raw = os.environ.get("DOWNLOADER_KEY")
+        elif not getattr(active.auth, "_loaded_from_env", False):
+            raw = active.auth.api_key
+    elif "DOWNLOADER_KEY" in os.environ:
+        raw = os.environ.get("DOWNLOADER_KEY")
+    elif "pytest" not in sys.modules and Path(".env").is_file():
+        raw = AuthConfig().api_key
+
+    cleaned = raw.strip() if isinstance(raw, str) else ""
+    return cleaned or None
+
+
 def is_auth_enabled(settings: Settings | None = None) -> bool:
     """
     Check if API key authentication is enabled.
 
     Args:
-        settings: Optional settings instance (will load from get_settings() if not provided)
+        settings: Optional settings instance (will load from environment/.env if not provided)
 
     Returns:
-        True if API key is configured in settings
+        True if API key is configured
     """
-    if settings is None:
-        # Check environment variable directly for testing compatibility
-        api_key = os.environ.get("DOWNLOADER_KEY")
-        return api_key is not None and api_key.strip() != ""
-    return settings.auth.api_key is not None and settings.auth.api_key.strip() != ""
+    return _resolve_configured_api_key(settings) is not None
 
 
 def verify_api_key(api_key: str, settings: Settings | None = None) -> bool:
     """
-    Verify if the provided API key is valid.
+    Verify if the provided API key is valid using constant-time digest comparison.
 
     Args:
         api_key: The API key to verify
-        settings: Optional settings instance (will load from get_settings() if not provided)
+        settings: Optional settings instance
 
     Returns:
         True if the API key is valid, False otherwise
     """
-    if settings is None:
-        # Check environment variable directly for testing compatibility
-        env_key = os.environ.get("DOWNLOADER_KEY")
-        if not env_key:
-            return True  # No authentication required if no key is set
-        return api_key == env_key
+    expected = _resolve_configured_api_key(settings)
+    if expected is None:
+        return True
 
-    if not settings.auth.api_key:
-        return True  # No authentication required if no key is set
+    if not isinstance(api_key, str) or not api_key:
+        return False
 
-    return api_key == settings.auth.api_key
+    return secrets.compare_digest(api_key.encode("utf-8"), expected.encode("utf-8"))
+
+
+def extract_request_api_key(request: Request) -> str | None:
+    """Extract Bearer or X-API-Key token from raw Request headers."""
+    auth_header = request.headers.get("authorization")
+    if isinstance(auth_header, str) and " " in auth_header:
+        scheme, token = auth_header.split(None, 1)
+        if scheme.lower() == "bearer" and token.strip():
+            return token.strip()
+
+    x_key = request.headers.get("x-api-key")
+    if isinstance(x_key, str) and x_key.strip():
+        return x_key.strip()
+
+    return None
 
 
 async def get_api_key(
@@ -83,8 +115,14 @@ async def get_api_key(
     Raises:
         HTTPException: If authentication is required but missing/invalid
     """
+    scope = getattr(request, "scope", None)
+    app_obj = scope.get("app") if isinstance(scope, Mapping) else None
+    state_obj = getattr(app_obj, "state", None)
+    candidate = getattr(state_obj, "settings", None)
+    req_settings = candidate if isinstance(candidate, Settings) else None
+
     # Skip authentication if not enabled
-    if not is_auth_enabled():
+    if not is_auth_enabled(req_settings):
         return None
 
     api_key = None
@@ -112,7 +150,7 @@ async def get_api_key(
             headers={"WWW-Authenticate": "Bearer"},
         )
 
-    if not verify_api_key(api_key):
+    if not verify_api_key(api_key, req_settings):
         logger.warning("Invalid API key provided")
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,

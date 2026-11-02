@@ -6,6 +6,42 @@ history — supersede an old decision with a new entry that references it.
 
 ---
 
+## 2026-11-02 — `v0.6.1` DNS-pinned SSRF transport, single-fetch browser pipeline & endpoint hardening
+
+- **Decision (DNS-pinned `SSRFSafeHTTPTransport` & async SSRF validation):**
+  Added `src/downloader/ssrf_transport.py` wrapping `httpcore.AsyncNetworkBackend.connect_tcp`
+  to resolve DNS via `asyncio.to_thread(socket.getaddrinfo, ...)`, validate all A/AAAA
+  records (including IPv4-mapped IPv6, hex/octal/integer/shorthand IPv4, malformed numeric
+  TLDs, and `*.localhost`), and connect directly to the validated IP while preserving the
+  original hostname for TLS SNI (`trust_env=False` on both `HTTPClient` and `RobotsChecker`).
+  - **Why:** Pre-flight `validate_url()` followed by a second DNS lookup inside `httpx`
+    left a DNS-rebinding TOCTOU window and blocked the asyncio event loop on synchronous
+    `getaddrinfo` calls.
+- **Decision (Single-fetch Playwright & PDF pipeline under unified `pdf_semaphore`):**
+  Skipped pre-flight `http_client.download()` on `Accept: application/pdf` (across `GET /{url}`,
+  `POST /batch`, and `/schedules`) and on explicit `?render=true` / `?wait_for=` requests
+  (lazily falling back to `http_client.download()` only if Playwright fails with a non-selector
+  error, without re-triggering secondary Playwright heuristics). Unified all browser entrypoints
+  under `pdf_semaphore` (`HTTP 503` fail-fast on explicit `?render=true` and PDF; graceful
+  static content fallback on implicit auto-detection and empty-body fallback) and removed the
+  unconditional `2s` post-`networkidle` sleep in `PlaywrightPDFGenerator.generate_pdf`.
+- **Decision (`/metrics*` authentication, production docs `404`, and trusted-proxy rate limits):**
+  Required `Depends(get_api_key)` on `/metrics`, `/metrics/performance`, `/metrics/health-score`,
+  and `/metrics/live` when `DOWNLOADER_KEY` is configured while keeping `GET /health` public;
+  disabled `/docs`, `/docs/oauth2-redirect`, `/redoc`, and `/openapi.json` (`HTTP 404`) when
+  `ENVIRONMENT=production` via explicit pre-router handlers ahead of `/{url:path}`; added
+  `RATELIMIT_TRUSTED_PROXIES` right-to-left `X-Forwarded-For` client IP resolution and isolated
+  authenticated (`key:<sha256[:16]>:<ip>`) vs unauthenticated (`unauth:<ip>`) rate-limit buckets.
+- **Decision (Stateful `/batch`, `/schedules`, and Redis Lua atomicity — keeps `/schedules` metadata-only):**
+  Kept `/schedules` execution-metadata-only until Sprint 6 webhook delivery while enforcing
+  creation-time SSRF & custom header sanitization (`HTTP 400`), `robots.txt` + `DomainThrottle`
+  compliance, non-retryable policy short-circuiting, per-attempt `SCHEDULER_MAX_WORKERS`
+  concurrency (releasing slots before retry sleep), and serialized JSON `content_size` accounting.
+  Upgraded `DomainThrottle` Redis slot reservation to an atomic `EVAL` Lua script and namespaced
+  `RobotsChecker` caches to `robots:v2:{scheme}:{netloc}`.
+
+---
+
 ## 2026-11-01 — `v0.6.0` Ethical Crawling, production hardening & Roadmap-first consolidation
 
 - **Decision (Stateless-first Ethical Crawling & `Crawl-delay` — completes Sprint 4):**

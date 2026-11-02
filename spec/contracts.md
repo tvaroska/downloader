@@ -1,6 +1,6 @@
 # REST API Downloader - API Reference
 
-**Last Updated:** 2026-11-01
+**Last Updated:** 2026-11-02
 
 Complete API documentation for the REST API Downloader service.
 
@@ -18,7 +18,9 @@ API key authentication is supported and can be enabled by setting the `DOWNLOADE
 
 | Environment Variable | Description |
 |---------------------|-------------|
-| `DOWNLOADER_KEY` | API key for authentication. When set, all requests must include a valid API key. |
+| `DOWNLOADER_KEY` | API key for authentication. When set, all endpoints (including `/metrics*`) require a valid API key except `GET /health`, which remains public for liveness/readiness probes. |
+
+> **OpenAPI & Interactive Docs Surface:** Interactive documentation (`/docs`, `/docs/oauth2-redirect`, `/redoc`) and `/openapi.json` are enabled in `development` and `staging`, and return `HTTP 404` when `ENVIRONMENT=production`.
 
 ### Authentication Methods
 
@@ -91,12 +93,11 @@ Accept: text/html, text/markdown
 ```json
 {
   "text/html": "<!doctype html>...",
-  "text/markdown": "# Example Domain\n\n...",
-  "errors": {}
+  "text/markdown": "# Example Domain\n\n..."
 }
 ```
 
-When multiple formats are requested, the response is always JSON containing all requested formats.
+When multiple formats are requested, the response is always JSON containing each succeeded format. An `"errors"` object (`{"application/pdf": "..."}`) is included only when one or more requested formats fail.
 
 ## Endpoints
 
@@ -110,7 +111,7 @@ Check service health and version information.
 ```json
 {
   "status": "healthy",
-  "version": "0.6.0"
+  "version": "0.6.1"
 }
 ```
 
@@ -135,8 +136,8 @@ Download and process content from any public URL with intelligent content extrac
 
 | Parameter | Type | Default | Description |
 |-----------|------|---------|-------------|
-| `render` | boolean | `false` | Force JavaScript rendering with Playwright. Bypasses auto-detection and renders the page in a headless browser. |
-| `wait_for` | string | `null` | CSS selector to wait for before returning content. Implies `render=true`. Times out after 10 seconds with 408 error. Max 500 characters. |
+| `render` | boolean | `false` | Force single-fetch JavaScript rendering with Playwright across `text/html`, `text/plain`, `text/markdown`, and multi-format requests (`X-Rendered-With-JS: true`). Returns `HTTP 503` if browser concurrency slots are saturated, or falls back to static HTTP extraction (`X-Rendered-With-JS: false`) on unexpected browser failures. |
+| `wait_for` | string | `null` | CSS selector to wait for before returning content. Implies `render=true`. Times out after `CONTENT_HTML_JS_RENDERING_TIMEOUT` (`10000` ms default) with `HTTP 408` (`selector_timeout_error`). Max 500 characters. |
 
 **Supported Accept Header Values:**
 
@@ -344,9 +345,9 @@ When processing batch URLs with `text` or `markdown` format, the service automat
    - Error/maintenance pages are excluded from fallback
 3. If eligible, Playwright renders the page with `networkidle` wait strategy and extracts content from the rendered DOM
 
-**Caching:** Results of fallback eligibility checks are cached per-URL to avoid redundant Playwright invocations on repeated requests.
+**Caching:** Results of fallback eligibility checks are cached per-URL with bounded LRU eviction and monotonic TTL (`CONTENT_CACHE_MAX_SIZE`, `CONTENT_HTML_JS_RENDERING_CACHE_TTL`) to avoid redundant Playwright invocations on repeated requests.
 
-**Note:** This implicit fallback only applies to batch processing. For single-URL downloads, use `?render=true` or `?wait_for=<selector>` to explicitly request browser rendering.
+**Note:** Automatic JS/empty-body Playwright fallback applies to both `GET /{url}` and `POST /batch` when `CONTENT_ENABLE_HTML_JS_RENDERING=true` (degrading gracefully to static content when `PDF_CONCURRENCY` browser slots are saturated). Use `?render=true` or `?wait_for=<selector>` on `GET /{url}` when deterministic browser execution is required. `Accept: application/pdf` (and `format: "pdf"` in `/batch` and `/schedules`) renders directly in Playwright without a redundant pre-flight HTTP fetch, propagating upstream `4xx` responses as `HTTP <status>` (`error_type: "http_error"`).
 
 ---
 
@@ -610,17 +611,19 @@ Get real-time system resource usage and concurrency statistics.
 **Response:**
 ```json
 {
-  "timestamp": "2026-01-21T12:00:00Z",
+  "timestamp": 1737460800.0,
   "concurrency": {
-    "pdf_semaphore": {
-      "max": 4,
-      "in_use": 1,
-      "available": 3
+    "pdf": {
+      "limit": 4,
+      "active": 1,
+      "available": 3,
+      "utilization_percent": 25.0
     },
-    "batch_semaphore": {
-      "max": 16,
-      "in_use": 3,
-      "available": 13
+    "batch": {
+      "limit": 16,
+      "active": 3,
+      "available": 13,
+      "utilization_percent": 18.8
     }
   },
   "performance": {
@@ -628,19 +631,20 @@ Get real-time system resource usage and concurrency statistics.
     "total_requests": 1234,
     "total_errors": 12,
     "overall_error_rate_percent": 0.97,
-    "overall_avg_response_time": 0.37,
-    "endpoints": {}
+    "overall_avg_response_time": 0.37
   },
   "connections": {
-    "redis": "connected",
+    "redis": {
+      "status": "not_configured"
+    },
     "http_client": {
-      "pool_size": 200,
-      "active_connections": 5
+      "status": "healthy"
     }
   },
   "system": {
     "cpu_cores": 4,
-    "scaling_info": "batch=16, pdf=4"
+    "pdf_scaling": "2x CPU cores (max 12), current: 4",
+    "batch_scaling": "8x CPU cores (max 50), current: 16"
   }
 }
 ```
@@ -805,10 +809,12 @@ Rate limiting is enabled by default to prevent abuse and ensure fair resource al
 
 | Endpoint Pattern | Limit | Description |
 |-----------------|-------|-------------|
-| `/health`, `/metrics` | 200/minute | Lightweight status endpoints |
+| `/health`, `/metrics*`, `/jobs/*` | 200/minute | Lightweight status, polling, and metrics endpoints |
 | `/{url}` (download) | 60/minute | Resource-intensive download operations |
 | `/batch` | 20/minute | Async batch job creation |
 | All other endpoints | 100/minute | Default limit |
+
+Rate-limit keys isolate authenticated callers (`key:<sha256[:16]>:<ip>`) from unauthenticated traffic (`unauth:<ip>`) so invalid-credential floods cannot exhaust valid API key quotas. Client IPs are resolved right-to-left from `X-Forwarded-For` only when the immediate peer IP belongs to `RATELIMIT_TRUSTED_PROXIES`.
 
 ### Storage Backend
 
@@ -856,20 +862,22 @@ Rate limits can be customized via environment variables:
 | `RATELIMIT_STATUS_LIMIT` | `200/minute` | Status endpoint limit |
 | `RATELIMIT_STORAGE_URI` | None | Redis URI for distributed limiting |
 | `RATELIMIT_HEADERS_ENABLED` | `true` | Include rate limit headers |
+| `RATELIMIT_TRUSTED_PROXIES` | `127.0.0.1,::1,10.0.0.0/8,172.16.0.0/12,192.168.0.0/16` | Trusted proxy IPs/CIDRs allowed to supply `X-Forwarded-For` |
 
 ## Security & Ethical Crawling Features
 
 ### SSRF Protection
 
-The API enforces SSRF validation across initial URL pre-flight, every `3xx` HTTP redirect `Location` target (including relative redirects), `robots.txt` origin fetches, and Playwright subresource/navigation routes (`context.route("**/*", ...)`), blocking:
-- Localhost (`127.0.0.1`, `localhost`, `::1`)
+The API enforces async DNS/IP SSRF validation and DNS-pinned TCP socket connections (`SSRFSafeHTTPTransport` with `trust_env=False`) across initial URL pre-flight, every `3xx` HTTP redirect `Location` target, `POST /batch` and `POST /schedules` submissions, `robots.txt` origin fetches, and Playwright subresource/navigation routes (`context.route("**/*", ...)`), blocking:
+- Localhost (`127.0.0.1`, `localhost`, `*.localhost`, `::1`) and alternate numeric/hex/octal/shorthand IPv4 or IPv4-mapped IPv6 encodings (`::ffff:127.0.0.1`)
 - Private IP ranges (`10.0.0.0/8`, `172.16.0.0/12`, `192.168.0.0/16`)
-- Link-local & cloud metadata addresses (`169.254.0.0/16`, `169.254.169.254`)
+- Link-local & cloud metadata addresses (`169.254.0.0/16`, `169.254.169.254`, `::ffff:169.254.169.254`)
 - Non-HTTP(S) schemes such as `file://` (Playwright inline `data:`, `blob:`, and `about:` resources remain allowed)
+- Prohibited hop-by-hop or framing custom headers (`Host`, `Content-Length`, `Transfer-Encoding`, `Proxy-Authorization`, etc.)
 
 ### Stateless-First Ethical Crawling (`robots.txt` & `Crawl-delay`)
 
-Before executing `GET /{url}` or each item in `POST /batch`, the service evaluates `{scheme}://{netloc}/robots.txt` and enforces per-domain `Crawl-delay` pacing when `RESPECT_ROBOTS_TXT=true`:
+Before executing `GET /{url}`, each item in `POST /batch`, or any scheduled job in `/schedules`, the service evaluates `{scheme}://{netloc}/robots.txt` and enforces per-domain `Crawl-delay` pacing when `RESPECT_ROBOTS_TXT=true`:
 
 | Environment Variable | Default | Description |
 |---------------------|---------|-------------|
@@ -880,7 +888,7 @@ Before executing `GET /{url}` or each item in `POST /batch`, the service evaluat
 | `ROBOTS_FETCH_TIMEOUT` | `5.0` | Timeout in seconds when fetching `/robots.txt` |
 | `MAX_CRAWL_DELAY` | `30.0` | Maximum `Crawl-delay` honored per domain in seconds |
 
-- **Storage backends:** Uses bounded in-memory TTL/LRU caching and per-domain monotonic slot locks by default when `REDIS_URI` is unset, and coordinates via Redis (`robots:v1:{netloc}`, `throttle:v1:{domain}`) when `REDIS_URI` is configured.
+- **Storage backends:** Uses bounded in-memory TTL/LRU caching and per-domain monotonic slot locks by default when `REDIS_URI` is unset, and coordinates via Redis (`robots:v2:{scheme}:{netloc}`, atomic Lua `throttle:v1:{domain}`) when `REDIS_URI` is configured.
 - **Fail-open behavior:** Unreachable, timed-out, `4xx`/`5xx`, or malformed `robots.txt` responses fail open with a structured warning log and cache an allow sentinel for `ROBOTS_CACHE_TTL`.
 
 ### Input & Streaming Size Validation
@@ -1091,14 +1099,14 @@ curl -H "Accept: text/markdown" \
 
 ### Timeout Handling
 
-The `wait_for` parameter has a 10-second timeout. If the selector is not found within this time, the API returns a 408 Request Timeout error:
+The `wait_for` parameter uses `CONTENT_HTML_JS_RENDERING_TIMEOUT` (`10000` ms default). If the selector is not found within this time, the API returns a 408 Request Timeout error:
 
 ```json
 {
   "detail": {
     "success": false,
-    "error": "Timeout waiting for selector '.non-existent-element' after 10s",
-    "error_type": "timeout_error"
+    "error": "Timeout waiting for selector '.non-existent-element' after 10000ms",
+    "error_type": "selector_timeout_error"
   }
 }
 ```
@@ -1196,7 +1204,7 @@ Create a new scheduled download job.
 
 **Status Codes:**
 - `200` - Schedule created successfully
-- `400` - Invalid cron expression or validation error
+- `400` - Invalid cron expression, SSRF/URL validation failure, or prohibited custom header (`validation_error`)
 - `503` - Scheduler service unavailable (Redis not connected)
 
 **Error Examples:**
@@ -1412,11 +1420,12 @@ Schedules use standard 5-field UNIX cron format:
 
 ### Retry Behavior
 
-Failed scheduled jobs are automatically retried:
+Failed scheduled jobs are automatically retried for transient errors:
 
 - **Maximum attempts:** 3
-- **Retry delays:** 5s, 15s, 30s (exponential backoff)
-- **Final status:** After 3 failures, job is marked as `failed` in history
+- **Retry delays:** 5s, 15s, 30s (worker concurrency slots are released before backoff sleep)
+- **Non-retryable policy errors:** `URLValidationError`, `SSRFProtectionError`, and `RobotsDisallowedError` fail immediately on attempt 1 without retrying
+- **Final status:** After exhausting allowed attempts, execution is recorded as `failed` in history
 
 ---
 
@@ -1424,8 +1433,8 @@ Failed scheduled jobs are automatically retried:
 
 | Environment Variable | Default | Description |
 |---------------------|---------|-------------|
-| `SCHEDULER_JOB_STORE_TYPE` | `redis` | Job store backend (`redis` or `memory`) |
-| `SCHEDULER_MAX_WORKERS` | `10` | Maximum concurrent job workers |
+| `SCHEDULER_JOB_STORE_TYPE` | `redis` | APScheduler job store backend (`redis` or `memory`; `REDIS_URI` is required to enable `/schedules` and execution history storage) |
+| `SCHEDULER_MAX_WORKERS` | `10` | Maximum concurrent scheduled download attempts |
 | `SCHEDULER_MISFIRE_GRACE_TIME` | `60` | Seconds late a job can still run |
 | `SCHEDULER_COALESCE` | `true` | Run once if multiple executions missed |
 

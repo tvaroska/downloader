@@ -13,6 +13,8 @@ from typing import Any, cast
 import redis.asyncio as redis
 from pydantic import BaseModel, Field
 
+from .config import get_settings
+
 logger = logging.getLogger(__name__)
 
 
@@ -60,16 +62,23 @@ class JobResult(BaseModel):
 class JobManager:
     """Optimized Redis-based job management system with connection pooling."""
 
-    def __init__(self, redis_url: str, job_ttl: int = 3600 * 24):  # 24 hours default TTL
+    def __init__(
+        self,
+        redis_url: str,
+        job_ttl: int = 3600 * 24,
+        max_connections: int = 20,
+    ):
         """
         Initialize job manager with connection pooling for 20-30% latency reduction.
 
         Args:
             redis_url: Redis connection URL
             job_ttl: Job time-to-live in seconds
+            max_connections: Maximum Redis pool connections
         """
         self.redis_url = redis_url
         self.job_ttl = job_ttl
+        self.max_connections = max_connections
         self.redis_client: redis.Redis | None = None
         self.connection_pool: redis.ConnectionPool | None = None
         self._background_tasks: dict[str, asyncio.Task[None]] = {}
@@ -82,7 +91,7 @@ class JobManager:
             # Create connection pool for better performance and resource management
             self.connection_pool = redis.ConnectionPool.from_url(
                 self.redis_url,
-                max_connections=20,  # Pool size for concurrent operations
+                max_connections=self.max_connections,
                 retry_on_timeout=True,
                 retry_on_error=[redis.BusyLoadingError, redis.ConnectionError],
                 health_check_interval=30,  # Health check every 30s
@@ -95,7 +104,7 @@ class JobManager:
             # Test connection and log pool info
             await cast(Awaitable[bool], self.redis_client.ping())
             logger.info(
-                "Connected to Redis with connection pool (max_connections=20) for job management"
+                f"Connected to Redis with connection pool (max_connections={self.max_connections}) for job management"
             )
 
         except Exception as e:
@@ -489,7 +498,7 @@ async def get_job_manager() -> JobManager:
 
     if _job_manager is None:
         redis_url = os.getenv("REDIS_URI", "redis://localhost:6379")
-        _job_manager = JobManager(redis_url)
+        _job_manager = JobManager(redis_url, max_connections=get_settings().redis.max_connections)
         await _job_manager.connect()
 
     return _job_manager

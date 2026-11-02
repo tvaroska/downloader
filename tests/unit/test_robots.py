@@ -49,6 +49,25 @@ class FakeAsyncRedis:
         self.store[key] = (value, float(time_ms) / 1000.0)
         return True
 
+    async def eval(
+        self, _script: str, _numkeys: int, key: str, now_str: str, delay_str: str
+    ) -> str:
+        if self.fail_get or self.fail_set:
+            raise ConnectionError("Redis eval failed")
+        now_wall = float(now_str)
+        delay = float(delay_str)
+        entry = self.store.get(key)
+        next_wall = float(entry[0]) if entry is not None else 0.0
+        if now_wall < next_wall:
+            wait_s = next_wall - now_wall
+            new_next = next_wall + delay
+        else:
+            wait_s = 0.0
+            new_next = now_wall + delay
+        ttl_ms = max(1, int((new_next - now_wall) * 1000 + 0.5))
+        self.store[key] = (str(new_next), ttl_ms / 1000.0)
+        return str(wait_s)
+
 
 @pytest.mark.unit
 class TestRobotsChecker:
@@ -215,13 +234,20 @@ class TestRobotsChecker:
         assert await redis_checker_writer.check_allowed("https://example.com/ok") == pytest.approx(
             2.0
         )
-        assert "robots:v1:example.com" in fake_redis.store
+        assert "robots:v2:https:example.com" in fake_redis.store
+
+        # HTTP vs HTTPS origins remain isolated in Redis and memory caches
+        assert await redis_checker_writer.check_allowed("http://example.com/ok") == pytest.approx(
+            2.0
+        )
+        assert "robots:v2:http:example.com" in fake_redis.store
+        assert redis_fetches == 2
 
         # Second pod (redis_checker_reader) reads shared Redis entry without fetching
         assert await redis_checker_reader.check_allowed("https://example.com/ok2") == pytest.approx(
             2.0
         )
-        assert redis_fetches == 1
+        assert redis_fetches == 2
         assert mem_fetches == 1
 
         # Both raise identical RobotsDisallowedError on disallowed path
@@ -235,7 +261,7 @@ class TestRobotsChecker:
         assert await redis_checker_writer.check_allowed("https://example.com/ok3") == pytest.approx(
             2.0
         )
-        assert redis_fetches == 1
+        assert redis_fetches == 2
 
     async def test_ssrf_protection_on_origin_and_redirect(self) -> None:
         checker = RobotsChecker()

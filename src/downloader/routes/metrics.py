@@ -5,8 +5,10 @@ import multiprocessing
 from datetime import UTC, datetime
 from typing import Any
 
-from fastapi import APIRouter, Request, Response
+from fastapi import APIRouter, Depends, Request, Response
 
+from ..auth import get_api_key
+from ..config import get_settings
 from ..dependencies import BatchSemaphoreDep, PDFSemaphoreDep
 
 logger = logging.getLogger(__name__)
@@ -15,7 +17,7 @@ router = APIRouter()
 
 
 @router.get("/metrics")
-async def get_metrics():
+async def get_metrics(_api_key: str | None = Depends(get_api_key)) -> Response:
     """Get Prometheus-formatted metrics for monitoring."""
     from ..metrics import get_metrics_collector
 
@@ -27,7 +29,7 @@ async def get_metrics():
 
 
 @router.get("/metrics/performance")
-async def get_performance_metrics():
+async def get_performance_metrics(_api_key: str | None = Depends(get_api_key)) -> dict[str, Any]:
     """Get detailed performance metrics in JSON format."""
     from ..metrics import get_metrics_collector
 
@@ -36,7 +38,7 @@ async def get_performance_metrics():
 
 
 @router.get("/metrics/health-score")
-async def get_health_score():
+async def get_health_score(_api_key: str | None = Depends(get_api_key)) -> dict[str, Any]:
     """Get system health score and diagnostics."""
     from ..metrics import get_metrics_collector
 
@@ -49,6 +51,7 @@ async def get_live_metrics(
     request: Request,
     pdf_semaphore: PDFSemaphoreDep,
     batch_semaphore: BatchSemaphoreDep,
+    _api_key: str | None = Depends(get_api_key),
 ) -> dict[str, Any]:
     """Get live system metrics including current concurrency and connection stats."""
     from ..metrics import get_metrics_collector
@@ -56,14 +59,14 @@ async def get_live_metrics(
     collector = get_metrics_collector()
     performance = collector.get_performance_summary()
 
-    # Calculate concurrency stats from semaphores
-    pdf_limit = 12  # Max from config
-    batch_limit = 50  # Max from config
-    pdf_in_use = pdf_limit - pdf_semaphore._value
-    batch_in_use = batch_limit - batch_semaphore._value
+    active_settings = getattr(request.app.state, "settings", None) or get_settings()
+    pdf_limit = active_settings.pdf.concurrency
+    batch_limit = active_settings.batch.concurrency
+    pdf_in_use = max(0, pdf_limit - pdf_semaphore._value)
+    batch_in_use = max(0, batch_limit - batch_semaphore._value)
 
     # Try to get Redis stats
-    redis_stats = {}
+    redis_stats: dict[str, Any] = {}
     try:
         job_manager = getattr(request.app.state, "job_manager", None)
         if job_manager:
@@ -72,10 +75,11 @@ async def get_live_metrics(
         redis_stats = {"status": "error", "error": str(e)}
 
     # Try to get HTTP client stats
-    http_stats = {}
+    http_stats: dict[str, Any] = {}
     try:
-        http_client = request.app.state.http_client
-        http_stats = http_client.get_connection_stats()
+        http_client = getattr(request.app.state, "http_client", None)
+        if http_client:
+            http_stats = http_client.get_connection_stats()
     except Exception as e:
         http_stats = {"status": "error", "error": str(e)}
 

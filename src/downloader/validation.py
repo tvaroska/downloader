@@ -1,14 +1,31 @@
 """URL validation and sanitization utilities with comprehensive SSRF protection."""
 
+import asyncio
 import ipaddress
 import logging
 import re
 import socket
+from collections.abc import Mapping, Sequence
 from urllib.parse import urlparse
 
 from .config import Settings, get_settings
 
 logger = logging.getLogger(__name__)
+
+_FORBIDDEN_CUSTOM_HEADERS = frozenset(
+    {
+        "host",
+        "content-length",
+        "transfer-encoding",
+        "connection",
+        "keep-alive",
+        "upgrade",
+        "te",
+        "trailer",
+        "proxy-authorization",
+        "proxy-authenticate",
+    }
+)
 
 
 class URLValidationError(Exception):
@@ -23,16 +40,105 @@ class SSRFProtectionError(URLValidationError):
     pass
 
 
+def _parse_and_normalize_url(url: str) -> tuple[str, str, int | None]:
+    """Normalize and validate URL syntax, returning (normalized_url, hostname, port)."""
+    if not url or not isinstance(url, str):
+        raise URLValidationError("URL must be a non-empty string")
+
+    url = url.strip()
+
+    if not re.match(r"^[a-zA-Z][a-zA-Z0-9+.-]*://", url):
+        url = f"http://{url}"
+
+    try:
+        parsed = urlparse(url)
+    except Exception as e:
+        raise URLValidationError(f"Invalid URL format: {e}")
+
+    if parsed.scheme == "file":
+        raise URLValidationError("Access to local file system via file:// URLs is not allowed")
+    if parsed.scheme not in ("http", "https"):
+        raise URLValidationError("URL must use http or https scheme")
+
+    if not parsed.hostname:
+        raise URLValidationError("URL must have a valid hostname")
+
+    # Basic hostname validation (allow alphanumeric, dots, hyphens, underscores, colons for IPv6)
+    # IPv6 addresses are already unbracketed by urlparse (parsed.hostname has no brackets)
+    if not re.match(r"^[a-zA-Z0-9._:-]+$", parsed.hostname):
+        raise URLValidationError("Invalid hostname format")
+
+    try:
+        port = parsed.port
+    except ValueError as e:
+        raise URLValidationError(f"Invalid URL port: {e}")
+
+    return url, parsed.hostname, port
+
+
+def _try_parse_ip_literal(hostname: str) -> ipaddress.IPv4Address | ipaddress.IPv6Address | None:
+    """Parse standard IPv4/IPv6 as well as hex, octal, integer, and shorthand IPv4 literals."""
+    clean = hostname.strip().strip("[]").split("%", 1)[0].rstrip(".").lower()
+    if not clean:
+        return None
+
+    try:
+        return ipaddress.ip_address(clean)
+    except ValueError:
+        pass
+
+    parts = clean.split(".")
+    if not (1 <= len(parts) <= 4):
+        return None
+
+    if not all(re.fullmatch(r"(0x[0-9a-f]+|0[0-7]*|[1-9]\d*)", p) for p in parts):
+        return None
+
+    try:
+        nums: list[int] = []
+        for p in parts:
+            if p.startswith("0x"):
+                nums.append(int(p, 16))
+            elif len(p) > 1 and p.startswith("0"):
+                nums.append(int(p, 8))
+            else:
+                nums.append(int(p, 10))
+    except ValueError:
+        return None
+
+    if len(nums) == 1:
+        if not (0 <= nums[0] <= 0xFFFFFFFF):
+            return None
+        packed = nums[0]
+    elif len(nums) == 2:
+        if not (0 <= nums[0] <= 0xFF and 0 <= nums[1] <= 0xFFFFFF):
+            return None
+        packed = (nums[0] << 24) | nums[1]
+    elif len(nums) == 3:
+        if not (0 <= nums[0] <= 0xFF and 0 <= nums[1] <= 0xFF and 0 <= nums[2] <= 0xFFFF):
+            return None
+        packed = (nums[0] << 24) | (nums[1] << 16) | nums[2]
+    else:
+        if not all(0 <= x <= 0xFF for x in nums):
+            return None
+        packed = (nums[0] << 24) | (nums[1] << 16) | (nums[2] << 8) | nums[3]
+
+    return ipaddress.IPv4Address(packed)
+
+
+def _is_malformed_ip_or_numeric_tld(hostname: str) -> bool:
+    """Detect malformed IPv6 or invalid numeric/hex TLD hostnames (RFC 1123 §2.1 / RFC 3696 §2)."""
+    clean = hostname.strip().strip("[]").split("%", 1)[0].rstrip(".").lower()
+    if not clean:
+        return True
+    if ":" in clean:
+        return True
+    return bool(re.fullmatch(r"(0x[0-9a-f]+|\d+)", clean.rsplit(".", 1)[-1]))
+
+
 def validate_url(url: str, settings: Settings | None = None) -> str:
     """
     Validate and sanitize a URL with comprehensive SSRF protection.
-
-    This function performs multiple layers of validation:
-    1. Basic URL format validation
-    2. Scheme validation (http/https only)
-    3. Hostname validation
-    4. DNS resolution (if enabled)
-    5. IP address blocking (private, loopback, link-local, cloud metadata)
 
     Args:
         url: The URL to validate
@@ -45,104 +151,110 @@ def validate_url(url: str, settings: Settings | None = None) -> str:
         URLValidationError: If the URL is invalid
         SSRFProtectionError: If the URL is blocked by SSRF protection
     """
-    if settings is None:
-        settings = get_settings()
+    normalized_url, hostname, port = _parse_and_normalize_url(url)
+    resolve_and_validate_host(hostname, port, settings)
+    return normalized_url
 
-    if not url or not isinstance(url, str):
-        raise URLValidationError("URL must be a non-empty string")
 
-    # Remove whitespace
-    url = url.strip()
+async def validate_url_async(url: str, settings: Settings | None = None) -> str:
+    """Asynchronously validate and sanitize a URL without blocking the event loop on DNS lookup."""
+    normalized_url, hostname, port = _parse_and_normalize_url(url)
+    await resolve_and_validate_host_async(hostname, port, settings)
+    return normalized_url
 
-    # Add http:// if no scheme is present
-    if not re.match(r"^[a-zA-Z][a-zA-Z0-9+.-]*://", url):
-        url = f"http://{url}"
 
-    # Parse URL
-    try:
-        parsed = urlparse(url)
-    except Exception as e:
-        raise URLValidationError(f"Invalid URL format: {e}")
+def _validate_resolved_addr_info(
+    addr_info: Sequence[tuple[object, ...]],
+    hostname: str,
+    cfg: Settings,
+) -> list[str]:
+    """Validate all resolved getaddrinfo records and return deduplicated IP literals."""
+    validated_ips: list[str] = []
+    seen: set[str] = set()
+    for info in addr_info:
+        sockaddr = info[4]
+        raw_ip = str(sockaddr[0]).split("%", 1)[0]  # type: ignore[index]
+        ip_obj = ipaddress.ip_address(raw_ip)
+        _validate_ip_address(ip_obj, hostname, cfg)
+        ip_str = str(ip_obj)
+        if ip_str not in seen:
+            seen.add(ip_str)
+            validated_ips.append(ip_str)
 
-    # Validate scheme - block file:// URLs explicitly for security
-    if parsed.scheme == "file":
-        raise URLValidationError("Access to local file system via file:// URLs is not allowed")
-    if parsed.scheme not in ("http", "https"):
-        raise URLValidationError("URL must use http or https scheme")
+    if not validated_ips:
+        raise SSRFProtectionError(f"Cannot resolve hostname '{hostname}'. DNS resolution failed.")
 
-    # Validate hostname
-    if not parsed.hostname:
-        raise URLValidationError("URL must have a valid hostname")
+    logger.debug(f"Resolved '{hostname}' to {len(validated_ips)} IP address(es)")
+    return validated_ips
 
-    # Basic hostname validation (allow alphanumeric, dots, hyphens, underscores, colons for IPv6)
-    # IPv6 addresses are already unbracketed by urlparse (parsed.hostname has no brackets)
-    if not re.match(r"^[a-zA-Z0-9._:-]+$", parsed.hostname):
+
+def resolve_and_validate_host(
+    hostname: str,
+    port: int | None = None,
+    settings: Settings | None = None,
+) -> list[str]:
+    """Synchronously resolve and validate a target hostname or IP literal against SSRF rules."""
+    cfg = settings or get_settings()
+
+    ip_obj = _try_parse_ip_literal(hostname)
+    if ip_obj is not None:
+        logger.debug(f"Hostname '{hostname}' parsed as IP literal {ip_obj}")
+        _validate_ip_address(ip_obj, hostname, cfg)
+        return [str(ip_obj)]
+
+    if _is_malformed_ip_or_numeric_tld(hostname):
         raise URLValidationError("Invalid hostname format")
 
-    # SSRF Protection - check if hostname/IP is blocked
-    _check_ssrf_protection(parsed.hostname, settings)
+    if not cfg.ssrf.resolve_dns:
+        logger.debug(f"DNS resolution disabled, checking hostname '{hostname}' directly")
+        if _is_hostname_blocked(hostname, cfg):
+            raise SSRFProtectionError(f"Hostname '{hostname}' appears to be a restricted address")
+        return []
 
-    return url
+    try:
+        addr_info = socket.getaddrinfo(hostname, port)
+    except (OSError, socket.gaierror) as e:
+        logger.warning(f"DNS resolution failed for '{hostname}': {e}")
+        raise SSRFProtectionError(f"Cannot resolve hostname '{hostname}'. DNS resolution failed.")
+
+    return _validate_resolved_addr_info(addr_info, hostname, cfg)
+
+
+async def resolve_and_validate_host_async(
+    hostname: str,
+    port: int | None = None,
+    settings: Settings | None = None,
+) -> list[str]:
+    """Asynchronously resolve and validate a target hostname or IP literal off the event loop."""
+    cfg = settings or get_settings()
+
+    ip_obj = _try_parse_ip_literal(hostname)
+    if ip_obj is not None:
+        logger.debug(f"Hostname '{hostname}' parsed as IP literal {ip_obj}")
+        _validate_ip_address(ip_obj, hostname, cfg)
+        return [str(ip_obj)]
+
+    if _is_malformed_ip_or_numeric_tld(hostname):
+        raise URLValidationError("Invalid hostname format")
+
+    if not cfg.ssrf.resolve_dns:
+        logger.debug(f"DNS resolution disabled, checking hostname '{hostname}' directly")
+        if _is_hostname_blocked(hostname, cfg):
+            raise SSRFProtectionError(f"Hostname '{hostname}' appears to be a restricted address")
+        return []
+
+    try:
+        addr_info = await asyncio.to_thread(socket.getaddrinfo, hostname, port)
+    except (OSError, socket.gaierror) as e:
+        logger.warning(f"DNS resolution failed for '{hostname}': {e}")
+        raise SSRFProtectionError(f"Cannot resolve hostname '{hostname}'. DNS resolution failed.")
+
+    return _validate_resolved_addr_info(addr_info, hostname, cfg)
 
 
 def _check_ssrf_protection(hostname: str, settings: Settings) -> None:
-    """
-    Comprehensive SSRF protection - validates hostname/IP is not restricted.
-
-    This function performs multi-layered checks:
-    1. Check if hostname is already an IP address
-    2. Resolve DNS to get actual IP address(es) if enabled
-    3. Validate IP addresses are not in restricted ranges:
-       - Private IPs (10.0.0.0/8, 172.16.0.0/12, 192.168.0.0/16)
-       - Loopback (127.0.0.0/8, ::1)
-       - Link-local (169.254.0.0/16, fe80::/10) - includes cloud metadata!
-       - Multicast, reserved, unspecified addresses
-
-    Args:
-        hostname: The hostname or IP address to check
-        settings: Settings instance with SSRF configuration
-
-    Raises:
-        SSRFProtectionError: If the hostname/IP is blocked
-    """
-    # Try to parse hostname as IP address first
-    ip_addresses = []
-
-    try:
-        # If hostname is already an IP address, use it directly
-        ip_obj = ipaddress.ip_address(hostname)
-        ip_addresses.append(ip_obj)
-        logger.debug(f"Hostname '{hostname}' is already an IP address")
-    except ValueError:
-        # Hostname is a domain name, needs DNS resolution
-        if settings.ssrf.resolve_dns:
-            # Resolve DNS to get actual IP address(es)
-            try:
-                # Get all IP addresses for this hostname (IPv4 and IPv6)
-                addr_info = socket.getaddrinfo(hostname, None)
-                for info in addr_info:
-                    ip_str = info[4][0]
-                    ip_obj = ipaddress.ip_address(ip_str)
-                    ip_addresses.append(ip_obj)
-
-                logger.debug(f"Resolved '{hostname}' to {len(ip_addresses)} IP address(es)")
-            except (OSError, socket.gaierror) as e:
-                logger.warning(f"DNS resolution failed for '{hostname}': {e}")
-                raise SSRFProtectionError(
-                    f"Cannot resolve hostname '{hostname}'. DNS resolution failed."
-                )
-        else:
-            # DNS resolution disabled - do basic string matching on hostname
-            logger.debug(f"DNS resolution disabled, checking hostname '{hostname}' directly")
-            if _is_hostname_blocked(hostname):
-                raise SSRFProtectionError(
-                    f"Hostname '{hostname}' appears to be a restricted address"
-                )
-            return  # No IP to check, return early
-
-    # Check each resolved IP address
-    for ip_obj in ip_addresses:
-        _validate_ip_address(ip_obj, hostname, settings)
+    """Validate hostname/IP is not restricted by SSRF rules."""
+    resolve_and_validate_host(hostname, None, settings)
 
 
 def _validate_ip_address(
@@ -161,6 +273,10 @@ def _validate_ip_address(
     Raises:
         SSRFProtectionError: If the IP is in a restricted range
     """
+    if isinstance(ip_obj, ipaddress.IPv6Address) and ip_obj.ipv4_mapped is not None:
+        _validate_ip_address(ip_obj.ipv4_mapped, original_hostname, settings)
+        return
+
     ip_str = str(ip_obj)
 
     # Check order is important! Many IPs fall into multiple categories (e.g., 0.0.0.0 is both
@@ -224,44 +340,31 @@ def _validate_ip_address(
     logger.debug(f"IP address {ip_str} (from {original_hostname}) passed SSRF checks")
 
 
-def _is_hostname_blocked(hostname: str) -> bool:
+def _is_hostname_blocked(hostname: str, settings: Settings | None = None) -> bool:
     """
-    Check if hostname string matches known restricted patterns.
-
-    This is a fallback when DNS resolution is disabled.
-    Less secure than DNS resolution + IP checking.
+    Check if hostname string matches known restricted patterns when DNS resolution is disabled.
 
     Args:
         hostname: The hostname to check
+        settings: Optional Settings instance
 
     Returns:
         True if the hostname should be blocked
     """
-    hostname_lower = hostname.lower()
+    clean = hostname.strip().strip("[]").rstrip(".").lower()
 
-    # Check for localhost variations
-    localhost_patterns = [
-        "localhost",
-        "localhost.localdomain",
-        "ip6-localhost",
-    ]
-    if hostname_lower in localhost_patterns:
+    if clean in {"localhost", "localhost.localdomain", "ip6-localhost", "ip6-loopback"}:
+        return True
+    if clean.endswith(".localhost"):
         return True
 
-    # Check for private IP patterns (regex-based, less reliable)
-    private_patterns = [
-        r"^127\.",  # Loopback
-        r"^10\.",  # Private class A
-        r"^172\.(1[6-9]|2[0-9]|3[01])\.",  # Private class B
-        r"^192\.168\.",  # Private class C
-        r"^169\.254\.",  # Link-local (cloud metadata!)
-        r"^0\.",  # Reserved
-        r"^224\.",  # Multicast
-    ]
-
-    for pattern in private_patterns:
-        if re.match(pattern, hostname):
+    ip_obj = _try_parse_ip_literal(clean)
+    if ip_obj is not None:
+        try:
+            _validate_ip_address(ip_obj, hostname, settings or get_settings())
+        except SSRFProtectionError:
             return True
+        return False
 
     return False
 
@@ -284,3 +387,35 @@ def sanitize_user_agent(user_agent: str | None = None) -> str:
 
     # Default user agent
     return "REST-API-Downloader/1.0"
+
+
+def sanitize_custom_headers(headers: Mapping[str, str] | None) -> dict[str, str] | None:
+    """Validate and sanitize caller-supplied custom HTTP headers while preserving key casing."""
+    if headers is None or len(headers) == 0:
+        return None
+
+    sanitized: dict[str, str] = {}
+    for raw_name, raw_val in headers.items():
+        if not isinstance(raw_name, str) or not isinstance(raw_val, str):
+            raise URLValidationError("Invalid custom header name or value")
+
+        if any(c in raw_name or c in raw_val for c in ("\r", "\n", "\x00")):
+            raise URLValidationError("Invalid custom header name or value")
+
+        name = raw_name.strip()
+        if not name or not re.fullmatch(r"[!#$%&'*+\-.^_`|~0-9A-Za-z]+", name):
+            raise URLValidationError("Invalid custom header name or value")
+
+        if len(raw_val) > 4096:
+            raise URLValidationError("Invalid custom header name or value")
+
+        lower_name = name.lower()
+        if lower_name in _FORBIDDEN_CUSTOM_HEADERS:
+            raise URLValidationError(f"Custom header '{name}' is not allowed")
+
+        if lower_name == "user-agent":
+            sanitized[name] = sanitize_user_agent(raw_val)
+        else:
+            sanitized[name] = raw_val.strip()
+
+    return sanitized or None

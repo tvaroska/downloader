@@ -20,7 +20,8 @@ from ..metrics import (
     record_robots_disallowed,
     record_robots_evaluation,
 )
-from ..validation import SSRFProtectionError, sanitize_user_agent, validate_url
+from ..ssrf_transport import SSRFSafeHTTPTransport
+from ..validation import SSRFProtectionError, sanitize_user_agent, validate_url_async
 
 logger = logging.getLogger(__name__)
 
@@ -216,9 +217,10 @@ class RobotsChecker:
         while len(self._cache) > self.cache_max_size:
             self._cache.popitem(last=False)
 
-    async def _get_cached_entry(self, netloc: str) -> tuple[str, bool] | None:
+    async def _get_cached_entry(self, scheme: str, netloc: str) -> tuple[str, bool] | None:
+        origin_key = f"{scheme}://{netloc}"
         if self.redis_client is not None:
-            redis_key = f"robots:v1:{netloc}"
+            redis_key = f"robots:v2:{scheme}:{netloc}"
             try:
                 raw_cached = await self.redis_client.get(redis_key)
                 if isinstance(raw_cached, bytes):
@@ -234,34 +236,42 @@ class RobotsChecker:
                 return None
             except Exception as exc:
                 logger.warning(
-                    f"Redis robots.txt cache read failed for {netloc}, using memory cache: {exc}"
+                    f"Redis robots.txt cache read failed for {origin_key}, using memory cache: {exc}"
                 )
 
-        return self._get_memory_cache(netloc)
+        return self._get_memory_cache(origin_key)
 
-    async def _set_cached_entry(self, netloc: str, raw_txt: str, allow_all: bool) -> None:
-        self._set_memory_cache(netloc, raw_txt, allow_all)
+    async def _set_cached_entry(
+        self, scheme: str, netloc: str, raw_txt: str, allow_all: bool
+    ) -> None:
+        origin_key = f"{scheme}://{netloc}"
+        self._set_memory_cache(origin_key, raw_txt, allow_all)
         if self.redis_client is not None:
-            redis_key = f"robots:v1:{netloc}"
+            redis_key = f"robots:v2:{scheme}:{netloc}"
             payload = json.dumps({"raw": raw_txt, "allow_all": allow_all})
             try:
                 await self.redis_client.set(redis_key, payload, ex=self.cache_ttl)
             except Exception as exc:
                 logger.warning(
-                    f"Redis robots.txt cache write failed for {netloc}, kept in memory cache: {exc}"
+                    f"Redis robots.txt cache write failed for {origin_key}, kept in memory cache: {exc}"
                 )
 
     async def _on_redirect_hook(self, response: httpx.Response) -> None:
         if response.is_redirect and "location" in response.headers:
             next_url = str(httpx.URL(str(response.url)).join(response.headers["location"]))
-            validate_url(next_url)
+            await validate_url_async(next_url)
 
     def _ensure_http_client(self) -> httpx.AsyncClient:
         if self._http_client is None:
             self._http_client = httpx.AsyncClient(
+                transport=SSRFSafeHTTPTransport(
+                    limits=httpx.Limits(max_connections=20, max_keepalive_connections=10),
+                    http2=False,
+                ),
                 timeout=self.fetch_timeout,
                 follow_redirects=True,
                 max_redirects=5,
+                trust_env=False,
                 event_hooks={"response": [self._on_redirect_hook]},
                 headers={"User-Agent": self.user_agent, "Accept": "text/plain,*/*"},
             )
@@ -287,7 +297,7 @@ class RobotsChecker:
         robots_url = f"{scheme}://{netloc}/robots.txt"
 
         try:
-            validate_url(robots_url)
+            await validate_url_async(robots_url)
         except SSRFProtectionError as exc:
             # Fail open when real DNS lookup fails; if an explicit test fetcher is injected,
             # still block localhost/restricted hostnames while allowing synthetic domain names.
@@ -299,7 +309,7 @@ class RobotsChecker:
                     logger.warning(
                         f"DNS resolution failed fetching {robots_url} ({exc}); failing open"
                     )
-                    await self._set_cached_entry(netloc, "", True)
+                    await self._set_cached_entry(scheme, netloc, "", True)
                     return "", True
             else:
                 raise
@@ -316,20 +326,20 @@ class RobotsChecker:
                 logger.debug(f"Offline environment fetching {robots_url} ({exc}); failing open")
             else:
                 logger.warning(f"Unreachable robots.txt at {robots_url} ({exc}); failing open")
-            await self._set_cached_entry(netloc, "", True)
+            await self._set_cached_entry(scheme, netloc, "", True)
             return "", True
 
         if status_code >= 400:
             logger.warning(f"robots.txt at {robots_url} returned HTTP {status_code}; failing open")
-            await self._set_cached_entry(netloc, "", True)
+            await self._set_cached_entry(scheme, netloc, "", True)
             return "", True
 
         if _is_malformed_robots_txt(raw_text):
             logger.warning(f"Malformed robots.txt at {robots_url}; failing open")
-            await self._set_cached_entry(netloc, "", True)
+            await self._set_cached_entry(scheme, netloc, "", True)
             return "", True
 
-        await self._set_cached_entry(netloc, raw_text, False)
+        await self._set_cached_entry(scheme, netloc, raw_text, False)
         return raw_text, False
 
     async def check_allowed(self, url: str, user_agent: str | None = None) -> float | None:
@@ -352,14 +362,15 @@ class RobotsChecker:
         if not netloc:
             return None
 
-        cached = await self._get_cached_entry(netloc)
+        origin_key = f"{scheme}://{netloc}"
+        cached = await self._get_cached_entry(scheme, netloc)
         if cached is not None:
             record_robots_cache_hit()
             raw_txt, allow_all = cached
         else:
-            lock = self._get_origin_lock(netloc)
+            lock = self._get_origin_lock(origin_key)
             async with lock:
-                cached = await self._get_cached_entry(netloc)
+                cached = await self._get_cached_entry(scheme, netloc)
                 if cached is not None:
                     record_robots_cache_hit()
                     raw_txt, allow_all = cached

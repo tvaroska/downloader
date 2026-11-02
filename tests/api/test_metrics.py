@@ -5,6 +5,7 @@ from unittest.mock import AsyncMock, MagicMock
 import pytest
 from httpx import ASGITransport, AsyncClient
 
+from src.downloader.config import AuthConfig, BatchConfig, PDFConfig, Settings
 from src.downloader.dependencies import get_batch_semaphore, get_pdf_semaphore
 from src.downloader.main import app
 
@@ -192,10 +193,15 @@ class TestLiveMetricsEndpoint:
         async def mock_get_batch_semaphore():
             return mock_batch_semaphore
 
+        prev_settings = getattr(app.state, "settings", None)
         app.dependency_overrides[get_pdf_semaphore] = mock_get_pdf_semaphore
         app.dependency_overrides[get_batch_semaphore] = mock_get_batch_semaphore
         app.state.job_manager = mock_job_manager
         app.state.http_client = mock_http_client
+        app.state.settings = Settings(
+            pdf=PDFConfig(concurrency=12),
+            batch=BatchConfig(concurrency=50),
+        )
 
         try:
             transport = ASGITransport(app=app)
@@ -204,13 +210,25 @@ class TestLiveMetricsEndpoint:
 
             data = response.json()
             pdf = data["concurrency"]["pdf"]
+            batch = data["concurrency"]["batch"]
 
             # PDF: 12 limit, 8 available, 4 in use
             assert pdf["limit"] == 12
             assert pdf["available"] == 8
             assert pdf["active"] == 4
             assert pdf["utilization_percent"] == pytest.approx(33.3, abs=0.1)
+
+            # Batch: 50 limit, 40 available, 10 in use
+            assert batch["limit"] == 50
+            assert batch["available"] == 40
+            assert batch["active"] == 10
+            assert batch["utilization_percent"] == pytest.approx(20.0, abs=0.1)
         finally:
+            if prev_settings is None:
+                if hasattr(app.state, "settings"):
+                    delattr(app.state, "settings")
+            else:
+                app.state.settings = prev_settings
             app.dependency_overrides.pop(get_pdf_semaphore, None)
             app.dependency_overrides.pop(get_batch_semaphore, None)
 
@@ -307,3 +325,31 @@ class TestLiveMetricsErrorHandling:
         finally:
             app.dependency_overrides.pop(get_pdf_semaphore, None)
             app.dependency_overrides.pop(get_batch_semaphore, None)
+
+
+@pytest.mark.asyncio
+class TestMetricsAuthentication:
+    """Tests for API key authentication on /metrics* while keeping /health public."""
+
+    @pytest.mark.parametrize(
+        "path",
+        ["/metrics", "/metrics/performance", "/metrics/health-score", "/metrics/live"],
+    )
+    async def test_metrics_requires_api_key_when_configured(self, api_client, path: str):
+        prev_settings = getattr(app.state, "settings", None)
+        app.state.settings = Settings(auth=AuthConfig(api_key="secret-metrics-key"))
+        try:
+            unauth = await api_client.get(path)
+            assert unauth.status_code == 401
+
+            auth_ok = await api_client.get(path, headers={"X-API-Key": "secret-metrics-key"})
+            assert auth_ok.status_code == 200
+
+            health = await api_client.get("/health")
+            assert health.status_code == 200
+        finally:
+            if prev_settings is None:
+                if hasattr(app.state, "settings"):
+                    delattr(app.state, "settings")
+            else:
+                app.state.settings = prev_settings

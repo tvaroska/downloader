@@ -11,7 +11,7 @@ from urllib.parse import urlparse
 
 from .browser import BrowserConfig, BrowserPool, BrowserPoolError
 from .config import get_settings
-from .validation import URLValidationError, validate_url
+from .validation import URLValidationError, sanitize_user_agent, validate_url_async
 
 logger = logging.getLogger(__name__)
 
@@ -32,7 +32,7 @@ async def _maybe_await(value: Any) -> Any:
 def resolve_browser_user_agent(explicit_user_agent: str | None = None) -> str:
     """Resolve effective User-Agent for Playwright contexts."""
     if isinstance(explicit_user_agent, str) and explicit_user_agent.strip():
-        return explicit_user_agent.strip()
+        return sanitize_user_agent(explicit_user_agent.strip())
 
     settings = get_settings()
     crawling = getattr(settings, "crawling", None)
@@ -48,7 +48,7 @@ def resolve_browser_user_agent(explicit_user_agent: str | None = None) -> str:
                 or configured_ua.strip() != "REST-API-Downloader/1.0"
             )
         ):
-            return configured_ua.strip()
+            return sanitize_user_agent(configured_ua.strip())
 
     return DEFAULT_BROWSER_USER_AGENT
 
@@ -69,7 +69,7 @@ async def _ssrf_route_guard(route: Any) -> None:
         return
 
     try:
-        validate_url(req_url, get_settings())
+        await validate_url_async(req_url, get_settings())
     except URLValidationError as exc:
         logger.warning(f"Blocked browser request failing SSRF validation ({req_url}): {exc}")
         await _maybe_await(route.abort("accessdenied"))
@@ -88,7 +88,9 @@ async def install_ssrf_route_guard(context: Any) -> None:
 class PDFGeneratorError(Exception):
     """Raised when PDF generation fails."""
 
-    pass
+    def __init__(self, message: str, status_code: int | None = None) -> None:
+        super().__init__(message)
+        self.status_code = status_code
 
 
 class PlaywrightPDFGenerator:
@@ -316,7 +318,8 @@ class PlaywrightPDFGenerator:
 
                         if response.status >= 400:
                             raise PDFGeneratorError(
-                                f"HTTP {response.status}: {response.status_text}"
+                                f"HTTP {response.status}: {response.status_text}",
+                                status_code=response.status,
                             )
 
                     except TimeoutError:
@@ -330,9 +333,6 @@ class PlaywrightPDFGenerator:
 
                     # Try to close any signup boxes/modals
                     await self._close_modals(page)
-
-                    # Additional wait for dynamic content
-                    await asyncio.sleep(2)
 
                     logger.info("Generating PDF...")
 
@@ -412,7 +412,16 @@ async def get_pdf_generator():
     # Use lock to prevent multiple simultaneous initializations
     async with _initialization_lock:
         if _pdf_generator is None:
-            generator = PlaywrightPDFGenerator(pool_size=2)  # Reduce pool size for Docker
+            cfg = get_settings()
+            generator = PlaywrightPDFGenerator(
+                pool_size=cfg.pdf.pool_size,
+                page_load_timeout=cfg.pdf.page_load_timeout,
+                wait_until=cfg.pdf.wait_until,
+                memory_limit_mb=cfg.pdf.browser_memory_limit_mb,
+                max_uses_per_browser=cfg.pdf.max_uses_per_browser,
+                idle_timeout=cfg.pdf.idle_timeout,
+                user_agent=None,
+            )
             await generator.start()
             _pdf_generator = generator
 

@@ -2,8 +2,11 @@
 
 import logging
 import re
+import time
 from collections import OrderedDict
+from collections.abc import Callable
 from typing import Literal
+from urllib.parse import urlparse
 
 from bs4 import BeautifulSoup, Tag
 from playwright.async_api import TimeoutError as PlaywrightTimeoutError
@@ -29,38 +32,85 @@ class SelectorTimeoutError(Exception):
 
 
 class BoundedCache:
-    """A bounded set-like cache with LRU eviction."""
+    """A bounded set-like cache with LRU eviction and optional monotonic TTL."""
 
-    def __init__(self, maxsize: int = 1000):
+    def __init__(
+        self,
+        maxsize: int | Callable[[], int] = 1000,
+        ttl: float | Callable[[], float] | None = None,
+    ) -> None:
         self._maxsize = maxsize
-        self._cache: OrderedDict[str, None] = OrderedDict()
+        self._ttl = ttl
+        self._cache: OrderedDict[str, float] = OrderedDict()
+
+    def _resolve_limits(self) -> tuple[int, float | None]:
+        max_sz = self._maxsize() if callable(self._maxsize) else self._maxsize
+        ttl_s = self._ttl() if callable(self._ttl) else self._ttl
+        return max_sz, ttl_s
+
+    def _purge_expired(self, now: float, ttl_s: float | None) -> None:
+        if ttl_s is None or not self._cache:
+            return
+        expired = [k for k, ts in self._cache.items() if now - ts >= ttl_s]
+        for k in expired:
+            self._cache.pop(k, None)
 
     def __contains__(self, key: str) -> bool:
-        if key in self._cache:
-            self._cache.move_to_end(key)  # Mark as recently used
-            return True
-        return False
+        max_sz, ttl_s = self._resolve_limits()
+        if max_sz <= 0:
+            return False
+        ts = self._cache.get(key)
+        if ts is None:
+            return False
+        if ttl_s is not None and (time.monotonic() - ts) >= ttl_s:
+            self._cache.pop(key, None)
+            return False
+        self._cache.move_to_end(key)
+        return True
 
     def add(self, key: str) -> None:
-        if key in self._cache:
-            self._cache.move_to_end(key)
-        else:
-            if len(self._cache) >= self._maxsize:
-                self._cache.popitem(last=False)  # Remove oldest
-            self._cache[key] = None
+        max_sz, ttl_s = self._resolve_limits()
+        if max_sz <= 0:
+            self._cache.clear()
+            return
+        now = time.monotonic()
+        self._purge_expired(now, ttl_s)
+        self._cache[key] = now
+        self._cache.move_to_end(key)
+        while len(self._cache) > max_sz:
+            self._cache.popitem(last=False)
 
     def clear(self) -> None:
         self._cache.clear()
 
     def __len__(self) -> int:
+        max_sz, ttl_s = self._resolve_limits()
+        if max_sz <= 0:
+            return 0
+        self._purge_expired(time.monotonic(), ttl_s)
         return len(self._cache)
 
 
-# Bounded caches with LRU eviction (max 1000 entries each)
-_empty_content_cache = BoundedCache(maxsize=1000)
-_fallback_bypass_cache = BoundedCache(maxsize=1000)
-_js_heavy_cache = BoundedCache(maxsize=1000)  # URLs needing JS rendering for HTML
-_static_html_cache = BoundedCache(maxsize=1000)  # URLs confirmed as static HTML
+def _cache_maxsize() -> int:
+    return get_settings().content.cache_max_size
+
+
+def _cache_ttl() -> float:
+    return float(get_settings().content.html_js_rendering_cache_ttl)
+
+
+_empty_content_cache = BoundedCache(maxsize=_cache_maxsize, ttl=_cache_ttl)
+_fallback_bypass_cache = BoundedCache(maxsize=_cache_maxsize, ttl=_cache_ttl)
+_js_heavy_cache = BoundedCache(maxsize=_cache_maxsize, ttl=_cache_ttl)
+_static_html_cache = BoundedCache(maxsize=_cache_maxsize, ttl=_cache_ttl)
+
+
+def _is_js_heavy_domain(url: str, domains: list[str]) -> bool:
+    host = (urlparse(url).hostname or "").lower().rstrip(".")
+    if not host:
+        return False
+    clean_domains = [d.strip().lower().lstrip(".").rstrip(".") for d in domains if d.strip()]
+    return any(host == d or host.endswith(f".{d}") for d in clean_domains)
 
 
 async def _close_page_modals(page) -> None:
@@ -92,6 +142,10 @@ def should_use_playwright_fallback(url: str, content: bytes, content_type: str) 
     Implements fast HTML content detection using CSS selectors and caching.
     Expected 50-70% reduction in unnecessary Playwright usage.
     """
+    settings = get_settings()
+    if not settings.content.enable_html_js_rendering:
+        return False
+
     # Check if URL is known to produce empty content
     if url in _empty_content_cache:
         logger.debug(f"Skipping Playwright fallback for known empty URL: {url}")
@@ -118,7 +172,6 @@ def should_use_playwright_fallback(url: str, content: bytes, content_type: str) 
 
         # Get text content and check if substantial
         body_text = body.get_text(strip=True)
-        settings = get_settings()
         if len(body_text) < settings.content.min_body_text_threshold:
             _empty_content_cache.add(url)
             logger.debug(f"Caching empty content URL (body text: {len(body_text)} chars): {url}")
@@ -215,6 +268,10 @@ def should_use_playwright_for_html(url: str, content: bytes, content_type: str) 
     Returns:
         True if Playwright rendering recommended, False otherwise
     """
+    settings = get_settings()
+    if not settings.content.enable_html_js_rendering:
+        return False
+
     # Check caches first (O(1) lookup)
     if url in _js_heavy_cache:
         logger.debug(f"Cache hit: {url} known to need JS rendering")
@@ -270,8 +327,7 @@ def should_use_playwright_for_html(url: str, content: bytes, content_type: str) 
             return True
 
         # Known JS-heavy domains
-        js_heavy_domains = ["substack.com", "medium.com", "notion.so", "ghost.io"]
-        if any(domain in url for domain in js_heavy_domains):
+        if _is_js_heavy_domain(url, settings.content.html_js_heavy_domains):
             logger.info(f"Detected known JS-heavy domain in {url}")
             _js_heavy_cache.add(url)
             return True
@@ -336,15 +392,14 @@ async def convert_content_with_playwright_fallback(
             page = await context.new_page()
 
             logger.info(f"🌐 Loading page with Playwright: {url}")
-            # Navigate to page with reduced timeout (30s -> 10s for faster failures)
-            response = await page.goto(url, wait_until="networkidle", timeout=10000)
+            timeout_ms = get_settings().content.html_js_rendering_timeout
+            response = await page.goto(url, wait_until="networkidle", timeout=timeout_ms)
 
             if not response or response.status >= 400:
                 raise Exception(f"Failed to load page: {url}")
 
             logger.debug(f"Page loaded, waiting for network idle: {url}")
-            # Wait for page to be fully loaded with reduced timeout
-            await page.wait_for_load_state("networkidle", timeout=10000)
+            await page.wait_for_load_state("networkidle", timeout=timeout_ms)
 
             # Try to close any signup boxes/modals
             await _close_page_modals(page)
@@ -434,8 +489,8 @@ async def render_html_with_playwright(
             page = await context.new_page()
 
             logger.info(f"🌐 Loading page with Playwright: {url}")
-            # Navigate with 10s timeout
-            response = await page.goto(url, wait_until="networkidle", timeout=10000)
+            timeout_ms = get_settings().content.html_js_rendering_timeout
+            response = await page.goto(url, wait_until="networkidle", timeout=timeout_ms)
 
             if not response or response.status >= 400:
                 raise Exception(
@@ -443,17 +498,21 @@ async def render_html_with_playwright(
                 )
 
             logger.debug(f"Page loaded, waiting for network idle: {url}")
-            await page.wait_for_load_state("networkidle", timeout=10000)
+            await page.wait_for_load_state("networkidle", timeout=timeout_ms)
 
             # Wait for specific selector if requested
             if wait_for_selector:
                 try:
                     logger.info(f"Waiting for selector '{wait_for_selector}' on {url}")
-                    await page.wait_for_selector(wait_for_selector, timeout=10000, state="visible")
+                    await page.wait_for_selector(
+                        wait_for_selector, timeout=timeout_ms, state="visible"
+                    )
                     logger.info(f"Selector '{wait_for_selector}' found on {url}")
                 except PlaywrightTimeoutError:
-                    logger.warning(f"Selector '{wait_for_selector}' not found within 10s on {url}")
-                    raise SelectorTimeoutError(wait_for_selector, 10000)
+                    logger.warning(
+                        f"Selector '{wait_for_selector}' not found within {timeout_ms}ms on {url}"
+                    )
+                    raise SelectorTimeoutError(wait_for_selector, timeout_ms)
 
             # Close modals
             await _close_page_modals(page)

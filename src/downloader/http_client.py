@@ -1,14 +1,20 @@
 """HTTP client implementation using httpx with connection pooling, redirect SSRF guard, and streaming size limits."""
 
 import logging
-import unittest.mock
+from collections.abc import Mapping
 from enum import Enum
 from typing import Any
 
 import httpx
 
 from .models.responses import ResponseMetadata
-from .validation import URLValidationError, sanitize_user_agent, validate_url
+from .ssrf_transport import SSRFSafeHTTPTransport
+from .validation import (
+    URLValidationError,
+    sanitize_custom_headers,
+    sanitize_user_agent,
+    validate_url_async,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -102,11 +108,6 @@ def _parse_content_length(headers: Any) -> int | None:
         return None
 
 
-def _is_mock_callable(obj: Any) -> bool:
-    """Detect unittest.mock objects so existing unit tests mocking _client.get keep working."""
-    return isinstance(obj, unittest.mock.Mock) or type(obj).__module__.startswith("unittest.mock")
-
-
 class HTTPClient:
     """HTTP client with connection pooling, redirect SSRF checks, and streaming byte cap."""
 
@@ -152,12 +153,14 @@ class HTTPClient:
             keepalive_expiry=keepalive_expiry,
         )
 
+        transport = SSRFSafeHTTPTransport(limits=self._limits, http2=http2)
+
         self._client = httpx.AsyncClient(
             timeout=timeout,
             follow_redirects=True,
             max_redirects=max_redirects,
-            limits=self._limits,
-            http2=http2,
+            transport=transport,
+            trust_env=False,
             event_hooks={"response": [self._on_response_hook]},
             headers={
                 "User-Agent": self.user_agent,
@@ -181,7 +184,7 @@ class HTTPClient:
             location = _extract_header_case_insensitive(response.headers, "location")
             if location:
                 next_url = str(httpx.URL(str(response.url)).join(location))
-                validate_url(next_url)
+                await validate_url_async(next_url)
             return
 
         if response.status_code < 400:
@@ -193,7 +196,10 @@ class HTTPClient:
                 )
 
     async def download(
-        self, url: str, priority: RequestPriority = RequestPriority.HIGH
+        self,
+        url: str,
+        priority: RequestPriority = RequestPriority.HIGH,
+        headers: Mapping[str, str] | None = None,
     ) -> tuple[bytes, ResponseMetadata]:
         """
         Download content from a URL.
@@ -201,41 +207,46 @@ class HTTPClient:
         Args:
             url: The URL to download from
             priority: Request priority (kept for API compatibility, not used)
+            headers: Optional sanitized custom HTTP headers
 
         Returns:
             Tuple of (content_bytes, metadata_dict)
 
         Raises:
             ContentTooLargeError: When content exceeds max_download_size
-            URLValidationError: When a redirect target fails SSRF validation
+            URLValidationError: When a redirect target or header fails validation
             HTTPClientError: For HTTP-related errors
             HTTPTimeoutError: For timeout errors
             DownloadError: For other download errors
         """
-        return await self._do_download(url)
+        return await self._do_download(url, headers=headers)
 
-    async def _do_download(self, url: str) -> tuple[bytes, ResponseMetadata]:
-        """Internal download implementation supporting both real streaming and mocked _client.get."""
+    async def _do_download(
+        self,
+        url: str,
+        headers: Mapping[str, str] | None = None,
+    ) -> tuple[bytes, ResponseMetadata]:
+        """Internal streaming download implementation."""
         logger.info(f"Starting download from: {url}")
 
         try:
-            if _is_mock_callable(self._client) or _is_mock_callable(self._client.get):
-                response = await self._client.get(url)
+            req_headers = sanitize_custom_headers(headers)
 
-                status_code = getattr(response, "status_code", 200)
-                is_redirect = (getattr(response, "is_redirect", False) is True) or (
-                    isinstance(status_code, int) and 300 <= status_code < 400
-                )
-                if is_redirect:
-                    location = _extract_header_case_insensitive(response.headers, "location")
-                    if location:
-                        next_url = str(httpx.URL(str(response.url)).join(location))
-                        validate_url(next_url)
+            # Ensure hook remains attached even if a caller replaced _client with a custom AsyncClient
+            hooks = self._client.event_hooks.setdefault("response", [])
+            if self._on_response_hook not in hooks:
+                hooks.append(self._on_response_hook)
 
-                if status_code >= 400:
+            stream_cm = (
+                self._client.stream("GET", url, headers=req_headers)
+                if req_headers is not None
+                else self._client.stream("GET", url)
+            )
+            async with stream_cm as response:
+                if response.status_code >= 400:
                     raise HTTPClientError(
-                        f"HTTP {status_code}: {response.reason_phrase}",
-                        status_code=status_code,
+                        f"HTTP {response.status_code}: {response.reason_phrase}",
+                        status_code=response.status_code,
                     )
 
                 cl_val = _parse_content_length(response.headers)
@@ -245,47 +256,18 @@ class HTTPClient:
                         actual_size=cl_val,
                     )
 
-                content = response.content
-                if (
-                    isinstance(content, (bytes, bytearray))
-                    and len(content) > self.max_download_size
-                ):
-                    raise ContentTooLargeError(
-                        max_size=self.max_download_size,
-                        actual_size=len(content),
-                    )
-            else:
-                # Ensure hook remains attached even if a caller replaced _client with a custom AsyncClient
-                hooks = self._client.event_hooks.setdefault("response", [])
-                if self._on_response_hook not in hooks:
-                    hooks.append(self._on_response_hook)
-
-                async with self._client.stream("GET", url) as response:
-                    if response.status_code >= 400:
-                        raise HTTPClientError(
-                            f"HTTP {response.status_code}: {response.reason_phrase}",
-                            status_code=response.status_code,
-                        )
-
-                    cl_val = _parse_content_length(response.headers)
-                    if cl_val is not None and cl_val > self.max_download_size:
+                chunks: list[bytes] = []
+                total_bytes = 0
+                async for chunk in response.aiter_bytes():
+                    total_bytes += len(chunk)
+                    if total_bytes > self.max_download_size:
                         raise ContentTooLargeError(
                             max_size=self.max_download_size,
-                            actual_size=cl_val,
+                            actual_size=total_bytes,
                         )
+                    chunks.append(chunk)
 
-                    chunks: list[bytes] = []
-                    total_bytes = 0
-                    async for chunk in response.aiter_bytes():
-                        total_bytes += len(chunk)
-                        if total_bytes > self.max_download_size:
-                            raise ContentTooLargeError(
-                                max_size=self.max_download_size,
-                                actual_size=total_bytes,
-                            )
-                        chunks.append(chunk)
-
-                    content = b"".join(chunks)
+                content = b"".join(chunks)
 
             content_type = (
                 _extract_header_case_insensitive(response.headers, "content-type") or "unknown"

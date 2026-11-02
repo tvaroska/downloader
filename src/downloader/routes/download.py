@@ -22,7 +22,7 @@ from ..http_client import (
     HTTPTimeoutError,
     RequestPriority,
 )
-from ..models.responses import ErrorResponse, HTTPErrorResponse
+from ..models.responses import ErrorResponse, HTTPErrorResponse, ResponseMetadata
 from ..pdf_generator import PDFGeneratorError
 from ..services.content_processor import (
     handle_html_response,
@@ -35,7 +35,7 @@ from ..services.content_processor import (
     parse_accept_header,
     parse_accept_headers,
 )
-from ..validation import URLValidationError, validate_url
+from ..validation import URLValidationError, validate_url_async
 
 logger = logging.getLogger(__name__)
 
@@ -74,7 +74,7 @@ async def download_url(
 ) -> Response:
     """Download content from a single URL with content negotiation and ethical crawling."""
     try:
-        validated_url = validate_url(url)
+        validated_url = await validate_url_async(url, settings)
         logger.info(f"Processing download request for: {validated_url}")
 
         if settings.crawling.respect_robots_txt:
@@ -85,7 +85,13 @@ async def download_url(
             domain = urlparse(validated_url).netloc
             await domain_throttle.wait_if_needed(domain, crawl_delay)
 
-        content, metadata = await http_client.download(validated_url, RequestPriority.HIGH)
+        cached_http_result: tuple[bytes, ResponseMetadata] | None = None
+
+        async def fetch_via_http() -> tuple[bytes, ResponseMetadata]:
+            nonlocal cached_http_result
+            if cached_http_result is None:
+                cached_http_result = await http_client.download(validated_url, RequestPriority.HIGH)
+            return cached_http_result
 
         effective_render = render or (wait_for is not None)
         formats = parse_accept_headers(request.headers.getlist("accept"))
@@ -93,26 +99,82 @@ async def download_url(
         if len(formats) > 1:
             logger.info(f"Multi-format request: {formats} (Accept: {accept})")
             return await handle_multi_format_response(
-                validated_url, content, metadata, formats, pdf_semaphore, effective_render, wait_for
+                validated_url,
+                None,
+                None,
+                formats,
+                pdf_semaphore,
+                effective_render,
+                wait_for,
+                http_fallback=fetch_via_http,
+            )
+
+        format_type = parse_accept_header(accept)
+        logger.info(f"Requested format: {format_type} (Accept: {accept})")
+
+        if format_type == "pdf":
+            return await handle_pdf_response(validated_url, None, pdf_semaphore)
+
+        if effective_render and format_type in {"html", "text", "markdown"}:
+            if format_type == "html":
+                return await handle_html_response(
+                    validated_url,
+                    None,
+                    None,
+                    True,
+                    wait_for,
+                    pdf_semaphore=pdf_semaphore,
+                    http_fallback=fetch_via_http,
+                )
+            if format_type == "text":
+                return await handle_text_response(
+                    validated_url,
+                    None,
+                    None,
+                    True,
+                    wait_for,
+                    pdf_semaphore=pdf_semaphore,
+                    http_fallback=fetch_via_http,
+                )
+            return await handle_markdown_response(
+                validated_url,
+                None,
+                None,
+                True,
+                wait_for,
+                pdf_semaphore=pdf_semaphore,
+                http_fallback=fetch_via_http,
+            )
+
+        content, metadata = await fetch_via_http()
+
+        if format_type == "json":
+            return await handle_json_response(content, metadata)
+        elif format_type == "text":
+            return await handle_text_response(
+                validated_url,
+                content,
+                metadata,
+                pdf_semaphore=pdf_semaphore,
+            )
+        elif format_type == "markdown":
+            return await handle_markdown_response(
+                validated_url,
+                content,
+                metadata,
+                pdf_semaphore=pdf_semaphore,
+            )
+        elif format_type == "html":
+            return await handle_html_response(
+                validated_url,
+                content,
+                metadata,
+                False,
+                wait_for,
+                pdf_semaphore=pdf_semaphore,
             )
         else:
-            format_type = parse_accept_header(accept)
-            logger.info(f"Requested format: {format_type} (Accept: {accept})")
-
-            if format_type == "json":
-                return await handle_json_response(content, metadata)
-            elif format_type == "text":
-                return await handle_text_response(validated_url, content, metadata)
-            elif format_type == "markdown":
-                return await handle_markdown_response(validated_url, content, metadata)
-            elif format_type == "pdf":
-                return await handle_pdf_response(validated_url, metadata, pdf_semaphore)
-            elif format_type == "html":
-                return await handle_html_response(
-                    validated_url, content, metadata, effective_render, wait_for
-                )
-            else:
-                return await handle_raw_response(content, metadata)
+            return await handle_raw_response(content, metadata)
 
     except RobotsDisallowedError as e:
         logger.info(f"Blocked by robots.txt for {url}: {e}")
@@ -159,6 +221,12 @@ async def download_url(
         )
 
     except PDFGeneratorError as e:
+        if e.status_code is not None and 400 <= e.status_code < 500:
+            logger.warning(f"Upstream HTTP {e.status_code} during PDF generation for {url}: {e}")
+            raise HTTPException(
+                status_code=e.status_code,
+                detail=ErrorResponse(error=str(e), error_type="http_error").model_dump(),
+            )
         logger.error(f"PDF generation failed for {url}: {e}")
         raise HTTPException(
             status_code=500,
