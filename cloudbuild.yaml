@@ -9,6 +9,7 @@ substitutions:
   _REGION: us-central1
   _AR_REPO: containers
   _IMAGE_NAME: downloader
+  _TAG: ""
   _PUSH: "auto"
 
 options:
@@ -25,7 +26,7 @@ steps:
       - |
         set -euo pipefail
         CB_COMMIT="${COMMIT_SHA}"
-        CB_TAG="${TAG_NAME}"
+        CB_TAG="${TAG_NAME:-${_TAG}}"
         SHA="$${CB_COMMIT:-$$(git rev-parse --short=12 HEAD 2>/dev/null || echo 'local')}"
         printf '%s' "$${SHA}" > /workspace/.resolved_sha
         printf "Resolved commit=%s tag=%s\n" "$${SHA}" "$${CB_TAG}"
@@ -61,7 +62,7 @@ steps:
       - |
         set -euo pipefail
         SHA="$$(cat /workspace/.resolved_sha)"
-        CB_TAG="${TAG_NAME}"
+        CB_TAG="${TAG_NAME:-${_TAG}}"
         IMAGE_REPO="${_REGION}-docker.pkg.dev/${PROJECT_ID}/${_AR_REPO}/${_IMAGE_NAME}"
         BUILD_TAG="$${IMAGE_REPO}:$${SHA}"
 
@@ -79,9 +80,20 @@ steps:
             docker tag "$${BUILD_TAG}" "$${IMAGE_REPO}:$${CB_TAG}"
             docker push "$${IMAGE_REPO}:$${CB_TAG}"
           fi
-          docker tag "$${BUILD_TAG}" "$${IMAGE_REPO}:latest"
           docker push "$${BUILD_TAG}"
-          docker push "$${IMAGE_REPO}:latest"
+          if [[ ! "$${CB_TAG}" =~ -rc\. ]]; then
+            docker tag "$${BUILD_TAG}" "$${IMAGE_REPO}:latest"
+            docker push "$${IMAGE_REPO}:latest"
+          fi
         else
-          echo "Skipping Artifact Registry push (TAG_NAME is empty and _PUSH=${_PUSH})"
+          echo "Skipping Artifact Registry push (TAG_NAME and _TAG are empty and _PUSH=${_PUSH})"
         fi
+
+  - id: flux-reconcile
+    name: ${_REGION}-docker.pkg.dev/${PROJECT_ID}/${_AR_REPO}/ops-flux-cli:v2.4.0
+    waitFor:
+      - docker-build-and-push
+    args:
+      - "${TAG_NAME:-${_TAG}}"
+      - "download"
+      - "download"
