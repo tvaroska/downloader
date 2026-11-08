@@ -33,9 +33,11 @@ RUN uv sync --frozen --no-dev --no-editable \
     && playwright install chromium \
     && playwright install-deps chromium \
     && apt-get update \
+    && apt-get upgrade -y \
     && apt-get remove -y gcc libxml2-dev libxslt-dev \
     && apt-get autoremove -y \
     && apt-get autoclean \
+    && rm -f /bin/uv /bin/uvx \
     && rm -rf /var/lib/apt/lists/* \
     && rm -rf /tmp/* \
     && rm -rf /root/.cache

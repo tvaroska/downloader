@@ -74,11 +74,89 @@ steps:
         docker pull "$${IMAGE_REPO}:latest" || true
         docker build \
           --cache-from "$${IMAGE_REPO}:latest" \
+          -t "downloader:ci" \
           -t "$${BUILD_TAG}" \
           -f Dockerfile \
           .
 
-        docker run --rm --entrypoint python "$${BUILD_TAG}" -c "import src.downloader.main; print('Downloader import check passed')"
+  - id: verify-nonroot-and-healthcheck
+    name: gcr.io/cloud-builders/docker
+    waitFor:
+      - docker-build-and-push
+    entrypoint: bash
+    args:
+      - -c
+      - |
+        set -euo pipefail
+        echo "Verifying non-root user on downloader:ci..."
+        UID_OUT="$$(docker run --rm --entrypoint id downloader:ci -u)"
+        test "$${UID_OUT}" != "0"
+        echo "Starting downloader-smoke container and probing /health + Playwright Chromium..."
+        docker run -d --name downloader-smoke -e ENVIRONMENT=development downloader:ci
+        trap "docker rm -f downloader-smoke >/dev/null 2>&1 || true" EXIT
+        HEALTH_OK=0
+        for i in $$(seq 1 20); do
+          if docker exec downloader-smoke curl -fsS http://127.0.0.1:8000/health >/dev/null; then
+            echo "HTTP /health probe passed on attempt $$i"
+            HEALTH_OK=1
+            break
+          fi
+          sleep 1
+        done
+        if [[ "$${HEALTH_OK}" -ne 1 ]]; then
+          docker logs downloader-smoke || true
+          exit 1
+        fi
+        docker exec downloader-smoke python -c "
+        import asyncio
+        from playwright.async_api import async_playwright
+        async def check():
+            async with async_playwright() as p:
+                browser = await p.chromium.launch(headless=True)
+                page = await browser.new_page()
+                await page.set_content('<h1>CI Smoke</h1>')
+                pdf = await page.pdf()
+                await browser.close()
+                assert pdf.startswith(b'%PDF-'), 'Expected valid PDF header'
+        asyncio.run(check())
+        print('Playwright Chromium headless PDF smoke check passed')
+        "
+
+  - id: trivy-vulnerability-scan
+    name: gcr.io/cloud-builders/docker
+    waitFor:
+      - docker-build-and-push
+    entrypoint: bash
+    args:
+      - -c
+      - |
+        set -euo pipefail
+        docker run --rm \
+          -v /var/run/docker.sock:/var/run/docker.sock \
+          aquasec/trivy:0.58.1 image \
+          --scanners vuln \
+          --pkg-types os \
+          --severity HIGH,CRITICAL \
+          --ignore-unfixed \
+          --exit-code 1 \
+          downloader:ci
+
+  - id: push-release-image
+    name: gcr.io/cloud-builders/docker
+    waitFor:
+      - verify-nonroot-and-healthcheck
+      - trivy-vulnerability-scan
+    entrypoint: bash
+    args:
+      - -c
+      - |
+        set -euo pipefail
+        SHA="$$(cat /workspace/.resolved_sha)"
+        CB_TAG_NAME="${TAG_NAME}"
+        CB_MANUAL_TAG="${_TAG}"
+        CB_TAG="$${CB_TAG_NAME:-$${CB_MANUAL_TAG}}"
+        IMAGE_REPO="${_REGION}-docker.pkg.dev/${PROJECT_ID}/${_AR_REPO}/${_IMAGE_NAME}"
+        BUILD_TAG="$${IMAGE_REPO}:$${SHA}"
 
         if [[ -n "$${CB_TAG}" || "${_PUSH}" == "true" ]]; then
           if [[ -n "$${CB_TAG}" ]]; then
@@ -97,7 +175,7 @@ steps:
   - id: flux-reconcile
     name: ${_REGION}-docker.pkg.dev/${PROJECT_ID}/${_AR_REPO}/ops-flux-cli:v2.4.0
     waitFor:
-      - docker-build-and-push
+      - push-release-image
     args:
       - "${TAG_NAME}"
       - "${_TAG}"
