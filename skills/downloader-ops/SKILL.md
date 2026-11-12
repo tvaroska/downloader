@@ -47,6 +47,7 @@ uv run --no-sync pytest -m "not (integration or e2e or network or requires_redis
 - `HTTPClient` wires `SSRFSafeHTTPTransport(..., trust_env=False)` to pin connect-time TCP sockets to validated IPs (preserving TLS SNI), enforces `CONTENT_MAX_DOWNLOAD_SIZE` via `Content-Length` pre-checks and streaming chunk counters (`HTTP 413` `content_too_large`), and re-validates every `3xx` redirect `Location` target via `validate_url_async()`. Playwright contexts also attach `install_ssrf_route_guard` (`context.route("**/*", ...)`) blocking private/loopback/metadata IPs and `file://` URLs, and all browser entries (`application/pdf`, `?render=true`, `?wait_for=`, and empty-body/JS fallbacks) share `app.state.pdf_semaphore`.
 - `RateLimitMiddleware` actively enforces moving-window limits (`HTTP 429` `rate_limit_exceeded` + `Retry-After` + `X-RateLimit-*` headers), resolves client IPs across `RATELIMIT_TRUSTED_PROXIES`, isolates authenticated vs unauthenticated buckets when `DOWNLOADER_KEY` is configured, and resets in-memory storage on app lifespan startup so sequential `TestClient(app)` runs stay isolated.
 - Use `just fmt` to apply both `ruff check --fix` and `ruff format` across `src/`, `tests/`, and `examples/`.
+- **Lifespan OTel & Redis JobStore Invariants:** Calling `FastAPIInstrumentor.instrument_app(app)` inside `lifespan` must reset `app.middleware_stack = None` (on instrument and uninstrument) so Starlette rebuilds middleware, and `excluded_urls` must stay host-anchored (`^https?://[^/]+/(health|metrics)(\?.*)?$`) so downloading URLs ending in `/health` or `/metrics` remains traced (`src/downloader/telemetry.py`). APScheduler 3.x `RedisJobStore` forwards kwargs to `redis.Redis.__init__` (which rejects `url=`), so `src/downloader/scheduler/service.py` must pass `connection_pool=ConnectionPool.from_url(redis_uri)`.
 
 ---
 
@@ -71,6 +72,8 @@ just e2e
 docker stop downloader-redis
 ```
 
+- **Cloudtop / Scratch Cloud Build Live E2E (`btv-scratch-01`):** When Docker is unavailable locally, submit zero-push E2E builds strictly against `--project=btv-scratch-01` (never prod `sites-470716`), keep each bash step `<= 10,000` bytes with `$$VAR` escaping, redirect `docker logs <ctr> > /tmp/ctr.log 2>&1` before `grep -q` (avoids `SIGPIPE` exit `141` under `set -o pipefail`), and pass `WORKER_REMOTE_BROWSER_ENABLED=true` to **both** `api` and `worker` containers when verifying split-mode remote browser RPC.
+
 ---
 
 ## 4. Cloud Build & GKE Autopilot / Flux CD Release Flow
@@ -81,6 +84,7 @@ CI/CD is defined exclusively in [`cloudbuild.yaml`](../../cloudbuild.yaml) and [
 - **`downloader-tag` (annotated tag `vX.Y.Z`):** Runs the full verification gate and pushes `us-central1-docker.pkg.dev/sites-470716/containers/downloader:${TAG_NAME}` and `:latest` for Flux CD GitOps rollout to `https://download.tvaroska.sk` (`Service/download` maps `:80 -> targetPort: 8000`; `CustomJsonFormatter` emits top-level `path="/health"` on `uvicorn.access` for log filtering).
 - **Lockfile Release Rule:** Whenever bumping `version` in [`pyproject.toml`](../../pyproject.toml), always run `uv lock --no-config --default-index https://pypi.org/simple` and commit the updated `uv.lock` before tagging `vX.Y.Z`; otherwise `uv sync --frozen` in `cloudbuild.yaml` and `Dockerfile` will fail the tag build.
 - **Roadmap-First Backlog:** Release milestones and deferred items live in [`docs/roadmap.md`](../../docs/roadmap.md) with architectural rationale in [`DECISIONS.md`](../../DECISIONS.md) and completed sprint archives in `docs/features/*.md`.
+- **Unified Release Runner:** Cut and verify production releases with `../bin/proj-release downloader <patch|minor|major|vX.Y.Z>` (runs offline `proj-test`, commits/tags/pushes `origin main refs/tags/vX.Y.Z`, waits for `downloader-tag` Cloud Build + in-build `flux-reconcile`, pulls `../services`, and verifies `https://download.tvaroska.sk/health`), then update any resolved `FIX PENDING` entries in `../services/docs/ops-log.md`.
 
 ---
 
