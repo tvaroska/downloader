@@ -1,6 +1,6 @@
 # REST API Downloader - Strategic Roadmap
 
-**Last Updated:** 2026-11-02
+**Last Updated:** 2026-11-12
 
 ## Overview
 
@@ -24,6 +24,11 @@ This document outlines the strategic priorities, completed releases, and deferre
 ---
 
 ## Current Focus
+
+### Planned: Release `v0.6.2` — Playwright Navigation Timeout Resilience (`F-2026-11-05-002`) 📋
+
+**Release `v0.6.2`** (Next Patch Release — P1 Reliability):
+- [ ] **S6-br-1 (P1, 0.25d — Single-Pass `domcontentloaded` + Bounded Network Settle in `src/downloader/content_converter.py`):** Ad- and tracker-heavy origins (`materializedview.io`, `novinky.cz`) hold background connections open indefinitely, causing `page.goto(url, wait_until="networkidle", timeout=timeout_ms)` (`10,000ms`) to time out (`F-2026-11-05-002`; `v0.6.1` currently deployed on `services-gke`). Replace the two-pass retry draft in `convert_content_with_playwright_fallback` and `render_html_with_playwright` (which otherwise burns `10s` on `networkidle`, re-navigates with `domcontentloaded`, and waits another `10s` on `wait_for_load_state("networkidle")`) with a single `page.goto(url, wait_until="domcontentloaded", timeout=timeout_ms)` followed by a bounded non-fatal settle (`page.wait_for_load_state("networkidle", timeout=min(timeout_ms, 2500))`), add mocked Playwright timeout unit tests, and cut `v0.6.2`.
 
 ### Completed: Release `v0.6.1` — Security, Single-Fetch Browser & Stateful Pipeline Hardening ✅
 
@@ -271,6 +276,9 @@ Canonical append-only rationale lives in [DECISIONS.md](../DECISIONS.md). Summar
 - ✅ Single-fetch Playwright pipeline across `?render=true`, `?wait_for=`, and `Accept: application/pdf` (`GET /{url}`, `/batch`, `/schedules`), unified `pdf_semaphore` concurrency, and live `ContentConfig` / TTL cache wiring
 - ✅ Constant-time API key verification, `/metrics*` auth enforcement, `ENVIRONMENT=production` `404` on `/docs`/`/redoc`/`/openapi.json`, right-to-left `RATELIMIT_TRUSTED_PROXIES` `X-Forwarded-For` parsing, and auth/unauth rate-limit isolation
 - ✅ Creation-time SSRF & custom header validation on `/schedules` and `/batch`, `ScheduledJobExecutor` `robots.txt` + `Crawl-delay` + per-attempt `max_workers` semaphore, atomic Redis Lua `DomainThrottle`, and `robots:v2:{scheme}:{netloc}` cache keys
+
+### Release 0.6.2 — Playwright Navigation Timeout Resilience (Planned — `F-2026-11-05-002`)
+- [ ] Single-pass `wait_until="domcontentloaded"` + bounded non-fatal `networkidle` settle across `convert_content_with_playwright_fallback` and `render_html_with_playwright` in `src/downloader/content_converter.py`, eliminating `10s–20s` timeouts on Substack/ad-heavy pages (`materializedview.io`, `novinky.cz`)
 
 ### Release 0.7.0 — Multi-Tenant Quotas (Deferred — Sprint 5)
 - Per-API-key `QuotaConfig`, `GET /usage`, `X-RateLimit-*` headers, and `HTTP 429` `Retry-After` (with `memory://` + Redis parity when multi-key tenancy is needed)
