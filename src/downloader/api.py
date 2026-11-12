@@ -10,13 +10,15 @@ from fastapi import APIRouter
 from .routes.batch import router as batch_router
 from .routes.download import router as download_router
 from .routes.metrics import router as metrics_router
+from .routes.render import router as render_router
 from .routes.schedules import router as schedule_router
 
 # Create main router
 router = APIRouter()
 
-# Include all sub-routers
+# Include all sub-routers (catch-all download_router MUST stay last)
 router.include_router(metrics_router, tags=["metrics"])
 router.include_router(batch_router, tags=["batch"])
 router.include_router(schedule_router, tags=["schedules"])
+router.include_router(render_router, tags=["render"])
 router.include_router(download_router, tags=["download"])

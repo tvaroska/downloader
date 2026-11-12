@@ -21,7 +21,13 @@ from ..content_converter import convert_content_to_markdown, convert_content_to_
 from ..crawling import DomainThrottle, RobotsChecker
 from ..http_client import RequestPriority
 from ..models.schedule import ExecutionStatus, ScheduleExecution
-from ..pdf_generator import generate_pdf_from_url
+from ..pdf_generator import generate_pdf_from_url, generate_screenshot_from_url
+from ..services.webhooks import deliver_webhook
+from ..transformers.ocr import (
+    extract_text_from_image,
+    format_ocr_markdown,
+    is_ocr_image_content_type,
+)
 from ..validation import sanitize_custom_headers, validate_url_async
 
 if TYPE_CHECKING:
@@ -64,14 +70,48 @@ class ScheduledJobExecutor:
         self.max_workers = max(1, max_workers)
         self._worker_semaphore = asyncio.Semaphore(self.max_workers)
 
+    async def _emit_schedule_webhook(
+        self,
+        execution: ScheduleExecution,
+        url: str,
+        format: str,
+        webhook_url: str | None,
+        webhook_secret: str | None,
+    ) -> None:
+        if not webhook_url:
+            return
+        event = "schedule.completed" if execution.success else "schedule.failed"
+        await deliver_webhook(
+            webhook_url,
+            event,
+            {
+                "event": event,
+                "schedule_id": execution.schedule_id,
+                "execution_id": execution.execution_id,
+                "url": url,
+                "format": format,
+                "status": execution.status.value,
+                "success": execution.success,
+                "content_size": execution.content_size,
+                "duration": execution.duration,
+                "attempt": execution.attempt,
+                "error_message": execution.error_message,
+            },
+            secret=webhook_secret,
+            settings=get_settings(),
+        )
+
     async def execute(
         self,
         schedule_id: str,
         url: str,
         format: str,
         headers: dict[str, str] | None,
+        *,
+        webhook_url: str | None = None,
+        webhook_secret: str | None = None,
     ) -> ScheduleExecution:
-        """Execute a scheduled download with retry logic."""
+        """Execute a scheduled download with retry logic and optional webhook notification."""
         execution_id = str(uuid.uuid4())
         attempt = 0
         execution: ScheduleExecution | None = None
@@ -91,6 +131,9 @@ class ScheduledJobExecutor:
             await self.storage.store_execution(execution)
 
             if execution.success:
+                await self._emit_schedule_webhook(
+                    execution, url, format, webhook_url, webhook_secret
+                )
                 return execution
 
             if execution.error_message and execution.error_message.startswith(
@@ -99,6 +142,9 @@ class ScheduledJobExecutor:
                 logger.info(
                     f"[SCHEDULE-{schedule_id}] Non-retryable policy error on attempt {attempt}: "
                     f"{execution.error_message}"
+                )
+                await self._emit_schedule_webhook(
+                    execution, url, format, webhook_url, webhook_secret
                 )
                 return execution
 
@@ -116,6 +162,7 @@ class ScheduledJobExecutor:
         )
 
         assert execution is not None
+        await self._emit_schedule_webhook(execution, url, format, webhook_url, webhook_secret)
         return execution
 
     async def _execute_single_attempt(
@@ -153,12 +200,12 @@ class ScheduledJobExecutor:
                             urlparse(validated_url).netloc, crawl_delay
                         )
 
-                if format == "pdf":
+                if format in {"pdf", "screenshot"}:
                     processed = await self._process_content(
                         url=validated_url,
                         content=b"",
                         metadata=None,
-                        format="pdf",
+                        format=format,
                     )
                 else:
                     if sanitized_headers:
@@ -233,9 +280,14 @@ class ScheduledJobExecutor:
         content_type = meta.get("content_type", "application/octet-stream")
 
         if format == "text":
+            if is_ocr_image_content_type(content_type):
+                return await extract_text_from_image(content)
             return convert_content_to_text(content, content_type)
 
         elif format == "markdown":
+            if is_ocr_image_content_type(content_type):
+                ocr_text = await extract_text_from_image(content)
+                return format_ocr_markdown(ocr_text, str(meta.get("url", url)))
             return convert_content_to_markdown(content, content_type)
 
         elif format == "html":
@@ -246,6 +298,12 @@ class ScheduledJobExecutor:
                 raise RuntimeError("PDF generation not available: semaphore not configured")
             async with self.pdf_semaphore:
                 return await generate_pdf_from_url(url)
+
+        elif format == "screenshot":
+            if self.pdf_semaphore is None:
+                raise RuntimeError("Screenshot capture not available: semaphore not configured")
+            async with self.pdf_semaphore:
+                return await generate_screenshot_from_url(url, {"type": "png", "full_page": False})
 
         elif format == "json":
             content_b64 = base64.b64encode(content).decode("utf-8")

@@ -1,6 +1,6 @@
 # Documentation
 
-**Last Updated:** 2026-11-01
+**Last Updated:** 2026-11-12
 
 Technical documentation for the REST API Downloader.
 
@@ -77,7 +77,12 @@ monitoring/
 
 ## Recent Updates
 
-### November 2026 (`v0.6.0`)
+### November 2026 (`v0.6.2` & `v0.7.0`)
+- **`v0.6.2` (`S6-br-1` / `F-2026-11-05-002`):** Replaced two-pass `networkidle` browser navigation with single-pass `domcontentloaded` + bounded non-fatal `networkidle` settle (`min(timeout_ms, 2500)`) in `src/downloader/content_converter.py`
+- **`v0.7.0` Extended Features:** Added screenshot/PDF query toggles (`?output=screenshot|pdf`, `Accept: image/png|jpeg`), declarative allowlisted Playwright actions (`POST /render`, `?actions=`, `/batch`), SSRF-safe HMAC-SHA256 webhooks on batch/schedule completion, Tesseract OCR (`pytesseract` + `Pillow`), and typed client SDKs in [`sdks/python`](../sdks/python/README.md), [`sdks/javascript`](../sdks/javascript/README.md), and [`sdks/go`](../sdks/go)
+- **`v0.7.0` Operations & Infrastructure:** Added graceful shutdown connection drain (`src/downloader/drain.py`), split API+worker architecture (`DEPLOYMENT_MODE=all|api|worker`, `docker-compose.split.yml`), and opt-in OpenTelemetry distributed tracing (`OTEL_ENABLED`) — archived in [docs/features/infrastructure.md](./features/infrastructure.md)
+
+### November 2026 (`v0.6.0` & `v0.6.1`)
 - Delivered Sprint 4 Ethical Crawling (`robots.txt` compliance, `Crawl-delay` throttling, `HTTP 403` `robots_disallowed`, and Prometheus `robots_*` metrics) — archived in [docs/features/ethical-crawling.md](./features/ethical-crawling.md)
 - Documented `v0.6.0` production hardening (`HTTP 413` streaming `CONTENT_MAX_DOWNLOAD_SIZE`, redirect & Playwright SSRF route blocking, active `HTTP 429` rate limiting, browser pool recycling & idle scale-to-zero, JSON `uvicorn.access` fields, and unprivileged container port `:8000`)
 - Consolidated project tracking to pure Roadmap-first ([docs/roadmap.md](./roadmap.md) + [DECISIONS.md](../DECISIONS.md))

@@ -9,6 +9,7 @@ from fastapi import Request, Response
 from starlette.middleware.base import BaseHTTPMiddleware
 
 from .metrics import get_metrics_collector
+from .telemetry import get_current_trace_context
 
 
 class MetricsMiddleware(BaseHTTPMiddleware):
@@ -50,8 +51,11 @@ class MetricsMiddleware(BaseHTTPMiddleware):
             response_time=response_time,
         )
 
-        # Add response time header for debugging
+        # Add response time and distributed trace headers for observability
         response.headers["X-Response-Time"] = f"{response_time:.3f}s"
+        trace_id, _ = get_current_trace_context()
+        if trace_id:
+            response.headers.setdefault("X-Trace-ID", trace_id)
 
         return response
 
@@ -59,6 +63,8 @@ class MetricsMiddleware(BaseHTTPMiddleware):
         """Normalize URL path for metrics grouping."""
         if path.startswith("/batch"):
             return "/batch"
+        if path == "/render":
+            return "/render"
         if path == "/health":
             return "/health"
         if path in {"/metrics", "/metrics/performance", "/metrics/health-score", "/metrics/live"}:

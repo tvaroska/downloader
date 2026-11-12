@@ -20,6 +20,14 @@ test:
 dev:
     REDIS_URI="redis://localhost:6379" uv run python -m uvicorn src.downloader.main:app --host 0.0.0.0 --port 8000 --reload
 
+# Run split worker process locally against Redis
+worker:
+    REDIS_URI="redis://localhost:6379" DEPLOYMENT_MODE="worker" uv run python -m src.downloader.worker
+
+# Run split API + Worker + Redis stack via Docker Compose
+split:
+    docker compose -f docker-compose.yml -f docker-compose.split.yml up -d --build
+
 # Build and push Docker image
 docker:
     #!/usr/bin/env bash

@@ -16,19 +16,33 @@ This document outlines the strategic priorities, completed releases, and deferre
 | Phase 2: Batch Processing | ✅ Complete | 100% |
 | Phase 3: Performance & Reliability | ✅ Complete | 100% |
 | Phase 4: Security & Production | ✅ Complete | 100% |
-| Phase 5: Content Transformation | 🚧 Partial (OCR deferred) | 75% |
-| Phase 6: Browser Rendering | 🚧 Partial (Screenshots deferred) | 75% |
+| Phase 5: Content Transformation | ✅ Complete (`v0.7.0` — OCR delivered) | 100% |
+| Phase 6: Browser Rendering | ✅ Complete (`v0.7.0` — Screenshots, actions & `v0.6.2` timeout fix) | 100% |
 | Phase 7: Ethical Crawling & Stateless Safety | ✅ Complete (`v0.6.0` — Sprint 4) | 100% |
-| Phase 8: Scheduling & Multi-Tenant Quotas | 🚧 Partial (Scheduling ✅; Quotas deferred to Sprint 5) | 50% |
+| Phase 8: Scheduling & Multi-Tenant Quotas | 🚧 Partial (Scheduling & Webhooks ✅; Quotas deferred past `v0.7.0`) | 60% |
 
 ---
 
 ## Current Focus
 
-### Planned: Release `v0.6.2` — Playwright Navigation Timeout Resilience (`F-2026-11-05-002`) 📋
+### Completed: Release `v0.6.2` — Playwright Navigation Timeout Resilience (`F-2026-11-05-002`) ✅
 
-**Release `v0.6.2`** (Next Patch Release — P1 Reliability):
-- [ ] **S6-br-1 (P1, 0.25d — Single-Pass `domcontentloaded` + Bounded Network Settle in `src/downloader/content_converter.py`):** Ad- and tracker-heavy origins (`materializedview.io`, `novinky.cz`) hold background connections open indefinitely, causing `page.goto(url, wait_until="networkidle", timeout=timeout_ms)` (`10,000ms`) to time out (`F-2026-11-05-002`; `v0.6.1` currently deployed on `services-gke`). Replace the two-pass retry draft in `convert_content_with_playwright_fallback` and `render_html_with_playwright` (which otherwise burns `10s` on `networkidle`, re-navigates with `domcontentloaded`, and waits another `10s` on `wait_for_load_state("networkidle")`) with a single `page.goto(url, wait_until="domcontentloaded", timeout=timeout_ms)` followed by a bounded non-fatal settle (`page.wait_for_load_state("networkidle", timeout=min(timeout_ms, 2500))`), add mocked Playwright timeout unit tests, and cut `v0.6.2`.
+**Release `v0.6.2`** (Complete — 2026-11-12 — P1 Reliability):
+- [x] **S6-br-1 (P1 — Single-Pass `domcontentloaded` + Bounded Network Settle in `src/downloader/content_converter.py`):** Replaced the two-pass `networkidle` retry pattern in `convert_content_with_playwright_fallback` and `render_html_with_playwright` with a single `page.goto(url, wait_until="domcontentloaded", timeout=timeout_ms)` followed by a bounded non-fatal settle (`page.wait_for_load_state("networkidle", timeout=min(timeout_ms, 2500))`), eliminating `10s–20s` navigation timeouts on ad- and tracker-heavy origins (`F-2026-11-05-002`), verified by `tests/unit/test_v062_playwright_timeout.py`.
+
+### Completed: Release `v0.7.0` — Extended Features & Operations ✅
+
+**Release `v0.7.0`** (Complete — 2026-11-12 — Extended Features & Operations/Infrastructure):
+- **Extended Features (5/5 Complete):**
+  - Screenshot/PDF output toggle (`?output=screenshot|pdf`, `?full_page=bool`, `?screenshot_format=png|jpeg`, `Accept: image/png` / `image/jpeg`, `POST /render`, and `/batch` + `/schedules` `"screenshot"` format)
+  - SSRF-safe HMAC-SHA256 webhook notifications (`src/downloader/services/webhooks.py`) firing post-persistence on batch completion/failure and schedule execution (`X-Downloader-Signature-256`, `trust_env=False`, `follow_redirects=False`, creation-time SSRF validation, secret redaction)
+  - Image-to-text OCR (`src/downloader/transformers/ocr.py` via `pytesseract` + `Pillow` + `tesseract-ocr`, decompression-bomb pixel cap, language validation, `HTTP 503` `ocr_unavailable` graceful degradation)
+  - Typed client SDKs for Python (`sdks/python`), JavaScript/TypeScript (`sdks/javascript`), and Go (`sdks/go`) with automated test suites
+  - Declarative allowlisted browser interaction scripting (`src/downloader/browser/actions.py`: 8 action types, max 20 steps, zero raw JS evaluation) across `GET /{url}?actions=`, `POST /render`, and `POST /batch`
+- **Operations & Infrastructure (3/3 Complete):**
+  - Graceful shutdown with active-request and background-job connection drain (`src/downloader/drain.py`: `DrainCoordinator`, `DrainMiddleware`, `HTTP 503 service_draining` + `Connection: close` + `Retry-After: 5`, `/health` draining state, uvicorn `--timeout-graceful-shutdown 35`)
+  - Split Worker Architecture (`DEPLOYMENT_MODE=all|api|worker`, `src/downloader/worker_queue.py` reliable Redis `BLMOVE` queue + browser RPC + heartbeats, `src/downloader/worker.py` with `--healthcheck`, `docker-compose.split.yml`)
+  - Opt-in OpenTelemetry distributed tracing (`src/downloader/telemetry.py`, `OTEL_ENABLED=false` default, OTLP HTTP/console exporters, FastAPI/httpx/Redis/Playwright/OCR/webhook/worker spans, `trace_id`/`span_id` log correlation, `X-Trace-ID` response header, W3C `traceparent` propagation)
 
 ### Completed: Release `v0.6.1` — Security, Single-Fetch Browser & Stateful Pipeline Hardening ✅
 
@@ -47,12 +61,12 @@ This document outlines the strategic priorities, completed releases, and deferre
 - Production hardening: streaming `CONTENT_MAX_DOWNLOAD_SIZE` (`HTTP 413` `content_too_large`), redirect & Playwright SSRF route blocking, active `RateLimitMiddleware` (`HTTP 429` + `Retry-After` + `X-RateLimit-*`), `BrowserPool` max-use recycling (`PDF_MAX_USES_PER_BROWSER=50`) & idle scale-to-zero (`PDF_IDLE_TIMEOUT=600s`), structured JSON `uvicorn.access` `path`/`method`/`status_code` fields, and unprivileged container port `:8000`
 - See [docs/features/ethical-crawling.md](features/ethical-crawling.md)
 
-### Deferred Preview: Sprint 5 — Multi-Tenant Quotas
+### Deferred Preview (Post-`v0.7.0` / `v0.8.0+`): Multi-Tenant Quotas
 
-**Sprint 5** (Deferred until multi-key or Redis-backed deployment): Multi-Tenant Per-Key Quotas
+**Post-`v0.7.0` Backlog** (Deferred until multi-key or Redis-backed multi-tenant deployment): Multi-Tenant Per-Key Quotas
 - 7 tasks (`S5-be-1`..`S5-be-5`, `S5-test-1`, `S5-doc-1`), ~21 hours effort
 - `QuotaConfig`, per-key request/bandwidth counters, `X-RateLimit-{Limit,Remaining,Reset}` headers, `GET /usage`, and `HTTP 429` with `Retry-After`
-- Deferred because single-key stateless Kubernetes deployments without `REDIS_URI` do not need Redis-backed tenant accounting (`slowapi` `memory://` already enforces global endpoint rate limits); if activated later, quota storage should support `QUOTA_STORAGE_URI → REDIS_URI → memory://` parity
+- Deferred past `v0.7.0` because single-key stateless Kubernetes deployments without `REDIS_URI` do not need Redis-backed tenant accounting (`slowapi` `memory://` already enforces global endpoint rate limits); if activated later, quota storage should support `QUOTA_STORAGE_URI → REDIS_URI → memory://` parity
 
 ### Completed: Sprint 3 — Scheduling API ✅
 
@@ -105,7 +119,7 @@ CI/CD pipeline, offline smoke/unit/hygiene verification gate (`tests/smoke/test_
 
 ---
 
-### 🚧 P1: Content Transformation (Phase 5 — Partial)
+### ✅ P1: Content Transformation (Phase 5 — Complete)
 
 **Goal**: Transform downloaded content into formats optimized for downstream consumption (LLMs, data pipelines).
 
@@ -116,19 +130,20 @@ CI/CD pipeline, offline smoke/unit/hygiene verification gate (`tests/smoke/test_
 | HTML to Markdown | P1 | Medium | ✅ Complete |
 | Plain text extraction | P2 | Low | ✅ Complete |
 | `Accept` content negotiation (single raw vs multi-format JSON) | P1 | Medium | ✅ Complete |
-| Image to Text (OCR) | P2 | High | 📋 Sprint 6 Backlog |
+| Image to Text (OCR) | P2 | High | ✅ Complete (`v0.7.0`) |
 
 #### API Implemented
-- `Accept` header negotiation on `GET /{url}`: raw payload for single MIME type (`text/plain`, `text/markdown`, `text/html`, `application/pdf`, `application/json`) and JSON map for multi-format `Accept` headers
-- Batch support: `format` and `default_format` options in request body
+- `Accept` header negotiation on `GET /{url}`: raw payload for single MIME type (`text/plain`, `text/markdown`, `text/html`, `application/pdf`, `image/png`, `image/jpeg`, `application/json`) and JSON map for multi-format `Accept` headers
+- OCR image-to-text (`?ocr=true`, `?ocr_lang=eng`, automatic extraction on image origins for `text/plain` / `text/markdown` / `text/html`)
+- Batch support: `format` (`text`, `markdown`, `html`, `pdf`, `screenshot`, `json`, `raw`) and `default_format` options in request body
 
 **Archive:** [docs/features/content-transformation.md](features/content-transformation.md)
 
 ---
 
-### 🚧 P2: Browser Rendering (Phase 6 — Partial)
+### ✅ P2: Browser Rendering (Phase 6 — Complete)
 
-**Goal**: Capture JavaScript-rendered content and PDFs from SPAs and dynamic websites without penalizing non-browser startup or mocked test latency.
+**Goal**: Capture JavaScript-rendered content, screenshots, and PDFs from SPAs and dynamic websites without penalizing non-browser startup or mocked test latency.
 
 #### Features
 
@@ -138,59 +153,61 @@ CI/CD pipeline, offline smoke/unit/hygiene verification gate (`tests/smoke/test_
 | Wait for CSS selectors (`?wait_for=`) | P1 | Medium | ✅ Complete |
 | Lazy shared `BrowserPool` & process isolation | P1 | Medium | ✅ Complete |
 | Security hardening (`file:` scheme blocked, isolated contexts) | P1 | Medium | ✅ Complete |
-| Screenshot/PDF output toggle (`?output=screenshot\|pdf`) | P2 | Medium | 📋 Sprint 6 Backlog |
-| Interaction scripting | P3 | High | 📋 Backlog |
+| Single-pass `domcontentloaded` + bounded settle (`S6-br-1`) | P1 | Low | ✅ Complete (`v0.6.2`) |
+| Screenshot/PDF output toggle (`?output=screenshot\|pdf`) | P2 | Medium | ✅ Complete (`v0.7.0`) |
+| Interaction scripting (`POST /render`, `?actions=`) | P3 | High | ✅ Complete (`v0.7.0`) |
 
 **Archive:** [docs/features/browser-rendering.md](features/browser-rendering.md)
 
 ---
 
-### 🚧 P3: Scheduling & Multi-Tenant Quotas (Phase 8 — Scheduling Complete, Quotas Deferred)
+### 🚧 P3: Scheduling & Multi-Tenant Quotas (Phase 8 — Scheduling & Webhooks Complete, Quotas Deferred)
 
-**Goal**: Support recurring downloads (when Redis is deployed) and defer per-tenant quota accounting until multi-key or Redis-backed tenancy is required.
+**Goal**: Support recurring downloads with webhook notifications (when Redis is deployed) and defer per-tenant quota accounting until multi-key or Redis-backed tenancy is required.
 
-#### Scheduling Features (Sprint 3 — Complete)
+#### Scheduling Features (Sprint 3 + `v0.7.0` — Complete)
 
 | Feature | Priority | Complexity | Status |
 |---------|----------|------------|--------|
 | Cron-based scheduling | P1 | Medium | ✅ Complete |
 | Schedule CRUD API (`/schedules`) | P1 | Low | ✅ Complete |
 | Paginated execution history (`/schedules/{id}/history`) | P2 | Low | ✅ Complete |
-| Webhook on completion | P3 | Medium | 📋 Sprint 6 Backlog |
+| Webhook on completion | P2 | Medium | ✅ Complete (`v0.7.0`) |
 
-#### Multi-Tenant Quota Features (Sprint 5 — Deferred Preview)
+#### Multi-Tenant Quota Features (Post-`v0.7.0` / `v0.8.0+` — Deferred Preview)
 
 | Feature | Priority | Complexity | Status |
 |---------|----------|------------|--------|
-| `QuotaConfig` & per-API-key counters (`memory://` + Redis parity) | P2 | Medium | 📋 Sprint 5 (Deferred) |
-| Enforcement middleware (`X-RateLimit-{Limit,Remaining,Reset}`) | P2 | Medium | 📋 Sprint 5 (Deferred) |
-| Usage tracking endpoint (`GET /usage`) | P2 | Low | 📋 Sprint 5 (Deferred) |
-| `HTTP 429` with `Retry-After` header | P2 | Low | 📋 Sprint 5 (Deferred) |
-| Tier-based plans | P3 | Medium | 📋 Backlog |
+| `QuotaConfig` & per-API-key counters (`memory://` + Redis parity) | P2 | Medium | 📋 Post-`v0.7.0` (Deferred) |
+| Enforcement middleware (`X-RateLimit-{Limit,Remaining,Reset}`) | P2 | Medium | 📋 Post-`v0.7.0` (Deferred) |
+| Usage tracking endpoint (`GET /usage`) | P2 | Low | 📋 Post-`v0.7.0` (Deferred) |
+| `HTTP 429` with `Retry-After` header | P2 | Low | 📋 Post-`v0.7.0` (Deferred) |
+| Tier-based plans | P3 | Medium | 📋 Post-`v0.7.0` (Deferred) |
 
 **Scheduling Archive:** [docs/features/scheduling.md](features/scheduling.md)
 
 ---
 
-## Future Considerations (Sprint 6 & Backlog)
+## Release `v0.7.0` Scope (Extended Features & Operations — Complete)
 
-### Extended Features (Sprint 6 Candidates)
+### Extended Features (`v0.7.0`)
 
-| Feature | Description | Complexity | Priority |
-|---------|-------------|------------|----------|
-| Screenshot/PDF output | `?output=screenshot\|pdf` for browser captures | Medium | P2 |
-| Webhook notifications | Push batch/schedule results to configured endpoints | Medium | P2 |
-| OCR (Image to Text) | Pytesseract-based text extraction | High | P2 |
-| SDK/Client Libraries | Typed Python, JavaScript, and Go clients | Medium | P3 |
+| Feature | Description | Complexity | Priority | Status |
+|---------|-------------|------------|----------|--------|
+| Screenshot/PDF output | `?output=screenshot\|pdf`, `?full_page=`, `?screenshot_format=`, `Accept: image/png\|jpeg` | Medium | P2 | ✅ Complete (`v0.7.0`) |
+| Webhook notifications | SSRF-safe HMAC-SHA256 webhooks on batch/schedule completion | Medium | P2 | ✅ Complete (`v0.7.0`) |
+| OCR (Image to Text) | Pytesseract + Pillow image-to-text extraction with decompression-bomb guard | High | P2 | ✅ Complete (`v0.7.0`) |
+| SDK/Client Libraries | Typed Python, JavaScript/TypeScript, and Go clients (`sdks/`) | Medium | P3 | ✅ Complete (`v0.7.0`) |
+| Interaction scripting | Declarative allowlisted Playwright actions (`?actions=`, `POST /render`, `/batch`) | High | P3 | ✅ Complete (`v0.7.0`) |
 
-### Operations & Infrastructure
+### Operations & Infrastructure (`v0.7.0`)
 
 | Feature | Description | Complexity | Priority | Status |
 |---------|-------------|------------|----------|--------|
 | Prometheus & health-score metrics | `/metrics`, `/metrics/performance`, `/metrics/health-score`, `/metrics/live` | Low | P1 | ✅ Complete |
-| Graceful shutdown with connection drain | Zero-downtime pod termination draining active downloads | Low | P2 | 📋 Backlog |
-| Split Worker Architecture | Isolate stateless API pods from Playwright/scheduler workers via Redis queue | High | P2 | 📋 Backlog |
-| OpenTelemetry integration | Distributed tracing across API, HTTP client, Playwright, and optional Redis | Medium | P2 | 📋 Backlog |
+| Graceful shutdown with connection drain | Zero-downtime pod termination draining active downloads (`drain.py`) | Low | P2 | ✅ Complete (`v0.7.0`) |
+| Split Worker Architecture | `DEPLOYMENT_MODE=all\|api\|worker` with Redis `BLMOVE` queue & browser RPC | High | P2 | ✅ Complete (`v0.7.0`) |
+| OpenTelemetry integration | Opt-in distributed tracing (`OTEL_ENABLED`) across API, HTTP, Redis, Playwright, OCR, webhooks | Medium | P2 | ✅ Complete (`v0.7.0`) |
 
 **Infrastructure Archive:** [docs/features/infrastructure.md](features/infrastructure.md)
 
@@ -198,11 +215,13 @@ CI/CD pipeline, offline smoke/unit/hygiene verification gate (`tests/smoke/test_
 
 ## Technical Dependencies
 
-### Content Transformation (Complete; OCR Deferred to Sprint 6)
+### Content Transformation (Complete — `v0.7.0`)
 ```
 markdownify>=0.11.0
 beautifulsoup4>=4.12.0
-# Deferred Sprint 6 OCR: pytesseract>=0.3.10, Pillow>=10.0.0 + system tesseract-ocr
+pytesseract>=0.3.13
+Pillow>=11.0.0
+# System: tesseract-ocr, tesseract-ocr-eng
 ```
 
 ### Browser Rendering (Complete — Lazy Shared Pool)
@@ -211,10 +230,20 @@ playwright>=1.40.0
 # System: playwright install chromium
 ```
 
-### Scheduling (Complete — Requires `REDIS_URI`)
+### Scheduling & Split Worker (Complete — Requires `REDIS_URI`)
 ```
 apscheduler>=3.10.0
 redis>=5.0.0
+```
+
+### Observability (Opt-In — `OTEL_ENABLED=true`)
+```
+opentelemetry-api>=1.27.0
+opentelemetry-sdk>=1.27.0
+opentelemetry-exporter-otlp-proto-http>=1.27.0
+opentelemetry-instrumentation-fastapi>=0.48b0
+opentelemetry-instrumentation-httpx>=0.48b0
+opentelemetry-instrumentation-redis>=0.48b0
 ```
 
 ### Sprint 4: Ethical Crawling (Stateless-First)
@@ -233,7 +262,7 @@ redis>=5.0.0
 | `robots.txt` origin unreachable or slow | Medium | Medium | Short fetch timeout + fail-open with structured warning log + 1h TTL cache |
 | Stateless multi-pod cache divergence without Redis | Low | Medium | Per-pod bounded TTL/LRU cache is safe for `robots.txt`; optional `REDIS_URI` unifies across pods |
 | Scheduler job failures | Medium | Low | Retry policies + clear `503` when `REDIS_URI` is unset ✅ |
-| Quota bypass in future multi-tenant mode | Medium | Low | Server-side middleware enforcement when Sprint 5 activates |
+| Quota bypass in future multi-tenant mode | Medium | Low | Server-side middleware enforcement when post-`v0.7.0` multi-tenant quotas activate |
 
 ---
 
@@ -243,6 +272,8 @@ Canonical append-only rationale lives in [DECISIONS.md](../DECISIONS.md). Summar
 
 | Date | Decision | Rationale |
 |------|----------|-----------|
+| 2026-11-12 | Implement `v0.6.2` (`S6-br-1` single-pass Playwright settle) and full `v0.7.0` scope (all 5 Extended Features + all 3 Operations tracks) | Eliminated `10s–20s` tracker-heavy navigation timeouts and shipped screenshot/PDF toggles, allowlisted Playwright actions (`POST /render`), SSRF-safe HMAC webhooks, Tesseract OCR, typed Python/JS/Go SDKs, graceful connection drain, split API+worker Redis architecture, and opt-in OpenTelemetry tracing while preserving stateless single-pod defaults |
+| 2026-11-12 | Replan `v0.7.0` around Extended Features & Operations; move Multi-Tenant Quotas past `v0.7.0` (`v0.8.0+`) | Single-key GKE production gets higher immediate value from extraction features (screenshots, webhooks, OCR, SDKs, interaction scripting) and operational resilience (graceful drain, split workers, OTel) than per-tenant quotas |
 | 2026-11-02 | Release `v0.6.1` (DNS-pinned SSRF transport, single-fetch Playwright pipeline, `/metrics*` auth & prod OpenAPI disablement, and `/batch` + `/schedules` hardening) | Closed DNS-rebinding TOCTOU, XFF spoofing, unauthenticated `/metrics*` exposure, duplicate HTTP+Chromium fetches, and stateful `/batch` + `/schedules` configuration/crawling gaps while preserving stateless GKE defaults |
 | 2026-11-01 | Release `v0.6.0` (Sprint 4 Ethical Crawling + production hardening) & consolidate to Roadmap-first layout | Delivered stateless-first `robots.txt`/`Crawl-delay`, streaming `413`, redirect & Playwright SSRF guards, active `429` rate limits, browser recycling/scale-to-zero, `:8000` unprivileged port, and archived Sprint 4 into `docs/features/ethical-crawling.md` |
 | 2026-11-01 | Promote Ethical Crawling (stateless-first) to Sprint 4; defer Multi-Tenant Quotas to Sprint 5 | Production runs statelessly behind a single API key without Redis; ethical crawling protects live egress immediately via in-memory TTL cache + optional Redis |
@@ -277,13 +308,13 @@ Canonical append-only rationale lives in [DECISIONS.md](../DECISIONS.md). Summar
 - ✅ Constant-time API key verification, `/metrics*` auth enforcement, `ENVIRONMENT=production` `404` on `/docs`/`/redoc`/`/openapi.json`, right-to-left `RATELIMIT_TRUSTED_PROXIES` `X-Forwarded-For` parsing, and auth/unauth rate-limit isolation
 - ✅ Creation-time SSRF & custom header validation on `/schedules` and `/batch`, `ScheduledJobExecutor` `robots.txt` + `Crawl-delay` + per-attempt `max_workers` semaphore, atomic Redis Lua `DomainThrottle`, and `robots:v2:{scheme}:{netloc}` cache keys
 
-### Release 0.6.2 — Playwright Navigation Timeout Resilience (Planned — `F-2026-11-05-002`)
-- [ ] Single-pass `wait_until="domcontentloaded"` + bounded non-fatal `networkidle` settle across `convert_content_with_playwright_fallback` and `render_html_with_playwright` in `src/downloader/content_converter.py`, eliminating `10s–20s` timeouts on Substack/ad-heavy pages (`materializedview.io`, `novinky.cz`)
+### Release 0.6.2 — Playwright Navigation Timeout Resilience (Complete — `F-2026-11-05-002`)
+- ✅ Single-pass `wait_until="domcontentloaded"` + bounded non-fatal `networkidle` settle (`min(timeout_ms, 2500)`) across `convert_content_with_playwright_fallback` and `render_html_with_playwright` in `src/downloader/content_converter.py`, eliminating `10s–20s` timeouts on Substack/ad-heavy pages (`materializedview.io`, `novinky.cz`)
 
-### Release 0.7.0 — Multi-Tenant Quotas (Deferred — Sprint 5)
-- Per-API-key `QuotaConfig`, `GET /usage`, `X-RateLimit-*` headers, and `HTTP 429` `Retry-After` (with `memory://` + Redis parity when multi-key tenancy is needed)
-- Target: Sprint 5 completion
+### Release 0.7.0 — Extended Features & Operations (Complete)
+- ✅ **Extended Features:** Screenshot/PDF output toggle (`?output=screenshot|pdf`, `?full_page=`, `?screenshot_format=`, `Accept: image/png|jpeg`), SSRF-safe HMAC-SHA256 webhook notifications on batch/schedule completion, OCR (image-to-text via `pytesseract` + `Pillow` + `tesseract-ocr`), typed client SDKs (`sdks/python`, `sdks/javascript`, `sdks/go`), and declarative allowlisted browser interaction scripting (`?actions=`, `POST /render`, `POST /batch`)
+- ✅ **Operations & Infrastructure:** Graceful shutdown with active-download connection drain (`DrainCoordinator` + `DrainMiddleware`), split worker architecture (`DEPLOYMENT_MODE=all|api|worker`, Redis `BLMOVE` queue + remote browser RPC + `docker-compose.split.yml`), and opt-in OpenTelemetry distributed tracing (`OTEL_ENABLED=false` default, OTLP HTTP/console exporters, log correlation, W3C `traceparent` propagation)
 
-### Release 0.8.0 — Extended Features (Future — Sprint 6)
-- Screenshot/PDF output toggle, webhook notifications, OCR (Image to Text), and client SDKs
-- Target: Sprint 6 completion
+### Release 0.8.0+ — Multi-Tenant Quotas (Deferred — Post-`0.7.0`)
+- Per-API-key `QuotaConfig`, `GET /usage`, `X-RateLimit-*` headers, `HTTP 429` `Retry-After`, and tier-based plans (`QUOTA_STORAGE_URI → REDIS_URI → memory://` parity when multi-key tenancy is needed)
+- Deferred past `v0.7.0` until multi-key or Redis-backed multi-tenant deployment is required

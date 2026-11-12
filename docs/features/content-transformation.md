@@ -1,17 +1,17 @@
 # Content Transformation - Feature History
 
-**Last Updated:** 2026-01-20
+**Last Updated:** 2026-11-12
 
 ## Overview
 
-Transform downloaded content into formats optimized for downstream consumption (LLMs, data pipelines).
+Transform downloaded content (HTML and images) into formats optimized for downstream consumption (LLMs, data pipelines).
 
 ---
 
-## Status: 🚧 Partial (Sprint 1 Complete)
+## Status: ✅ Complete (Sprint 1 + `v0.7.0` OCR)
 
-Sprint 1 completed: 2026-01-18
-OCR deferred to future sprint.
+- Sprint 1 completed: 2026-01-18 (Markdown, plain text, `Accept` negotiation)
+- `v0.7.0` completed: 2026-11-12 (Tesseract image-to-text OCR with decompression-bomb guard and graceful `503` degradation)
 
 ---
 
@@ -21,35 +21,28 @@ OCR deferred to future sprint.
 |---------|----------|------------|--------|
 | HTML to Markdown | P1 | Medium | ✅ Complete |
 | Plain text extraction | P2 | Low | ✅ Complete |
-| Content negotiation (Accept header) | P1 | Medium | ✅ Complete |
-
-## Planned Features
-
-| Feature | Priority | Complexity | Status |
-|---------|----------|------------|--------|
-| Image to Text (OCR) | P1 | High | 📋 Backlog |
+| Content negotiation (`Accept` header) | P1 | Medium | ✅ Complete |
+| Image to Text (OCR via `pytesseract` + `Pillow`) | P2 | High | ✅ Complete (`v0.7.0`) |
 
 ### API Implemented
-- Accept header negotiation: `text/markdown`, `text/plain`, `text/html`
-- Batch support: `format` and `default_format` options in request body
+- `Accept` header negotiation: `text/markdown`, `text/plain`, `text/html`, `application/pdf`, `image/png`, `image/jpeg`, `application/json`
+- OCR extraction: automatic on `image/*` origins (`text/plain`, `text/markdown`, `text/html`), plus `?ocr=true` and `?ocr_lang=<lang>` (`HTTP 503 ocr_unavailable` when `tesseract` binary is missing)
+- Batch support: `format` (`text`, `markdown`, `html`, `pdf`, `screenshot`, `json`, `raw`) and `default_format` options in request body
 
 ### Success Criteria Met
 - ✅ Markdown output preserves document structure (headings, lists, links, code blocks)
 - ✅ Transformation adds < 500ms to response time (measured: 53-110ms overhead)
-- ✅ All 69 transformer tests passing
+- ✅ Decompression-bomb pixel cap (`OCR_MAX_PIXELS=25_000_000`) and strict language code regex (`^[a-zA-Z0-9_+-]{1,32}$`)
+- ✅ Transformer and OCR offline test suites passing (`tests/unit/test_v070_ocr_and_webhooks.py`)
 
 ### Dependencies Added
 ```
 markdownify>=0.11.0
 beautifulsoup4>=4.12.0  # already included
+pytesseract>=0.3.13
+Pillow>=11.0.0
 ```
-
-### OCR Dependencies (Deferred)
-```
-pytesseract>=0.3.10
-Pillow>=10.0.0
-```
-System: `tesseract-ocr` package
+System: `tesseract-ocr`, `tesseract-ocr-eng` (installed in `Dockerfile`)
 
 ---
 

@@ -4,13 +4,14 @@ import logging
 import re
 import time
 from collections import OrderedDict
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
 from typing import Literal
 from urllib.parse import urlparse
 
 from bs4 import BeautifulSoup, Tag
 from playwright.async_api import TimeoutError as PlaywrightTimeoutError
 
+from .browser.actions import BrowserAction, execute_browser_actions
 from .config import get_settings
 from .pdf_generator import (
     PlaywrightPDFGenerator,
@@ -18,6 +19,7 @@ from .pdf_generator import (
     install_ssrf_route_guard,
     resolve_browser_user_agent,
 )
+from .telemetry import get_tracer
 
 logger = logging.getLogger(__name__)
 
@@ -111,6 +113,40 @@ def _is_js_heavy_domain(url: str, domains: list[str]) -> bool:
         return False
     clean_domains = [d.strip().lower().lstrip(".").rstrip(".") for d in domains if d.strip()]
     return any(host == d or host.endswith(f".{d}") for d in clean_domains)
+
+
+_NETWORKIDLE_SETTLE_CAP_MS = 2500
+
+
+async def _navigate_and_settle(
+    page,
+    url: str,
+    timeout_ms: int,
+    *,
+    include_status_in_error: bool = False,
+) -> None:
+    """Navigate once on domcontentloaded, then allow a short non-fatal networkidle settle.
+
+    Ad/tracker-heavy origins keep background connections open indefinitely, so gating
+    page.goto on networkidle stalls until timeout even after the article DOM is ready.
+    """
+    logger.info(f"🌐 Loading page with Playwright: {url}")
+    response = await page.goto(url, wait_until="domcontentloaded", timeout=timeout_ms)
+
+    if not response or response.status >= 400:
+        if include_status_in_error:
+            status = response.status if response else "no response"
+            raise Exception(f"Failed to load page: {url} (status: {status})")
+        raise Exception(f"Failed to load page: {url}")
+
+    settle_timeout_ms = min(timeout_ms, _NETWORKIDLE_SETTLE_CAP_MS)
+    logger.debug(f"Page loaded, waiting up to {settle_timeout_ms}ms for network idle: {url}")
+    try:
+        await page.wait_for_load_state("networkidle", timeout=settle_timeout_ms)
+    except (PlaywrightTimeoutError, TimeoutError):
+        logger.debug(
+            f"Proceeding with DOM content after {settle_timeout_ms}ms networkidle settle: {url}"
+        )
 
 
 async def _close_page_modals(page) -> None:
@@ -391,15 +427,8 @@ async def convert_content_with_playwright_fallback(
             await install_ssrf_route_guard(context)
             page = await context.new_page()
 
-            logger.info(f"🌐 Loading page with Playwright: {url}")
             timeout_ms = get_settings().content.html_js_rendering_timeout
-            response = await page.goto(url, wait_until="networkidle", timeout=timeout_ms)
-
-            if not response or response.status >= 400:
-                raise Exception(f"Failed to load page: {url}")
-
-            logger.debug(f"Page loaded, waiting for network idle: {url}")
-            await page.wait_for_load_state("networkidle", timeout=timeout_ms)
+            await _navigate_and_settle(page, url, timeout_ms)
 
             # Try to close any signup boxes/modals
             await _close_page_modals(page)
@@ -442,6 +471,8 @@ async def convert_content_with_playwright_fallback(
 async def render_html_with_playwright(
     url: str,
     wait_for_selector: str | None = None,
+    *,
+    actions: Sequence[BrowserAction] | None = None,
 ) -> bytes:
     """
     Fetch and render HTML using Playwright to execute JavaScript.
@@ -452,6 +483,7 @@ async def render_html_with_playwright(
     Args:
         url: The URL to fetch and render
         wait_for_selector: Optional CSS selector to wait for after page load
+        actions: Optional declarative browser actions to run before capturing DOM
 
     Returns:
         Fully rendered HTML content as bytes
@@ -460,92 +492,92 @@ async def render_html_with_playwright(
         SelectorTimeoutError: If wait_for_selector is specified but not found
         Exception: If Playwright rendering fails
     """
-    try:
-        logger.info(f"🔄 Starting Playwright HTML rendering for {url}")
-        generator = get_shared_pdf_generator()
-        if not generator:
-            raise Exception("PDF generator pool not initialized")
-
-        is_real_generator = isinstance(generator, PlaywrightPDFGenerator)
-        if is_real_generator:
-            generator.mark_context_acquired()
-
-        pool = None
-        browser = None
-        context = None
-
+    tracer = get_tracer(__name__)
+    with tracer.start_as_current_span("playwright.render_html") as span:
+        span.set_attribute("http.url", url)
         try:
-            pool = await generator.ensure_started()
-            if not pool:
+            logger.info(f"🔄 Starting Playwright HTML rendering for {url}")
+            generator = get_shared_pdf_generator()
+            if not generator:
                 raise Exception("PDF generator pool not initialized")
 
-            browser = await pool.get_browser()
-            gen_ua = getattr(generator, "user_agent", None)
-            effective_ua = resolve_browser_user_agent(gen_ua if isinstance(gen_ua, str) else None)
+            is_real_generator = isinstance(generator, PlaywrightPDFGenerator)
+            if is_real_generator:
+                generator.mark_context_acquired()
 
-            # Create isolated context
-            context = await pool.create_context(browser, user_agent=effective_ua)
-            await install_ssrf_route_guard(context)
-            page = await context.new_page()
+            pool = None
+            browser = None
+            context = None
 
-            logger.info(f"🌐 Loading page with Playwright: {url}")
-            timeout_ms = get_settings().content.html_js_rendering_timeout
-            response = await page.goto(url, wait_until="networkidle", timeout=timeout_ms)
+            try:
+                pool = await generator.ensure_started()
+                if not pool:
+                    raise Exception("PDF generator pool not initialized")
 
-            if not response or response.status >= 400:
-                raise Exception(
-                    f"Failed to load page: {url} (status: {response.status if response else 'no response'})"
+                browser = await pool.get_browser()
+                gen_ua = getattr(generator, "user_agent", None)
+                effective_ua = resolve_browser_user_agent(
+                    gen_ua if isinstance(gen_ua, str) else None
                 )
 
-            logger.debug(f"Page loaded, waiting for network idle: {url}")
-            await page.wait_for_load_state("networkidle", timeout=timeout_ms)
+                # Create isolated context
+                context = await pool.create_context(browser, user_agent=effective_ua)
+                await install_ssrf_route_guard(context)
+                page = await context.new_page()
 
-            # Wait for specific selector if requested
-            if wait_for_selector:
-                try:
-                    logger.info(f"Waiting for selector '{wait_for_selector}' on {url}")
-                    await page.wait_for_selector(
-                        wait_for_selector, timeout=timeout_ms, state="visible"
-                    )
-                    logger.info(f"Selector '{wait_for_selector}' found on {url}")
-                except PlaywrightTimeoutError:
-                    logger.warning(
-                        f"Selector '{wait_for_selector}' not found within {timeout_ms}ms on {url}"
-                    )
-                    raise SelectorTimeoutError(wait_for_selector, timeout_ms)
+                timeout_ms = get_settings().content.html_js_rendering_timeout
+                await _navigate_and_settle(page, url, timeout_ms, include_status_in_error=True)
 
-            # Close modals
-            await _close_page_modals(page)
+                # Wait for specific selector if requested
+                if wait_for_selector:
+                    try:
+                        logger.info(f"Waiting for selector '{wait_for_selector}' on {url}")
+                        await page.wait_for_selector(
+                            wait_for_selector, timeout=timeout_ms, state="visible"
+                        )
+                        logger.info(f"Selector '{wait_for_selector}' found on {url}")
+                    except PlaywrightTimeoutError:
+                        logger.warning(
+                            f"Selector '{wait_for_selector}' not found within {timeout_ms}ms on {url}"
+                        )
+                        raise SelectorTimeoutError(wait_for_selector, timeout_ms)
 
-            logger.debug(f"Extracting rendered HTML content: {url}")
-            # Get rendered HTML
-            html_content = await page.content()
+                if actions:
+                    await execute_browser_actions(page, actions, default_timeout_ms=timeout_ms)
 
-            logger.info(f"📄 Rendered HTML extracted ({len(html_content)} bytes) from {url}")
+                # Close modals
+                await _close_page_modals(page)
 
-            # Return as bytes (UTF-8 encoded)
-            return html_content.encode("utf-8")
+                logger.debug(f"Extracting rendered HTML content: {url}")
+                # Get rendered HTML
+                html_content = await page.content()
 
-        finally:
-            # Cleanup in reverse order — guard each step so browser release and
-            # idle activity accounting always run even if Chromium disconnected.
-            if context:
-                try:
-                    await context.close()
-                except Exception as e:
-                    logger.warning(f"Error closing browser context: {e}")
-            active_pool = (generator.pool if is_real_generator else None) or pool
-            if browser is not None and active_pool is not None:
-                try:
-                    await active_pool.release_browser(browser)
-                except Exception as e:
-                    logger.warning(f"Error releasing browser to pool: {e}")
-            if is_real_generator:
-                generator.mark_context_released()
+                logger.info(f"📄 Rendered HTML extracted ({len(html_content)} bytes) from {url}")
+                span.set_attribute("html.bytes", len(html_content))
 
-    except Exception as e:
-        logger.error(f"Playwright HTML rendering failed for {url}: {e}")
-        raise
+                # Return as bytes (UTF-8 encoded)
+                return html_content.encode("utf-8")
+
+            finally:
+                # Cleanup in reverse order — guard each step so browser release and
+                # idle activity accounting always run even if Chromium disconnected.
+                if context:
+                    try:
+                        await context.close()
+                    except Exception as e:
+                        logger.warning(f"Error closing browser context: {e}")
+                active_pool = (generator.pool if is_real_generator else None) or pool
+                if browser is not None and active_pool is not None:
+                    try:
+                        await active_pool.release_browser(browser)
+                    except Exception as e:
+                        logger.warning(f"Error releasing browser to pool: {e}")
+                if is_real_generator:
+                    generator.mark_context_released()
+
+        except Exception as e:
+            logger.error(f"Playwright HTML rendering failed for {url}: {e}")
+            raise
 
 
 def _convert_html_to_format(html_content: str, output_format: Literal["text", "markdown"]) -> str:

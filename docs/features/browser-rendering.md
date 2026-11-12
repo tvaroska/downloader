@@ -1,17 +1,18 @@
 # Browser Rendering - Feature History
 
-**Last Updated:** 2026-01-20
+**Last Updated:** 2026-11-12
 
 ## Overview
 
-Capture JavaScript-rendered content from SPAs and dynamic websites using Playwright-based browser automation.
+Capture JavaScript-rendered content, screenshots, and PDFs from SPAs and dynamic websites using Playwright-based browser automation with declarative allowlisted actions.
 
 ---
 
-## Status: 🚧 Partial (Sprint 2 Complete)
+## Status: ✅ Complete (Sprint 2 + `v0.6.2` + `v0.7.0`)
 
-Sprint 2 completed: 2026-01-19
-Screenshot/PDF output and interaction scripting deferred to future sprints.
+- Sprint 2 completed: 2026-01-19 (JS rendering, `wait_for`, process isolation, security hardening)
+- `v0.6.2` completed: 2026-11-12 (`S6-br-1` / `F-2026-11-05-002` single-pass `domcontentloaded` + bounded non-fatal `networkidle` settle)
+- `v0.7.0` completed: 2026-11-12 (Screenshot/PDF output toggle + declarative allowlisted interaction scripting & `POST /render`)
 
 ---
 
@@ -19,21 +20,19 @@ Screenshot/PDF output and interaction scripting deferred to future sprints.
 
 | Feature | Priority | Complexity | Status |
 |---------|----------|------------|--------|
-| Basic JS rendering | P1 | High | ✅ Complete |
-| Wait for selectors | P1 | Medium | ✅ Complete |
-| Process isolation | P1 | Medium | ✅ Complete |
-| Security hardening | P1 | Medium | ✅ Complete |
-
-## Planned Features
-
-| Feature | Priority | Complexity | Status |
-|---------|----------|------------|--------|
-| Screenshot/PDF output | P2 | Medium | 📋 Backlog |
-| Interaction scripting | P2 | High | 📋 Backlog |
+| Basic JS rendering (`?render=true`) | P1 | High | ✅ Complete |
+| Wait for selectors (`?wait_for=`) | P1 | Medium | ✅ Complete |
+| Process isolation & recycling (`BrowserPool`) | P1 | Medium | ✅ Complete |
+| Security hardening (`context.route` SSRF guard, `file://` blocked) | P1 | Medium | ✅ Complete |
+| Single-pass `domcontentloaded` + bounded `networkidle` settle (`v0.6.2`) | P1 | Low | ✅ Complete |
+| Screenshot/PDF output toggle (`?output=screenshot\|pdf`, `Accept: image/png\|jpeg`) | P2 | Medium | ✅ Complete (`v0.7.0`) |
+| Declarative interaction scripting (`?actions=`, `POST /render`, `/batch`) | P2 | High | ✅ Complete (`v0.7.0`) |
 
 ### API Implemented
 - Query parameter: `?render=true` - Force JavaScript rendering
 - Query parameter: `?wait_for=<selector>` - Wait for CSS selector before returning
+- Query parameters: `?output=screenshot|pdf`, `?full_page=bool`, `?screenshot_format=png|jpeg`, and `Accept: image/png` / `image/jpeg`
+- Query parameter & POST body: `?actions=<json>` and `POST /render` accepting up to `20` allowlisted actions (`click`, `fill`, `select`, `scroll`, `wait`, `wait_for_selector`, `hover`, `press`; zero raw JS evaluation)
 - Auto-detection: `needs_javascript_rendering()` for common SPA frameworks
 
 ### Success Criteria Met

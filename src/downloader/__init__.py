@@ -1,3 +1,3 @@
 """REST API Downloader - High-performance web service for programmatic URL content downloading."""
 
-__version__ = "0.6.1"
+__version__ = "0.7.0"

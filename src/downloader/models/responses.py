@@ -1,8 +1,10 @@
 """Response models for API endpoints."""
 
-from typing import TypedDict
+from typing import Literal, TypedDict
 
 from pydantic import BaseModel, Field
+
+from ..browser.actions import BrowserAction
 
 
 class ResponseMetadata(TypedDict):
@@ -38,9 +40,27 @@ class BatchURLRequest(BaseModel):
     url: str = Field(..., description="URL to download")
     format: str | None = Field(
         None,
-        description="Desired output format (text, html, markdown, pdf, json, raw)",
+        description="Desired output format (text, html, markdown, pdf, screenshot, json, raw)",
     )
     custom_headers: dict[str, str] | None = Field(None, description="Custom headers for this URL")
+    actions: list[BrowserAction] | None = Field(
+        default=None,
+        max_length=20,
+        description="Optional declarative Playwright actions to execute prior to capture",
+    )
+    full_page: bool = Field(
+        default=False,
+        description="Capture full scrollable page when format='screenshot'",
+    )
+    screenshot_format: Literal["png", "jpeg"] = Field(
+        default="png",
+        description="Image encoding when format='screenshot'",
+    )
+    ocr_language: str | None = Field(
+        default=None,
+        max_length=64,
+        description="Optional Tesseract language override when downloading images as text/markdown",
+    )
 
 
 class BatchRequest(BaseModel):
@@ -57,6 +77,44 @@ class BatchRequest(BaseModel):
     )
     timeout_per_url: int | None = Field(
         None, ge=5, le=300, description="Timeout per URL in seconds"
+    )
+    webhook_url: str | None = Field(
+        default=None,
+        max_length=2048,
+        description="Optional HTTP(S) callback URL invoked upon batch job completion or failure",
+    )
+    webhook_secret: str | None = Field(
+        default=None,
+        max_length=256,
+        description="Optional HMAC-SHA256 signing secret sent via X-Downloader-Signature-256",
+    )
+
+
+class RenderRequest(BaseModel):
+    """Structured browser render request supporting scripted interactions and capture toggles."""
+
+    url: str = Field(..., min_length=1, max_length=2048, description="Target URL to render")
+    output: Literal["html", "text", "markdown", "pdf", "screenshot"] = Field(
+        default="html",
+        description="Rendered output format",
+    )
+    wait_for: str | None = Field(
+        default=None,
+        max_length=500,
+        description="Optional CSS selector to wait for before running actions/capture",
+    )
+    actions: list[BrowserAction] = Field(
+        default_factory=list,
+        max_length=20,
+        description="Declarative browser interactions to execute before capture",
+    )
+    full_page: bool = Field(
+        default=False,
+        description="Capture full scrollable page when output='screenshot'",
+    )
+    screenshot_format: Literal["png", "jpeg"] = Field(
+        default="png",
+        description="Image format when output='screenshot'",
     )
 
 

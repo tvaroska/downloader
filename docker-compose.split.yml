@@ -1,0 +1,20 @@
+# Split API + Worker deployment overlay
+# Usage: docker compose -f docker-compose.yml -f docker-compose.split.yml up -d
+
+services:
+  downloader:
+    environment:
+      - DEPLOYMENT_MODE=api
+      - WORKER_REMOTE_BROWSER_ENABLED=true
+
+  downloader-worker:
+    build: .
+    image: downloader:latest
+    profiles: []
+    environment:
+      - PYTHONPATH=/app/src
+      - REDIS_URI=redis://redis:6379
+      - DEPLOYMENT_MODE=worker
+      - WORKER_REMOTE_BROWSER_ENABLED=true
+    depends_on:
+      - redis

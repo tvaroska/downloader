@@ -1,19 +1,15 @@
 """Batch processing endpoints for background job management."""
 
-import asyncio
-import base64
-import json
+from __future__ import annotations
+
 import logging
 from datetime import UTC, datetime, timedelta
 from typing import Any
-from urllib.parse import urlparse
 
 from fastapi import APIRouter, Depends, HTTPException, Path, Request, Response
 
 from ..auth import get_api_key
 from ..config import get_settings
-from ..content_converter import convert_content_to_markdown, convert_content_to_text
-from ..crawling import DomainThrottle, RobotsChecker, RobotsDisallowedError
 from ..dependencies import (
     BatchSemaphoreDep,
     DomainThrottleDep,
@@ -22,487 +18,35 @@ from ..dependencies import (
     PDFSemaphoreDep,
     RobotsCheckerDep,
 )
-from ..http_client import (
-    ContentTooLargeError,
-    HTTPClientError,
-    HTTPTimeoutError,
-    RequestPriority,
-)
 from ..job_manager import JobStatus
 from ..models.responses import (
     BatchRequest,
-    BatchURLRequest,
-    BatchURLResult,
     ErrorResponse,
     HTTPErrorResponse,
     JobStatusResponse,
     JobSubmissionResponse,
 )
-from ..pdf_generator import PDFGeneratorError, generate_pdf_from_url
+from ..pdf_generator import generate_pdf_from_url
+from ..services.batch_processor import (
+    process_background_batch_job,
+    process_single_url_in_batch,
+)
 from ..services.content_processor import _playwright_fallback_for_content
 from ..validation import URLValidationError, sanitize_custom_headers, validate_url_async
+from ..worker_queue import WorkerQueue
 
 logger = logging.getLogger(__name__)
 
 router = APIRouter()
 
-
-async def process_single_url_in_batch(
-    url_request: BatchURLRequest,
-    default_format: str,
-    timeout: int,
-    request_id: str,
-    http_client,
-    pdf_semaphore,
-    robots_checker: RobotsChecker | None = None,
-    domain_throttle: DomainThrottle | None = None,
-) -> BatchURLResult:
-    """
-    Process a single URL within a batch request.
-
-    Args:
-        url_request: URL request configuration
-        default_format: Default format if not specified
-        timeout: Timeout for this request
-        request_id: Unique identifier for logging
-        robots_checker: Optional robots.txt evaluator
-        domain_throttle: Optional per-domain Crawl-delay throttle
-
-    Returns:
-        BatchURLResult with processing outcome
-    """
-    start_time = asyncio.get_event_loop().time()
-    format_to_use = url_request.format or default_format
-
-    try:
-        validated_url = await validate_url_async(url_request.url)
-        sanitized_headers = sanitize_custom_headers(url_request.custom_headers)
-        logger.info(
-            f"[{request_id}] Processing batch URL: {validated_url} (format: {format_to_use})"
-        )
-
-        settings = get_settings()
-        if settings.crawling.respect_robots_txt:
-            active_checker = robots_checker
-            if active_checker is None:
-                from ..main import app as _app
-
-                active_checker = getattr(_app.state, "robots_checker", None)
-            if active_checker is not None:
-                effective_ua = next(
-                    (v for k, v in (sanitized_headers or {}).items() if k.lower() == "user-agent"),
-                    settings.crawling.user_agent,
-                )
-                crawl_delay = await active_checker.check_allowed(
-                    validated_url,
-                    effective_ua,
-                )
-                active_throttle = domain_throttle
-                if active_throttle is None:
-                    from ..main import app as _app
-
-                    active_throttle = getattr(_app.state, "domain_throttle", None)
-                if active_throttle is not None:
-                    domain = urlparse(validated_url).netloc
-                    await active_throttle.wait_if_needed(domain, crawl_delay)
-
-        if format_to_use == "pdf":
-            async with pdf_semaphore:
-                pdf_content = await asyncio.wait_for(
-                    generate_pdf_from_url(validated_url),
-                    timeout=timeout,
-                )
-
-            content_b64 = base64.b64encode(pdf_content).decode("utf-8")
-            duration = asyncio.get_event_loop().time() - start_time
-            return BatchURLResult(
-                url=url_request.url,
-                success=True,
-                format=format_to_use,
-                content_base64=content_b64,
-                size=len(pdf_content),
-                content_type="application/pdf",
-                duration=duration,
-                status_code=200,
-            )
-
-        if sanitized_headers:
-            download_coro = http_client.download(
-                validated_url, RequestPriority.LOW, headers=sanitized_headers
-            )
-        else:
-            download_coro = http_client.download(validated_url, RequestPriority.LOW)
-
-        content, metadata = await asyncio.wait_for(
-            download_coro,
-            timeout=timeout,
-        )
-
-        if format_to_use == "text":
-            processed_content = convert_content_to_text(content, metadata["content_type"])
-            if not processed_content.strip():
-                async with pdf_semaphore:
-                    processed_content = await _playwright_fallback_for_content(
-                        validated_url,
-                        processed_content,
-                        content,
-                        metadata["content_type"],
-                        "text",
-                        request_id,
-                    )
-            else:
-                processed_content = await _playwright_fallback_for_content(
-                    validated_url,
-                    processed_content,
-                    content,
-                    metadata["content_type"],
-                    "text",
-                    request_id,
-                )
-
-            duration = asyncio.get_event_loop().time() - start_time
-            return BatchURLResult(
-                url=url_request.url,
-                success=True,
-                format=format_to_use,
-                content=processed_content,
-                size=len(processed_content.encode("utf-8")),
-                content_type=metadata["content_type"],
-                duration=duration,
-                status_code=200,
-            )
-
-        elif format_to_use == "markdown":
-            processed_content = convert_content_to_markdown(content, metadata["content_type"])
-            if not processed_content.strip():
-                async with pdf_semaphore:
-                    processed_content = await _playwright_fallback_for_content(
-                        validated_url,
-                        processed_content,
-                        content,
-                        metadata["content_type"],
-                        "markdown",
-                        request_id,
-                    )
-            else:
-                processed_content = await _playwright_fallback_for_content(
-                    validated_url,
-                    processed_content,
-                    content,
-                    metadata["content_type"],
-                    "markdown",
-                    request_id,
-                )
-
-            duration = asyncio.get_event_loop().time() - start_time
-            return BatchURLResult(
-                url=url_request.url,
-                success=True,
-                format=format_to_use,
-                content=processed_content,
-                size=len(processed_content.encode("utf-8")),
-                content_type=metadata["content_type"],
-                duration=duration,
-                status_code=200,
-            )
-
-        elif format_to_use == "html":
-            processed_content = content.decode("utf-8", errors="ignore")
-
-            duration = asyncio.get_event_loop().time() - start_time
-            return BatchURLResult(
-                url=url_request.url,
-                success=True,
-                format=format_to_use,
-                content=processed_content,
-                size=len(content),
-                content_type=metadata["content_type"],
-                duration=duration,
-                status_code=200,
-            )
-
-        elif format_to_use == "json":
-            content_b64 = base64.b64encode(content).decode("utf-8")
-            json_content = json.dumps(
-                {
-                    "success": True,
-                    "url": metadata["url"],
-                    "size": metadata["size"],
-                    "content_type": metadata["content_type"],
-                    "content": content_b64,
-                    "metadata": metadata,
-                }
-            )
-
-            duration = asyncio.get_event_loop().time() - start_time
-            return BatchURLResult(
-                url=url_request.url,
-                success=True,
-                format=format_to_use,
-                content=json_content,
-                size=len(json_content),
-                content_type="application/json",
-                duration=duration,
-                status_code=200,
-            )
-
-        else:  # raw format
-            content_b64 = base64.b64encode(content).decode("utf-8")
-            duration = asyncio.get_event_loop().time() - start_time
-            return BatchURLResult(
-                url=url_request.url,
-                success=True,
-                format=format_to_use,
-                content_base64=content_b64,
-                size=len(content),
-                content_type=metadata.get("content_type", "application/octet-stream"),
-                duration=duration,
-                status_code=200,
-            )
-
-    except RobotsDisallowedError as e:
-        duration = asyncio.get_event_loop().time() - start_time
-        logger.info(f"[{request_id}] Disallowed by robots.txt: {e}")
-        return BatchURLResult(
-            url=url_request.url,
-            success=False,
-            format=format_to_use,
-            duration=duration,
-            error=str(e),
-            error_type="robots_disallowed",
-            status_code=403,
-        )
-
-    except URLValidationError as e:
-        duration = asyncio.get_event_loop().time() - start_time
-        logger.warning(f"[{request_id}] URL validation failed: {e}")
-        return BatchURLResult(
-            url=url_request.url,
-            success=False,
-            format=format_to_use,
-            duration=duration,
-            error=str(e),
-            error_type="validation_error",
-            status_code=400,
-        )
-
-    except ContentTooLargeError as e:
-        duration = asyncio.get_event_loop().time() - start_time
-        logger.warning(f"[{request_id}] Content size limit exceeded: {e}")
-        return BatchURLResult(
-            url=url_request.url,
-            success=False,
-            format=format_to_use,
-            duration=duration,
-            error=str(e),
-            error_type="content_too_large",
-            status_code=413,
-        )
-
-    except TimeoutError:
-        duration = asyncio.get_event_loop().time() - start_time
-        logger.error(f"[{request_id}] Request timeout after {timeout}s")
-        return BatchURLResult(
-            url=url_request.url,
-            success=False,
-            format=format_to_use,
-            duration=duration,
-            error=f"Request timeout after {timeout} seconds",
-            error_type="timeout_error",
-            status_code=408,
-        )
-
-    except HTTPTimeoutError as e:
-        duration = asyncio.get_event_loop().time() - start_time
-        logger.error(f"[{request_id}] HTTP timeout: {e}")
-        return BatchURLResult(
-            url=url_request.url,
-            success=False,
-            format=format_to_use,
-            duration=duration,
-            error=str(e),
-            error_type="timeout_error",
-            status_code=408,
-        )
-
-    except HTTPClientError as e:
-        duration = asyncio.get_event_loop().time() - start_time
-        logger.error(f"[{request_id}] HTTP client error: {e}")
-        status_code = e.status_code if e.status_code else 502
-
-        return BatchURLResult(
-            url=url_request.url,
-            success=False,
-            format=format_to_use,
-            duration=duration,
-            error=str(e),
-            error_type="http_error",
-            status_code=status_code,
-        )
-
-    except PDFGeneratorError as e:
-        duration = asyncio.get_event_loop().time() - start_time
-        if e.status_code is not None and 400 <= e.status_code < 500:
-            logger.warning(
-                f"[{request_id}] Upstream HTTP {e.status_code} during PDF generation: {e}"
-            )
-            return BatchURLResult(
-                url=url_request.url,
-                success=False,
-                format=format_to_use,
-                duration=duration,
-                error=str(e),
-                error_type="http_error",
-                status_code=e.status_code,
-            )
-        logger.error(f"[{request_id}] PDF generation failed: {e}")
-        return BatchURLResult(
-            url=url_request.url,
-            success=False,
-            format=format_to_use,
-            duration=duration,
-            error=f"PDF generation failed: {e}",
-            error_type="pdf_generation_error",
-            status_code=500,
-        )
-
-    except Exception as e:
-        duration = asyncio.get_event_loop().time() - start_time
-        logger.exception(f"[{request_id}] Unexpected error: {e}")
-        return BatchURLResult(
-            url=url_request.url,
-            success=False,
-            format=format_to_use,
-            duration=duration,
-            error="Internal server error",
-            error_type="internal_error",
-            status_code=500,
-        )
-
-
-async def process_background_batch_job(
-    job_id: str,
-    batch_request: BatchRequest,
-    job_manager,
-    batch_semaphore,
-    http_client,
-    pdf_semaphore,
-    robots_checker: RobotsChecker | None = None,
-    domain_throttle: DomainThrottle | None = None,
-) -> tuple[list[dict], dict]:
-    """
-    Process batch job in background.
-
-    Args:
-        job_id: Job identifier for progress tracking
-        batch_request: Batch processing configuration
-        job_manager: JobManager instance
-        batch_semaphore: Batch concurrency semaphore
-        http_client: HTTPClient instance
-        pdf_semaphore: PDF concurrency semaphore
-        robots_checker: Optional robots.txt evaluator
-        domain_throttle: Optional per-domain Crawl-delay throttle
-
-    Returns:
-        Tuple of (results_list, summary_dict)
-    """
-    start_time = asyncio.get_event_loop().time()
-
-    logger.info(
-        f"[JOB-{job_id}] Starting background batch processing: {len(batch_request.urls)} URLs"
-    )
-
-    settings = get_settings()
-    concurrency_limit = (
-        batch_request.concurrency_limit
-        if batch_request.concurrency_limit is not None
-        else min(10, settings.batch.concurrency)
-    )
-    timeout_per_url = (
-        batch_request.timeout_per_url
-        if batch_request.timeout_per_url is not None
-        else settings.batch.default_timeout_per_url
-    )
-    request_semaphore = asyncio.Semaphore(concurrency_limit)
-    progress_lock = asyncio.Lock()
-    total_urls = max(1, len(batch_request.urls))
-    processed_count = 0
-    success_count = 0
-    fail_count = 0
-
-    async def process_with_semaphore(url_request: BatchURLRequest, index: int) -> BatchURLResult:
-        """Process a single URL with concurrency control."""
-        nonlocal processed_count, success_count, fail_count
-        async with request_semaphore:
-            async with batch_semaphore:
-                request_id = f"JOB-{job_id}-{index + 1:02d}"
-                result = await process_single_url_in_batch(
-                    url_request=url_request,
-                    default_format=batch_request.default_format,
-                    timeout=timeout_per_url,
-                    request_id=request_id,
-                    http_client=http_client,
-                    pdf_semaphore=pdf_semaphore,
-                    robots_checker=robots_checker,
-                    domain_throttle=domain_throttle,
-                )
-        async with progress_lock:
-            processed_count += 1
-            if result.success:
-                success_count += 1
-            else:
-                fail_count += 1
-            try:
-                await job_manager.update_job_status(
-                    job_id,
-                    JobStatus.RUNNING,
-                    progress=int(processed_count * 100 / total_urls),
-                    processed_urls=processed_count,
-                    successful_urls=success_count,
-                    failed_urls=fail_count,
-                )
-            except Exception as exc:
-                logger.warning(f"[JOB-{job_id}] Incremental progress update failed: {exc}")
-        return result
-
-    tasks = [
-        process_with_semaphore(url_request, i) for i, url_request in enumerate(batch_request.urls)
-    ]
-
-    results = await asyncio.gather(*tasks, return_exceptions=False)
-
-    batch_duration = asyncio.get_event_loop().time() - start_time
-
-    successful_results = [r for r in results if r.success]
-    failed_results = [r for r in results if not r.success]
-    success_rate = (len(successful_results) / len(results)) * 100 if results else 0
-
-    if not results:
-        await job_manager.update_job_status(
-            job_id,
-            JobStatus.RUNNING,
-            progress=100,
-            processed_urls=0,
-            successful_urls=0,
-            failed_urls=0,
-        )
-
-    logger.info(
-        f"[JOB-{job_id}] Batch completed: {len(successful_results)}/{len(results)} successful "
-        f"({success_rate:.1f}%) in {batch_duration:.2f}s"
-    )
-
-    results_dict = [result.model_dump() for result in results]
-
-    summary = {
-        "total_requests": len(results),
-        "successful_requests": len(successful_results),
-        "failed_requests": len(failed_results),
-        "success_rate": success_rate,
-        "total_duration": batch_duration,
-    }
-
-    return results_dict, summary
+__all__ = [
+    "_playwright_fallback_for_content",
+    "generate_pdf_from_url",
+    "process_background_batch_job",
+    "process_single_url_in_batch",
+    "router",
+    "validate_url_async",
+]
 
 
 @router.post(
@@ -524,7 +68,7 @@ async def submit_batch_job(
     job_manager: JobManagerDep = None,
     api_key: str | None = Depends(get_api_key),
 ) -> JobSubmissionResponse:
-    """Submit a batch processing job for background execution."""
+    """Submit a batch processing job for background or split-worker execution."""
     if job_manager is None:
         logger.warning("Batch processing requested but Redis is not configured")
         raise HTTPException(
@@ -550,6 +94,10 @@ async def submit_batch_job(
     try:
         for item in batch_request.urls:
             item.custom_headers = sanitize_custom_headers(item.custom_headers)
+        if batch_request.webhook_url:
+            batch_request.webhook_url = await validate_url_async(
+                batch_request.webhook_url, active_settings
+            )
     except URLValidationError as e:
         raise HTTPException(
             status_code=400,
@@ -563,17 +111,23 @@ async def submit_batch_job(
         request_data = batch_request.model_dump()
         job_id = await job_manager.create_job(request_data)
 
-        await job_manager.start_background_job(
-            job_id,
-            process_background_batch_job,
-            batch_request,
-            job_manager,
-            batch_semaphore,
-            http_client,
-            pdf_semaphore,
-            robots_checker,
-            domain_throttle,
-        )
+        if active_settings.worker.deployment_mode == "api":
+            if job_manager.redis_client is None:
+                raise RuntimeError("Redis client unavailable in API split-worker mode")
+            queue = WorkerQueue(job_manager.redis_client)
+            await queue.enqueue_batch_job(job_id)
+        else:
+            await job_manager.start_background_job(
+                job_id,
+                process_background_batch_job,
+                batch_request,
+                job_manager,
+                batch_semaphore,
+                http_client,
+                pdf_semaphore,
+                robots_checker,
+                domain_throttle,
+            )
 
         logger.info(f"[JOB-{job_id}] Submitted batch job with {len(batch_request.urls)} URLs")
 

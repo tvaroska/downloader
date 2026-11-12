@@ -24,15 +24,19 @@ logger = logging.getLogger(__name__)
 
 # Conditional import for Redis job store
 def _get_redis_job_store(redis_uri: str):
-    """Get Redis job store with the given URI.
+    """Build APScheduler's RedisJobStore from a Redis URI (redis://, rediss://, unix://).
 
-    APScheduler's Redis job store uses synchronous redis-py by default,
-    so we configure it with the provided URI.
+    APScheduler 3.x forwards **connect_args directly to redis.Redis.__init__, which rejects
+    a raw `url=` kwarg, so build a ConnectionPool via from_url and pass `connection_pool=`.
     """
     from apscheduler.jobstores.redis import RedisJobStore
+    from redis import ConnectionPool
 
+    pool = ConnectionPool.from_url(redis_uri)
     return RedisJobStore(
-        url=redis_uri, jobs_key="scheduler:jobs", run_times_key="scheduler:run_times"
+        jobs_key="scheduler:jobs",
+        run_times_key="scheduler:run_times",
+        connection_pool=pool,
     )
 
 
@@ -119,12 +123,8 @@ class SchedulerService:
             raise RuntimeError("Scheduler not initialized")
         return self._scheduler
 
-    async def start(self) -> None:
-        """Start the scheduler.
-
-        This method should be called during application startup.
-        It starts the scheduler in a non-blocking manner.
-        """
+    async def start(self, *, paused: bool = False) -> None:
+        """Start the scheduler (optionally paused for read/CRUD-only API pods)."""
         if self._started:
             logger.warning("Scheduler already started")
             return
@@ -132,12 +132,13 @@ class SchedulerService:
         if self._scheduler is None:
             raise RuntimeError("Scheduler not initialized")
 
-        self._scheduler.start(paused=False)
+        self._scheduler.start(paused=paused)
         self._started = True
 
         # Log existing jobs on startup
         jobs = self._scheduler.get_jobs()
-        logger.info(f"Scheduler started with {len(jobs)} existing jobs")
+        mode_label = "paused (CRUD-only)" if paused else "active"
+        logger.info(f"Scheduler started in {mode_label} mode with {len(jobs)} existing jobs")
 
     async def shutdown(self, wait: bool = True) -> None:
         """Shutdown the scheduler gracefully.

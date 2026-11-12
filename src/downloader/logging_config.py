@@ -20,6 +20,7 @@ except ImportError:  # pragma: no cover
     from pythonjsonlogger.jsonlogger import JsonFormatter  # type: ignore[no-redef]
 
 from .config import LoggingConfig
+from .telemetry import get_current_trace_context
 
 _UVICORN_ACCESS_RE = re.compile(r'"([A-Z]+)\s+(\S+)\s+HTTP/[^"]+"\s+(\d{3})')
 
@@ -40,6 +41,12 @@ class CustomJsonFormatter(JsonFormatter):
         log_record["logger"] = record.name
         log_record["level"] = record.levelname
         log_record["timestamp"] = self.formatTime(record, self.datefmt)
+
+        trace_id, span_id = get_current_trace_context()
+        if trace_id:
+            log_record.setdefault("trace_id", trace_id)
+        if span_id:
+            log_record.setdefault("span_id", span_id)
 
         # Extract structured HTTP fields for uvicorn.access so Cloud Logging filters match jsonPayload.path
         if record.name == "uvicorn.access":

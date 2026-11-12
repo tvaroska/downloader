@@ -49,9 +49,9 @@ class TestMultiFormat:
         """Test parsing with unsupported formats."""
         from src.downloader.services.content_processor import parse_accept_headers
 
-        result = parse_accept_headers("text/html, image/png, text/markdown")
+        result = parse_accept_headers("text/html, application/xml, text/markdown")
         assert set(result) == {"html", "markdown"}
-        assert "image/png" not in result
+        assert "application/xml" not in result
 
     def test_parse_accept_headers_duplicates(self):
         """Test parsing with duplicate formats."""

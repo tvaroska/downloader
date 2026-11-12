@@ -1,8 +1,8 @@
 # REST API Downloader - API Reference
 
-**Last Updated:** 2026-11-02
+**Last Updated:** 2026-11-12
 
-Complete API documentation for the REST API Downloader service.
+Complete API documentation for the REST API Downloader service (`v0.7.0`).
 
 ## Base URL
 
@@ -72,11 +72,13 @@ The API uses HTTP Accept headers to determine response format. This allows the s
 
 | Accept Header | Format | Description |
 |--------------|--------|-------------|
-| `text/plain` | Plain Text | Clean text with HTML tags stripped |
-| `text/markdown` | Markdown | HTML converted to Markdown format |
-| `text/html` | HTML | Original or rendered HTML content |
+| `text/plain` | Plain Text | Clean text with HTML tags stripped (or Tesseract OCR text for `image/*` origins) |
+| `text/markdown` | Markdown | HTML converted to Markdown format (or Tesseract OCR Markdown for `image/*` origins) |
+| `text/html` | HTML | Original or Playwright-rendered HTML content (or HTML-escaped OCR text for `image/*` origins) |
 | `application/json` | JSON | Base64-encoded content with metadata |
-| `application/pdf` | PDF | Page rendered as PDF document |
+| `application/pdf` | PDF | Page rendered as PDF document via Playwright |
+| `image/png` | PNG Screenshot | Page rendered as PNG screenshot via Playwright |
+| `image/jpeg` | JPEG Screenshot | Page rendered as JPEG screenshot via Playwright |
 | (none/other) | Plain Text | Default fallback format |
 
 ### Multi-Format Requests
@@ -103,26 +105,80 @@ When multiple formats are requested, the response is always JSON containing each
 
 ### Health Check
 
-Check service health and version information.
+Check service health, version, deployment mode, connection drain state, and split-worker queue telemetry.
 
 **Endpoint:** `GET /health`
 
-**Response:**
+**Healthy Response (`200 OK`):**
 ```json
 {
   "status": "healthy",
-  "version": "0.6.1"
+  "draining": false,
+  "active_requests": 0,
+  "version": "0.7.0",
+  "environment": "production",
+  "deployment_mode": "all",
+  "telemetry_enabled": false,
+  "configuration": {
+    "pdf_concurrency": 4,
+    "batch_concurrency": 10,
+    "max_download_size_mb": 50.0,
+    "cpu_cores": 4,
+    "respect_robots_txt": true,
+    "user_agent": "DownloaderBot/0.7.0",
+    "ocr_enabled": true,
+    "webhooks_enabled": true
+  },
+  "services": {
+    "job_manager": { "available": true, "status": "healthy" },
+    "batch_processing": { "available": true },
+    "pdf_generation": { "available": true },
+    "scheduler": { "available": true },
+    "workers": {
+      "deployment_mode": "all",
+      "remote_browser_enabled": false,
+      "active_workers": 0,
+      "workers": [],
+      "queues": {
+        "batch_pending": 0,
+        "batch_processing": 0,
+        "browser_pending": 0
+      }
+    }
+  },
+  "auth_enabled": true,
+  "auth_methods": [
+    "Authorization: Bearer <api_key>",
+    "X-API-Key: <api_key>"
+  ]
+}
+```
+
+When `REDIS_URI` is configured, `services.workers` includes `active_workers`, `workers` (active worker heartbeats), and `queues` (`batch_pending`, `batch_processing`, `browser_pending`). When `DOWNLOADER_KEY` is unset, `auth_enabled` is `false` and `auth_methods` is `null`.
+
+**Draining Response (`503 Service Unavailable` during graceful shutdown):**
+```json
+{
+  "status": "draining",
+  "draining": true,
+  "active_requests": 2,
+  "version": "0.7.0",
+  "environment": "production",
+  "deployment_mode": "all",
+  "telemetry_enabled": false,
+  "auth_enabled": true
 }
 ```
 
 **Status Codes:**
-- `200` - Service is healthy
+- `200` - Service is healthy and ready to accept traffic
+- `503` - Service is draining active connections during graceful shutdown (non-`/health` endpoints also include `Connection: close` and `Retry-After: 5`)
 
 ---
 
 ### Download URL Content
 
-Download and process content from any public URL with intelligent content extraction.
+Download and process content from any public URL with intelligent content extraction, OCR, screenshots, and declarative Playwright actions.
 
 **Endpoint:** `GET /{url}`
 
@@ -130,14 +186,28 @@ Download and process content from any public URL with intelligent content extrac
 - `url` (path, required) - The complete URL to download (e.g., `https://example.com`)
 
 **Headers:**
-- `Accept` (optional) - Content format preference
+- `Accept` (optional) - Content format preference (`text/plain`, `text/markdown`, `text/html`, `application/pdf`, `image/png`, `image/jpeg`, `application/json`, or comma-separated list for multi-format JSON)
 
 **Query Parameters:**
 
 | Parameter | Type | Default | Description |
 |-----------|------|---------|-------------|
-| `render` | boolean | `false` | Force single-fetch JavaScript rendering with Playwright across `text/html`, `text/plain`, `text/markdown`, and multi-format requests (`X-Rendered-With-JS: true`). Returns `HTTP 503` if browser concurrency slots are saturated, or falls back to static HTTP extraction (`X-Rendered-With-JS: false`) on unexpected browser failures. |
+| `render` | boolean | `false` | Force single-fetch JavaScript rendering with Playwright across `text/html`, `text/plain`, `text/markdown`, and multi-format requests (`X-Rendered-With-JS: true`). Uses single-pass `domcontentloaded` + bounded non-fatal `networkidle` settle (`min(timeout_ms, 2500)`). Returns `HTTP 503` if browser concurrency slots are saturated, or falls back to static HTTP extraction (`X-Rendered-With-JS: false`) on unexpected browser failures. |
 | `wait_for` | string | `null` | CSS selector to wait for before returning content. Implies `render=true`. Times out after `CONTENT_HTML_JS_RENDERING_TIMEOUT` (`10000` ms default) with `HTTP 408` (`selector_timeout_error`). Max 500 characters. |
+| `output` | string | `null` | Explicit binary output override: `screenshot` or `pdf`. Overrides default text extraction regardless of `Accept`. |
+| `full_page` | boolean | `false` | Capture the full scrollable page when rendering a screenshot (`output=screenshot` or `Accept: image/png|jpeg`). |
+| `screenshot_format` | string | `png` | Image encoding for screenshot captures: `png` (`image/png`) or `jpeg` (`image/jpeg`). |
+| `actions` | string | `null` | URL-encoded JSON array (max 8192 chars, max 20 actions) of strictly allowlisted declarative Playwright actions (`click`, `fill`, `select`, `scroll`, `wait`, `wait_for_selector`, `hover`, `press`; zero raw JS evaluation). Implies `render=true`. |
+| `ocr` | boolean | `false` | Require Tesseract OCR extraction (returns `HTTP 422` if origin is not a supported `image/*` content type, or `HTTP 503` `ocr_unavailable` if `tesseract` is unavailable or `OCR_ENABLED=false`). Image origins also run OCR automatically when `Accept` requests `text/plain`, `text/markdown`, or `text/html`. |
+| `ocr_lang` | string | `null` | Optional Tesseract OCR language code (validated against `^[a-zA-Z0-9_+-]{1,32}$`, e.g., `eng`, `eng+deu`). |
+
+**Common Response Headers:**
+- `X-Original-URL`: Target URL
+- `X-Original-Content-Type`: Origin MIME type
+- `X-Content-Length`: Payload size in bytes
+- `X-Rendered-With-JS`: `true` or `false` when Playwright rendering was invoked
+- `X-OCR-Applied`: `true` when Tesseract OCR extracted text from an image origin
+- `X-Trace-ID`: W3C 32-hex-char OpenTelemetry trace ID (present when `OTEL_ENABLED=true`)
 
 **Supported Accept Header Values:**
 
@@ -282,6 +352,47 @@ Example Domain This domain is for use in illustrative examples in documents. You
 
 ---
 
+### Scripted Browser Render (`POST /render`)
+
+Execute up to `20` strictly allowlisted declarative Playwright actions (`click`, `fill`, `select`, `scroll`, `wait`, `wait_for_selector`, `hover`, `press`; zero arbitrary JavaScript evaluation) prior to capturing text, Markdown, HTML, PDF, or a screenshot. Rate-limited under `RATELIMIT_DOWNLOAD_LIMIT` (`60/minute`).
+
+**Endpoint:** `POST /render`
+
+**Request Body:**
+```json
+{
+  "url": "https://example.com",
+  "output": "markdown",
+  "wait_for": "main",
+  "actions": [
+    {"type": "click", "selector": "#accept-cookies"},
+    {"type": "scroll", "y": 800},
+    {"type": "wait_for_selector", "selector": ".loaded", "timeout_ms": 5000}
+  ],
+  "full_page": false,
+  "screenshot_format": "png",
+  "timeout_ms": 15000
+}
+```
+
+**Request Fields:**
+
+| Field | Type | Required | Description |
+|-------|------|----------|-------------|
+| `url` | string | Yes | Public `http`/`https` URL to render (SSRF- and `robots.txt`-checked) |
+| `output` | string | No | Output format: `text`, `markdown`, `html`, `pdf`, or `screenshot` (default: `html`) |
+| `wait_for` | string | No | Optional CSS selector to wait for before capture (max 500 chars) |
+| `actions` | array | No | Up to `20` allowlisted actions: `click`, `fill`, `select`, `scroll`, `wait` (`ms <= 10000`), `wait_for_selector`, `hover`, `press` |
+| `full_page` | boolean | No | Capture full scrollable page when `output="screenshot"` (default: `false`) |
+| `screenshot_format` | string | No | `png` or `jpeg` when `output="screenshot"` (default: `png`) |
+| `timeout_ms` | integer | No | Optional render timeout override in milliseconds (`1000..60000`) |
+
+**Response:**
+- Returns raw payload bytes with matching `Content-Type` (`text/plain`, `text/markdown`, `text/html`, `application/pdf`, `image/png`, or `image/jpeg`) and `X-Rendered-With-JS: true`.
+- Returns `400` (`validation_error`) on disallowed actions or SSRF failures, `403` (`robots_disallowed`), `408` (`selector_timeout_error` / `timeout_error`), `503` (`service_unavailable` if browser slots saturated or `service_draining`), or `504` (`worker_timeout` in split `DEPLOYMENT_MODE=api`).
+
+---
+
 ## Background Batch Processing
 
 Process multiple URLs asynchronously with job tracking and result retrieval.
@@ -302,18 +413,26 @@ Submit a batch processing job for background execution.
     },
     {
       "url": "https://github.com/python/cpython",
-      "format": "markdown"
+      "format": "markdown",
+      "actions": [{"type": "scroll", "y": 500}]
     },
     {
       "url": "https://docs.python.org",
-      "format": "pdf"
+      "format": "screenshot"
     }
   ],
   "default_format": "text",
   "concurrency_limit": 10,
-  "timeout_per_url": 30
+  "timeout_per_url": 30,
+  "webhook_url": "https://hooks.example.com/batch-done",
+  "webhook_secret": "<your-hmac-key>"
 }
 ```
+
+Supported per-URL `format` and `default_format` values: `text`, `markdown`, `html`, `pdf`, `screenshot`, `json`, `raw` (plus automatic Tesseract OCR for image origins when requesting `text`, `markdown`, or `html`).
+
+- **`webhook_url` (optional):** Validated against SSRF at submission and delivery time. Fired strictly **after** `store_job_results` and `COMPLETED`/`FAILED` status persistence so receivers can immediately fetch `GET /jobs/{job_id}/results`. Sends `X-Downloader-Event: batch.completed` or `batch.failed` with `follow_redirects=False` and bounded retries (`WEBHOOK_MAX_RETRIES=3`).
+- **`webhook_secret` (optional, write-only):** When provided, outbound deliveries include `X-Downloader-Signature-256: sha256=<hex>` (HMAC-SHA256 of the raw JSON body). Never returned in status or results responses.
 
 **Response:**
 ```json
@@ -801,6 +920,16 @@ Returned on `GET /{url}` (and recorded with `status_code: 413` per item in `POST
 }
 ```
 
+#### OCR Processing & Availability Errors (`422` / `503`)
+
+- **`422 Unprocessable Entity` (`error_type: "ocr_error"`):** Returned when `?ocr=true` targets a non-image origin, an image fails decoding, or decoded dimensions exceed `OCR_MAX_PIXELS` (`25_000_000` default decompression-bomb guard).
+- **`503 Service Unavailable` (`error_type: "ocr_unavailable"`):** Returned when `OCR_ENABLED=false` or the `tesseract` system binary is unavailable on the host.
+
+#### Graceful Shutdown & Split-Worker Errors (`503` / `504`)
+
+- **`503 Service Unavailable` (`error_type: "service_draining"`):** Returned with `Connection: close` and `Retry-After: 5` by `DrainMiddleware` once pod shutdown begins while in-flight requests drain.
+- **`504 Gateway Timeout` (`error_type: "worker_timeout"`):** Returned when `DEPLOYMENT_MODE=api` dispatches a browser render/PDF/screenshot task to a remote worker via Redis and no worker completes it within `WORKER_BROWSER_TASK_TIMEOUT`.
+
 ## Rate Limiting
 
 Rate limiting is enabled by default to prevent abuse and ensure fair resource allocation.
@@ -918,6 +1047,12 @@ Automatically removes:
 - Advertisements and tracking elements
 
 ## SDKs and Client Libraries
+
+First-party typed client SDKs covering `GET /{url}`, `POST /render`, screenshots, OCR, `/batch` + webhooks, and `/schedules` live under `sdks/`:
+
+- **Python (`httpx` + Pydantic v2, sync & async):** [`sdks/python/README.md`](../sdks/python/README.md)
+- **JavaScript / TypeScript (ESM, built-in `fetch`, zero runtime deps):** [`sdks/javascript/README.md`](../sdks/javascript/README.md)
+- **Go (`net/http` stdlib, zero external deps):** [`sdks/go`](../sdks/go)
 
 ### cURL Examples
 
@@ -1183,9 +1318,11 @@ Create a new scheduled download job.
 | `name` | string | Yes | Human-readable name (1-100 characters) |
 | `url` | string | Yes | URL to download (1-2048 characters) |
 | `cron_expression` | string | Yes | Standard 5-field cron expression |
-| `format` | string | No | Output format: `text`, `html`, `markdown`, `pdf`, `json`, `raw` (default: `text`) |
-| `headers` | object | No | Custom HTTP headers for the request |
+| `format` | string | No | Output format: `text`, `html`, `markdown`, `pdf`, `screenshot`, `json`, `raw` (default: `text`) |
+| `headers` | object | No | Custom HTTP headers for the request (prohibited hop-by-hop headers rejected with `400`) |
 | `enabled` | boolean | No | Whether schedule is active (default: `true`) |
+| `webhook_url` | string | No | Optional SSRF-validated callback URL notified with `schedule.completed` or `schedule.failed` after execution finishes |
+| `webhook_secret` | string | No | Optional write-only HMAC-SHA256 signing secret (`X-Downloader-Signature-256: sha256=<hex>`); never returned in schedule responses |
 
 **Response:**
 ```json
@@ -1197,6 +1334,7 @@ Create a new scheduled download job.
   "format": "markdown",
   "headers": {"Authorization": "Bearer token"},
   "enabled": true,
+  "webhook_url": "https://hooks.example.com/schedules",
   "created_at": "2026-01-21T10:30:00Z",
   "next_run_time": "2026-01-22T09:00:00Z"
 }
@@ -1440,9 +1578,33 @@ Failed scheduled jobs are automatically retried for transient errors:
 
 ---
 
+### Operational Configuration (`v0.7.0`)
+
+| Environment Variable | Default | Description |
+|---------------------|---------|-------------|
+| `OCR_ENABLED` | `true` | Enable Tesseract image-to-text OCR (`false` returns `503 ocr_unavailable` on `?ocr=true`) |
+| `OCR_DEFAULT_LANGUAGE` | `eng` | Default Tesseract language pack |
+| `OCR_TIMEOUT_SECONDS` | `30.0` | Timeout per OCR extraction in seconds |
+| `OCR_MAX_PIXELS` | `25000000` | Maximum decoded image pixels (decompression-bomb guard) |
+| `WEBHOOK_ENABLED` | `true` | Enable outbound batch/schedule webhook delivery |
+| `WEBHOOK_TIMEOUT_SECONDS` | `10.0` | Timeout per outbound webhook attempt in seconds |
+| `WEBHOOK_MAX_RETRIES` | `3` | Retry attempts on transient `5xx`/network failures |
+| `SHUTDOWN_DRAIN_TIMEOUT` | `30.0` | Max seconds to wait for active requests and jobs during shutdown |
+| `SHUTDOWN_POLL_INTERVAL` | `0.25` | Poll interval in seconds while waiting for drain completion |
+| `DEPLOYMENT_MODE` | `all` | Runtime topology: `all` (monolith/stateless default), `api` (offloads batch/browser via Redis), or `worker` |
+| `WORKER_POLL_TIMEOUT` | `5.0` | Worker Redis `BLMOVE` poll interval in seconds |
+| `WORKER_BROWSER_TASK_TIMEOUT` | `60.0` | Timeout waiting for remote worker Playwright/PDF/screenshot RPC |
+| `WORKER_MAX_CONCURRENT_JOBS` | `4` | Max concurrent batch jobs processed per worker instance |
+| `OTEL_ENABLED` | `false` | Opt-in OpenTelemetry distributed tracing (`false` adds zero runtime overhead) |
+| `OTEL_SERVICE_NAME` | `downloader` | OpenTelemetry service name resource attribute |
+| `OTEL_EXPORTER_OTLP_ENDPOINT` | `null` | OTLP HTTP exporter endpoint (e.g., `http://otel-collector:4318`) |
+| `OTEL_CONSOLE_EXPORTER` | `false` | Emit OpenTelemetry spans to stdout for local debugging |
+
+---
+
 ## Versioning
 
-Current API version: `v1.0`
+Current API version: `v1.0` (service `0.7.0`)
 
 Version information available via `/health` endpoint.
 

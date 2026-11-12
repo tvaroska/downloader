@@ -18,6 +18,7 @@ from .http_client import HTTPClient
 from .job_manager import JobManager
 from .pdf_generator import PlaywrightPDFGenerator
 from .scheduler import ExecutionStorage, SchedulerService
+from .worker_queue import WorkerQueue
 
 logger = logging.getLogger(__name__)
 
@@ -223,6 +224,19 @@ async def get_domain_throttle(request: Request) -> DomainThrottle:
     return throttle
 
 
+async def get_worker_queue_dependency(request: Request) -> WorkerQueue | None:
+    """Return a Redis-backed WorkerQueue when JobManager is connected, else None."""
+    queue: WorkerQueue | None = getattr(request.app.state, "worker_queue", None)
+    if queue is not None:
+        return queue
+    job_manager: JobManager | None = getattr(request.app.state, "job_manager", None)
+    if job_manager is not None and job_manager.redis_client is not None:
+        queue = WorkerQueue(job_manager.redis_client)
+        request.app.state.worker_queue = queue
+        return queue
+    return None
+
+
 # Type aliases for cleaner route signatures
 SettingsDep = Annotated[Settings, Depends(get_settings_dependency)]
 HTTPClientDep = Annotated[HTTPClient, Depends(get_http_client)]
@@ -235,3 +249,4 @@ SchedulerDep = Annotated[SchedulerService | None, Depends(get_scheduler_dependen
 ExecutionStorageDep = Annotated[ExecutionStorage | None, Depends(get_execution_storage_dependency)]
 RobotsCheckerDep = Annotated[RobotsChecker, Depends(get_robots_checker)]
 DomainThrottleDep = Annotated[DomainThrottle, Depends(get_domain_throttle)]
+WorkerQueueDep = Annotated[WorkerQueue | None, Depends(get_worker_queue_dependency)]

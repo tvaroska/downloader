@@ -5,7 +5,7 @@ from __future__ import annotations
 import logging
 import uuid
 from datetime import UTC, datetime
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 from apscheduler.triggers.cron import CronTrigger
 from fastapi import APIRouter, Depends, HTTPException, Path, Query
@@ -67,6 +67,9 @@ async def scheduled_download_job(
     url: str,
     format: str,
     headers: dict[str, str] | None,
+    webhook_url: str | None = None,
+    webhook_secret: str | None = None,
+    **_extra: Any,
 ) -> None:
     """Job function executed by APScheduler for scheduled downloads.
 
@@ -76,8 +79,10 @@ async def scheduled_download_job(
     Args:
         schedule_id: Unique identifier for the schedule.
         url: URL to download.
-        format: Output format (text, markdown, html, pdf, json, raw).
+        format: Output format (text, markdown, html, pdf, screenshot, json, raw).
         headers: Optional custom HTTP headers.
+        webhook_url: Optional HTTP(S) callback URL notified after completion/failure.
+        webhook_secret: Optional HMAC-SHA256 signing secret.
     """
     if _executor is None:
         logger.error(f"[SCHEDULE-{schedule_id}] Executor not initialized, cannot execute job")
@@ -86,7 +91,14 @@ async def scheduled_download_job(
     logger.info(f"[SCHEDULE-{schedule_id}] Starting execution: {url} (format={format})")
 
     try:
-        execution = await _executor.execute(schedule_id, url, format, headers)
+        execution = await _executor.execute(
+            schedule_id,
+            url,
+            format,
+            headers,
+            webhook_url=webhook_url,
+            webhook_secret=webhook_secret,
+        )
 
         if execution.success:
             logger.info(
@@ -134,6 +146,11 @@ async def create_schedule(
 
     try:
         validated_url = await validate_url_async(schedule_data.url)
+        validated_webhook_url = (
+            await validate_url_async(schedule_data.webhook_url)
+            if schedule_data.webhook_url
+            else None
+        )
         sanitized_headers = sanitize_custom_headers(schedule_data.headers)
 
         # Generate unique ID
@@ -150,6 +167,8 @@ async def create_schedule(
             "format": schedule_data.format,
             "headers": sanitized_headers,
             "created_at": created_at.isoformat(),
+            "webhook_url": validated_webhook_url,
+            "webhook_secret": schedule_data.webhook_secret,
         }
 
         # Add job to scheduler
@@ -178,6 +197,7 @@ async def create_schedule(
             enabled=schedule_data.enabled,
             created_at=created_at,
             next_run_time=job.next_run_time,
+            webhook_url=validated_webhook_url,
         )
 
     except (ValueError, URLValidationError) as e:
@@ -236,6 +256,7 @@ async def list_schedules(
                     enabled=job.next_run_time is not None,
                     created_at=created_at,
                     next_run_time=job.next_run_time,
+                    webhook_url=kwargs.get("webhook_url"),
                 )
             )
 
@@ -297,6 +318,7 @@ async def get_schedule(
             enabled=job.next_run_time is not None,
             created_at=created_at,
             next_run_time=job.next_run_time,
+            webhook_url=kwargs.get("webhook_url"),
         )
 
     except HTTPException:

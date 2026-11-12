@@ -37,7 +37,7 @@ class ScheduleCreate(BaseModel):
         max_length=100,
         description="Cron expression (5 fields: minute hour day month day_of_week)",
     )
-    format: Literal["text", "html", "markdown", "pdf", "json", "raw"] = Field(
+    format: Literal["text", "html", "markdown", "pdf", "screenshot", "json", "raw"] = Field(
         default="text",
         description="Output format for downloaded content",
     )
@@ -48,6 +48,16 @@ class ScheduleCreate(BaseModel):
     enabled: bool = Field(
         default=True,
         description="Whether the schedule is active",
+    )
+    webhook_url: str | None = Field(
+        default=None,
+        max_length=2048,
+        description="Optional HTTP(S) callback URL notified after each scheduled execution",
+    )
+    webhook_secret: str | None = Field(
+        default=None,
+        max_length=256,
+        description="Optional HMAC-SHA256 signing secret (never returned in API responses)",
     )
 
     @field_validator("cron_expression")
@@ -77,6 +87,10 @@ class ScheduleResponse(BaseModel):
     next_run_time: datetime | None = Field(
         None,
         description="Next scheduled execution time (None if paused/disabled)",
+    )
+    webhook_url: str | None = Field(
+        default=None,
+        description="Optional callback URL notified after each scheduled execution",
     )
 
 

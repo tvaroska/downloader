@@ -6,6 +6,71 @@ history — supersede an old decision with a new entry that references it.
 
 ---
 
+## 2026-11-12 — `v0.6.2` single-pass browser settle & `v0.7.0` extended features and operations
+
+- **Decision (`v0.6.2` single-pass `domcontentloaded` + bounded settle — `F-2026-11-05-002`):**
+  Replaced the two-pass `networkidle` navigation draft in `src/downloader/content_converter.py`
+  (`convert_content_with_playwright_fallback` and `render_html_with_playwright`) with a single
+  `page.goto(url, wait_until="domcontentloaded", timeout=timeout_ms)` followed by a bounded
+  non-fatal `page.wait_for_load_state("networkidle", timeout=min(timeout_ms, 2500))`.
+  - **Why:** Ad- and analytics-heavy pages hold background connections open indefinitely, causing
+    two-pass retries to burn `10s–20s` and time out unnecessarily once DOM hydration has finished.
+- **Decision (Screenshot/PDF output toggle & declarative allowlisted browser actions — zero raw JS eval):**
+  Added `output=screenshot|pdf`, `full_page`, `screenshot_format=png|jpeg`, and `Accept: image/png` /
+  `image/jpeg` across `GET /{url}`, `POST /render`, `POST /batch`, and `/schedules`. Defined
+  strictly allowlisted declarative actions (`src/downloader/browser/actions.py`: `click`, `fill`,
+  `select`, `scroll`, `wait`, `wait_for_selector`, `hover`, `press`; max `20` steps, bounded per-step
+  timeout, zero arbitrary JavaScript evaluation).
+  - **Why:** Allows multi-step SPA interaction (dismissing modals, expanding tabs, scrolling lazy
+    lists) prior to extraction/capture without exposing an RCE or sandbox-escape surface.
+- **Decision (SSRF-safe HMAC-SHA256 webhooks firing strictly post-persistence):**
+  Added `src/downloader/services/webhooks.py` (`deliver_webhook`) using `validate_url_async` +
+  DNS-pinned `SSRFSafeHTTPTransport(trust_env=False)` with `follow_redirects=False`, bounded
+  retries (`WEBHOOK_MAX_RETRIES=3`), and `X-Downloader-Signature-256: sha256=<hex>` signatures.
+  `webhook_url` is SSRF-validated at batch/schedule creation time, `webhook_secret` is never returned
+  in API responses, and batch webhooks fire strictly after `store_job_results` + `COMPLETED` status
+  updates persist in Redis.
+  - **Why:** Prevents webhook endpoints from becoming a secondary SSRF pivot and eliminates race
+    conditions when receivers immediately fetch `GET /jobs/{job_id}/results`.
+- **Decision (Tesseract OCR with decompression-bomb protection & `503` graceful degradation):**
+  Added `src/downloader/transformers/ocr.py` (`pytesseract` + `Pillow` + `tesseract-ocr` /
+  `tesseract-ocr-eng` in `Dockerfile`) with `Image.MAX_IMAGE_PIXELS` capping (`OCR_MAX_PIXELS`),
+  regex language validation (`OCR_DEFAULT_LANGUAGE`), and explicit `HTTP 503` (`ocr_unavailable`)
+  when the `tesseract` binary is absent or `OCR_ENABLED=false`.
+- **Decision (Graceful shutdown drain, split API+worker Redis architecture & opt-in OpenTelemetry):**
+  Added `src/downloader/drain.py` (`DrainCoordinator`, `DrainMiddleware` returning `503` +
+  `Connection: close` + `Retry-After: 5`, `/health` `503` while draining, `JobManager.wait_for_active_jobs`),
+  split `DEPLOYMENT_MODE=all|api|worker` (`src/downloader/worker_queue.py` reliable `BLMOVE` batch
+  queue + remote browser RPC + worker heartbeats, `src/downloader/worker.py`, `docker-compose.split.yml`),
+  and opt-in OpenTelemetry (`src/downloader/telemetry.py`, `OTEL_ENABLED=false` default, OTLP HTTP /
+  console exporters, `trace_id`/`span_id` log correlation, `X-Trace-ID`, W3C `traceparent` across Redis).
+  - **Why:** Preserves zero-overhead stateless single-pod defaults (`DEPLOYMENT_MODE=all`,
+    `OTEL_ENABLED=false`) while enabling zero-downtime Kubernetes rollouts, independent horizontal
+    scaling of Playwright/scheduler workers, and end-to-end tracing when opted in.
+- **Decision (Typed first-party client SDKs in `sdks/`):**
+  Added `sdks/python`, `sdks/javascript`, and `sdks/go` with zero internal-tooling dependencies,
+  full coverage of download, screenshot/PDF, actions (`POST /render`), OCR, batch + webhooks, and
+  schedules, verified via standalone offline test suites.
+
+---
+
+## 2026-11-12 — Replan `v0.7.0` around Extended Features & Operations; move Multi-Tenant Quotas past `v0.7.0`
+
+- **Decision (Roadmap reprioritization — supersedes `2026-11-01` post-Sprint-4 sequencing):**
+  Pulled the former Sprint 6 Extended Features (screenshot/PDF toggle, batch/schedule
+  webhooks, OCR, typed client SDKs, browser interaction scripting) and Operations &
+  Infrastructure items (graceful shutdown connection drain, split worker architecture,
+  OpenTelemetry tracing) into **`v0.7.0`**, and pushed **Multi-Tenant Per-Key Quotas**
+  (`QuotaConfig`, `GET /usage`, per-key counters, tier-based plans) out to **post-`v0.7.0`
+  (`v0.8.0+`, Deferred)**. `v0.6.2` remains the immediate next patch release for Playwright
+  navigation timeout resilience (`F-2026-11-05-002`).
+- **Why:** Production continues to run single-key on `services-gke`, so user-facing
+  extraction features (screenshots, webhooks, OCR) and operational resilience (graceful
+  drain, worker isolation, tracing) deliver immediate value ahead of multi-tenant quota
+  accounting. Details in `docs/roadmap.md`.
+
+---
+
 ## 2026-11-02 — `v0.6.1` DNS-pinned SSRF transport, single-fetch browser pipeline & endpoint hardening
 
 - **Decision (DNS-pinned `SSRFSafeHTTPTransport` & async SSRF validation):**

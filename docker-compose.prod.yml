@@ -11,12 +11,33 @@ services:
     environment:
       - PYTHONPATH=/app/src
       - REDIS_URI=redis://redis:6379
+      - DEPLOYMENT_MODE=${DEPLOYMENT_MODE:-all}
       - LOG_LEVEL=INFO
       - LOG_JSON_LOGS=true
       - ENVIRONMENT=production
-    # Use production CMD from Dockerfile (no --reload)
-    command: ["python", "-m", "uvicorn", "src.downloader.main:app", "--host", "0.0.0.0", "--port", "8000"]
+    # Use production CMD from Dockerfile (no --reload) with graceful drain timeout
+    command: ["python", "-m", "uvicorn", "src.downloader.main:app", "--host", "0.0.0.0", "--port", "8000", "--timeout-graceful-shutdown", "35"]
     # Resource limits
+    deploy:
+      resources:
+        limits:
+          cpus: '2'
+          memory: 2G
+        reservations:
+          cpus: '0.5'
+          memory: 512M
+
+  downloader-worker:
+    restart: unless-stopped
+    volumes: []
+    environment:
+      - PYTHONPATH=/app/src
+      - REDIS_URI=redis://redis:6379
+      - DEPLOYMENT_MODE=worker
+      - LOG_LEVEL=INFO
+      - LOG_JSON_LOGS=true
+      - ENVIRONMENT=production
+    command: ["python", "-m", "src.downloader.worker"]
     deploy:
       resources:
         limits:

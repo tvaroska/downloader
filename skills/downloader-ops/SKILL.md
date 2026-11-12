@@ -11,17 +11,21 @@ description: REST API Downloader operational runbook covering single- vs multi-f
 
 1. **Single Format (`0` or `1` requested MIME type — default `text/plain`):**
    - Returns the raw payload directly with matching `Content-Type`:
-     - `Accept: text/plain` (or omitted) -> plain extracted article text (`text/plain`)
-     - `Accept: text/markdown` -> Markdown string (`text/markdown`)
+     - `Accept: text/plain` (or omitted) -> plain extracted article text (`text/plain`, or Tesseract OCR text for `image/*` origins)
+     - `Accept: text/markdown` -> Markdown string (`text/markdown`, or Tesseract OCR Markdown for `image/*` origins)
      - `Accept: text/html` -> raw or Playwright-rendered HTML (`text/html`)
      - `Accept: application/pdf` -> raw PDF binary bytes (`application/pdf`)
+     - `Accept: image/png` / `image/jpeg` -> raw Playwright screenshot bytes (`image/png`, `image/jpeg`)
      - `Accept: application/json` -> JSON envelope with base64 content and metadata (`application/json`)
    - **Downstream caller invariant:** Clients requesting a single non-JSON format (`Accept: text/html`, `text/markdown`, `text/plain`) **must** read `response.text` / `response.content` — calling `response.json()` will fail with `JSONDecodeError`.
 2. **Multi-Format (`2+` MIME types, e.g. `Accept: text/html, text/markdown`):**
-   - Returns `application/json` keyed by MIME type (`{"text/html": "...", "text/markdown": "...", "application/pdf": "<base64>", "errors": {...}}`).
-3. **Browser Rendering Query Parameters:**
-   - `?render=true` forces headless Chromium rendering via Playwright, bypassing static HTML auto-detection.
-   - `?wait_for=<css-selector>` implies `render=true` and waits up to 10 seconds for the selector before capturing DOM output.
+   - Returns `application/json` keyed by MIME type (`{"text/html": "...", "text/markdown": "...", "application/pdf": "<base64>", "image/png": "<base64>", "errors": {...}}`).
+3. **Browser Rendering, Screenshot, OCR & Actions Parameters:**
+   - `?render=true` forces headless Chromium rendering via Playwright (single-pass `domcontentloaded` + bounded non-fatal `networkidle` settle).
+   - `?wait_for=<css-selector>` implies `render=true` and waits up to 10 seconds for the selector before capturing output.
+   - `?output=screenshot|pdf`, `?full_page=true`, and `?screenshot_format=png|jpeg` explicitly select screenshot or PDF capture.
+   - `?actions=<json>` (and `POST /render`) executes up to `20` strictly allowlisted declarative actions (`src/downloader/browser/actions.py`, zero raw JS eval).
+   - `?ocr=true` and `?ocr_lang=<lang>` enforce Tesseract OCR on `image/*` origins (`HTTP 503 ocr_unavailable` if `tesseract` binary is missing).
 
 ---
 
@@ -82,7 +86,7 @@ CI/CD is defined exclusively in [`cloudbuild.yaml`](../../cloudbuild.yaml) and [
 
 ## 5. `CRITICAL.md` Escalation & `.secrets.baseline` Hygiene
 
-1. **Protected Paths ([`CRITICAL.md`](../../CRITICAL.md)):** Any change touching `spec/`, `src/downloader/auth.py`, `src/downloader/validation.py`, `src/downloader/ssrf_transport.py`, `src/downloader/http_client.py`, `src/downloader/crawling/*`, `src/downloader/config.py`, `src/downloader/quota/*`, `src/downloader/ratelimit_middleware.py`, `src/downloader/browser/`, `src/downloader/pdf_generator.py`, `src/downloader/content_converter.py`, `Dockerfile`, `docker-compose.prod.yml`, `cloudbuild.yaml`, or `ci/trigger.yaml` requires explicit security and contract review before commit. `spec/` is status-free and protected — propose contract updates for review rather than editing `spec/` unprompted.
+1. **Protected Paths ([`CRITICAL.md`](../../CRITICAL.md)):** Any change touching `spec/`, `src/downloader/auth.py`, `src/downloader/validation.py`, `src/downloader/ssrf_transport.py`, `src/downloader/http_client.py`, `src/downloader/crawling/*`, `src/downloader/config.py`, `src/downloader/runtime_config.py`, `src/downloader/services/webhooks.py`, `src/downloader/quota/*`, `src/downloader/ratelimit_middleware.py`, `src/downloader/browser/`, `src/downloader/pdf_generator.py`, `src/downloader/content_converter.py`, `src/downloader/drain.py`, `src/downloader/worker.py`, `src/downloader/worker_queue.py`, `Dockerfile`, `docker-compose.split.yml`, `docker-compose.prod.yml`, `cloudbuild.yaml`, or `ci/trigger.yaml` requires explicit security and contract review before commit. `spec/` is status-free and protected — propose contract updates for review rather than editing `spec/` unprompted.
 2. **Secrets Baseline ([`.secrets.baseline`](../../.secrets.baseline)):** Pre-commit runs `detect-secrets`. When tracked files with allowlisted false-positive placeholders move or change line numbers, regenerate cleanly rather than hand-editing JSON hashes or line numbers:
    ```bash
    uv run --no-sync detect-secrets scan --baseline .secrets.baseline

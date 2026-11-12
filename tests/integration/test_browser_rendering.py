@@ -143,8 +143,10 @@ class TestBrowserRenderingJSContent:
         assert "\u2603" in decoded  # Snowman
         assert "\u4e2d\u6587" in decoded  # Chinese characters
 
-    async def test_render_navigates_with_networkidle(self, mock_playwright_for_rendering):
-        """Test that page.goto is called with wait_until='networkidle'."""
+    async def test_render_navigates_with_domcontentloaded_and_bounded_settle(
+        self, mock_playwright_for_rendering
+    ):
+        """Test single-pass domcontentloaded navigation followed by bounded networkidle settle."""
         mock_generator, mock_browser, mock_context, mock_page = mock_playwright_for_rendering
 
         mock_page.content.return_value = "<html><body>Content</body></html>"
@@ -154,8 +156,9 @@ class TestBrowserRenderingJSContent:
 
         mock_page.goto.assert_called_once()
         call_kwargs = mock_page.goto.call_args[1]
-        assert call_kwargs.get("wait_until") == "networkidle"
+        assert call_kwargs.get("wait_until") == "domcontentloaded"
         assert call_kwargs.get("timeout") == 10000
+        mock_page.wait_for_load_state.assert_called_once_with("networkidle", timeout=2500)
 
 
 @pytest.mark.integration
@@ -277,16 +280,20 @@ class TestBrowserRenderingTimeouts:
         # Verify cleanup still happens
         mock_context.close.assert_called_once()
 
-    async def test_networkidle_timeout(self, mock_playwright_for_rendering):
-        """Test handling of network idle timeout."""
+    async def test_networkidle_timeout_proceeds_with_dom_content(
+        self, mock_playwright_for_rendering
+    ):
+        """Bounded networkidle settle timeout is non-fatal when DOM is ready."""
         mock_generator, mock_browser, mock_context, mock_page = mock_playwright_for_rendering
 
         mock_page.goto.return_value = AsyncMock(status=200)
         mock_page.wait_for_load_state.side_effect = TimeoutError("Network idle timeout")
+        mock_page.content.return_value = "<html><body><article>Ready DOM</article></body></html>"
 
-        with pytest.raises((asyncio.TimeoutError, Exception)):
-            await render_html_with_playwright("https://example.com/ajax-heavy")
+        rendered = await render_html_with_playwright("https://example.com/ajax-heavy")
 
+        assert b"Ready DOM" in rendered
+        mock_page.goto.assert_called_once()
         mock_context.close.assert_called_once()
 
     async def test_cleanup_on_any_exception(self, mock_playwright_for_rendering):

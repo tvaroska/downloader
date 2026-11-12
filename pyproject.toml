@@ -1,6 +1,6 @@
 [project]
 name = "downloader"
-version = "0.6.1"
+version = "0.7.0"
 description = "REST API Downloader - High-performance web service for programmatic URL content downloading"
 readme = "README.md"
 requires-python = ">=3.10"
@@ -20,6 +20,14 @@ dependencies = [
     "slowapi>=0.1.9",
     "brotli>=1.2.0",
     "apscheduler>=3.10.0",
+    "pytesseract>=0.3.10",
+    "pillow>=10.0.0",
+    "opentelemetry-api>=1.28.0",
+    "opentelemetry-sdk>=1.28.0",
+    "opentelemetry-exporter-otlp-proto-http>=1.28.0",
+    "opentelemetry-instrumentation-fastapi>=0.49b0",
+    "opentelemetry-instrumentation-httpx>=0.49b0",
+    "opentelemetry-instrumentation-redis>=0.49b0",
 ]
 
 [build-system]

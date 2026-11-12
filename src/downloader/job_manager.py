@@ -111,6 +111,26 @@ class JobManager:
             logger.error(f"Failed to connect to Redis: {e}")
             raise
 
+    async def wait_for_active_jobs(self, timeout: float) -> bool:
+        """Wait up to ``timeout`` seconds for active background tasks to complete cleanly."""
+        pending = [task for task in self._background_tasks.values() if not task.done()]
+        if not pending:
+            return True
+        if timeout <= 0:
+            return False
+        logger.info(
+            f"Waiting up to {timeout:.1f}s for {len(pending)} active background job(s) to drain"
+        )
+        done, still_pending = await asyncio.wait(pending, timeout=timeout)
+        if still_pending:
+            logger.warning(
+                f"Background job drain timed out: {len(still_pending)} job(s) still running, "
+                f"{len(done)} completed"
+            )
+            return False
+        logger.info(f"Drained {len(done)} background job(s) cleanly")
+        return True
+
     async def disconnect(self):
         """Disconnect from Redis and cleanup connection pool."""
         # Cancel all running background tasks
@@ -338,6 +358,7 @@ class JobManager:
         """Start background job processing."""
 
         async def job_wrapper():
+            batch_req = args[0] if args and hasattr(args[0], "webhook_url") else None
             try:
                 await self.update_job_status(job_id, JobStatus.RUNNING)
                 logger.info(f"Starting background processing for job {job_id}")
@@ -345,11 +366,17 @@ class JobManager:
                 # Call the actual job processor
                 results, summary = await job_processor_func(job_id, *args, **kwargs)
 
-                # Store results and mark as completed
+                # Store results and mark as completed BEFORE emitting webhooks so callbacks see results
                 await self.store_job_results(job_id, results, summary)
                 await self.update_job_status(job_id, JobStatus.COMPLETED)
 
                 logger.info(f"Job {job_id} completed successfully")
+                if batch_req is not None and getattr(batch_req, "webhook_url", None):
+                    from .services.batch_processor import notify_batch_webhook
+
+                    await notify_batch_webhook(
+                        job_id, batch_req, JobStatus.COMPLETED, summary=summary
+                    )
 
             except asyncio.CancelledError:
                 await self.update_job_status(job_id, JobStatus.CANCELLED)
@@ -359,6 +386,10 @@ class JobManager:
             except Exception as e:
                 await self.update_job_status(job_id, JobStatus.FAILED, error_message=str(e))
                 logger.error(f"Job {job_id} failed: {e}")
+                if batch_req is not None and getattr(batch_req, "webhook_url", None):
+                    from .services.batch_processor import notify_batch_webhook
+
+                    await notify_batch_webhook(job_id, batch_req, JobStatus.FAILED, error=str(e))
 
             finally:
                 # Cleanup background task reference

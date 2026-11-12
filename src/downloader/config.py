@@ -13,6 +13,13 @@ from pydantic import Field, PrivateAttr, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 from . import __version__
+from .runtime_config import (
+    OCRConfig,
+    ShutdownConfig,
+    TelemetryConfig,
+    WebhookConfig,
+    WorkerConfig,
+)
 
 
 class HTTPClientConfig(BaseSettings):
@@ -635,6 +642,11 @@ class Settings(BaseSettings):
     cors: CORSConfig = Field(default_factory=CORSConfig)
     ratelimit: RateLimitConfig = Field(default_factory=RateLimitConfig)
     crawling: CrawlingConfig = Field(default_factory=CrawlingConfig)
+    ocr: OCRConfig = Field(default_factory=OCRConfig)
+    webhook: WebhookConfig = Field(default_factory=WebhookConfig)
+    shutdown: ShutdownConfig = Field(default_factory=ShutdownConfig)
+    worker: WorkerConfig = Field(default_factory=WorkerConfig)
+    telemetry: TelemetryConfig = Field(default_factory=TelemetryConfig)
 
     model_config = SettingsConfigDict(
         env_file=".env",
@@ -683,6 +695,10 @@ class Settings(BaseSettings):
         messages.append(f"INFO: Auth: {'enabled' if self.auth.api_key else 'disabled'}")
         messages.append(
             f"INFO: Rate limiting: {'enabled' if self.ratelimit.enabled else 'disabled'}"
+        )
+        messages.append(f"INFO: Deployment mode: {self.worker.deployment_mode}")
+        messages.append(
+            f"INFO: OpenTelemetry: {'enabled' if self.telemetry.enabled else 'disabled'}"
         )
 
         return messages

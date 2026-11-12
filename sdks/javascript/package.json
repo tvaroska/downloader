@@ -1,0 +1,21 @@
+{
+  "name": "@downloader/client",
+  "version": "0.7.0",
+  "description": "Zero-dependency typed JavaScript and TypeScript client for the REST API Downloader service.",
+  "type": "module",
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    }
+  },
+  "engines": {
+    "node": ">=18.0.0"
+  },
+  "scripts": {
+    "test": "node --test test/client.test.mjs"
+  },
+  "license": "MIT"
+}

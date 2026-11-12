@@ -2,11 +2,12 @@
 
 import asyncio
 import multiprocessing
+import time
 from collections.abc import AsyncIterator, Awaitable
 from contextlib import asynccontextmanager
 from typing import Any, cast
 
-from fastapi import FastAPI, HTTPException, Request
+from fastapi import FastAPI, HTTPException, Request, Response
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.openapi.docs import (
     get_redoc_html,
@@ -24,6 +25,7 @@ from .api import router
 from .auth import get_auth_status
 from .config import get_settings
 from .crawling import DomainThrottle, RobotsChecker
+from .drain import DrainCoordinator, DrainMiddleware
 from .http_client import HTTPClient
 from .job_manager import JobManager
 from .logging_config import get_logger, setup_logging
@@ -35,6 +37,8 @@ from .pdf_generator import (
 )
 from .ratelimit_middleware import RateLimitMiddleware, reset_rate_limiter
 from .scheduler import SchedulerService
+from .telemetry import configure_telemetry, shutdown_telemetry
+from .worker_queue import WorkerQueue
 
 # Load settings and configure logging
 settings = get_settings()
@@ -59,10 +63,19 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     # Store settings in app state (call get_settings() to support test env reloading)
     current_settings = get_settings()
     app.state.settings = current_settings
+    drain_coordinator: DrainCoordinator = (
+        getattr(app.state, "drain_coordinator", None) or DrainCoordinator()
+    )
+    drain_coordinator.reset()
+    app.state.drain_coordinator = drain_coordinator
     reset_rate_limiter(limiter)
+    configure_telemetry(current_settings.telemetry, app=app, service_version=__version__)
 
     # Log configuration validation messages
-    logger.info(f"Starting {current_settings.app_name} v{__version__}")
+    logger.info(
+        f"Starting {current_settings.app_name} v{__version__} "
+        f"(mode={current_settings.worker.deployment_mode})"
+    )
     logger.info(f"Environment: {current_settings.environment}")
     for message in current_settings.validate_settings():
         if "WARNING" in message:
@@ -130,9 +143,13 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         )
         await job_manager.connect()
         app.state.job_manager = job_manager
+        app.state.worker_queue = (
+            WorkerQueue(job_manager.redis_client) if job_manager.redis_client else None
+        )
         logger.info("Job manager initialized")
     else:
         app.state.job_manager = None
+        app.state.worker_queue = None
         logger.info("Job manager not initialized (Redis not configured)")
 
     # Initialize stateless-first ethical crawling (uses Redis when available, memory otherwise)
@@ -158,7 +175,8 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
             redis_uri=current_settings.redis.redis_uri,
             settings=current_settings.scheduler,
         )
-        await scheduler_service.start()
+        # In split API mode, keep APScheduler paused so workers execute cron runs without duplicates
+        await scheduler_service.start(paused=current_settings.worker.deployment_mode == "api")
         app.state.scheduler = scheduler_service
         logger.info("Scheduler initialized")
 
@@ -194,11 +212,23 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
 
     yield
 
-    # Shutdown - cleanup in reverse order
-    logger.info("Shutting down services...")
+    # Graceful connection and job draining prior to tearing down upstream resources
+    logger.info("Shutting down services (entering drain mode)...")
+    drain_coordinator.start_drain()
+    shutdown_start = time.monotonic()
+    drain_timeout = current_settings.shutdown.drain_timeout
+    await drain_coordinator.wait_until_drained(drain_timeout)
+
+    if app.state.job_manager:
+        remaining_drain = max(0.0, drain_timeout - (time.monotonic() - shutdown_start))
+        await app.state.job_manager.wait_for_active_jobs(remaining_drain)
 
     # Stop metrics collection
     await system_metrics.stop()
+
+    # Shutdown scheduler cleanly before closing HTTP/browser pools it may depend on
+    if app.state.scheduler:
+        await app.state.scheduler.shutdown(wait=True)
 
     # Close robots checker client
     if getattr(app.state, "robots_checker", None):
@@ -212,14 +242,12 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         await app.state.pdf_generator.close()
     await cleanup_pdf_generator()
 
-    # Shutdown scheduler if initialized
-    if app.state.scheduler:
-        await app.state.scheduler.shutdown()
-
     # Close job manager if initialized
     if app.state.job_manager:
         await app.state.job_manager.disconnect()
 
+    shutdown_telemetry()
+    drain_coordinator.reset()
     logger.info("All services shut down successfully")
 
 
@@ -234,16 +262,18 @@ app = FastAPI(
     lifespan=lifespan,
 )
 
-# Add rate limiter to app state and register exception handler
+# Add rate limiter & drain coordinator to app state and register exception handler
 app.state.limiter = limiter
+app.state.drain_coordinator = DrainCoordinator()
 app.add_exception_handler(
     RateLimitExceeded,
     cast(ExceptionHandler, _rate_limit_exceeded_handler),
 )
 
-# Add middleware in order: RateLimit first, then Metrics, then CORS
+# Add middleware in reverse execution order: CORS -> Drain -> Metrics -> RateLimit -> Route
 app.add_middleware(RateLimitMiddleware, limiter=limiter)
 app.add_middleware(MetricsMiddleware)
+app.add_middleware(DrainMiddleware)
 
 app.add_middleware(
     CORSMiddleware,
@@ -292,13 +322,17 @@ async def custom_redoc(request: Request) -> HTMLResponse:
     )
 
 
-@app.get("/health")
-async def health_check(request: Request) -> dict[str, Any]:
-    """Health check endpoint with configuration-aware monitoring."""
+@app.get("/health", response_model=None)
+async def health_check(request: Request) -> dict[str, Any] | Response:
+    """Health check endpoint with configuration-aware monitoring and drain status."""
     # Get settings and semaphores from app state
     app_settings = request.app.state.settings
     pdf_semaphore = request.app.state.pdf_semaphore
     batch_semaphore = request.app.state.batch_semaphore
+    drain_coordinator: DrainCoordinator | None = getattr(
+        request.app.state, "drain_coordinator", None
+    )
+    is_draining = bool(drain_coordinator and drain_coordinator.is_draining)
 
     # Get concurrency limits from config
     pdf_limit = app_settings.pdf.concurrency
@@ -364,10 +398,34 @@ async def health_check(request: Request) -> dict[str, Any]:
     else:
         scheduler_status["reason"] = "Redis connection required"
 
+    # Check split worker heartbeats & queue depths when Redis is available
+    workers_status: dict[str, Any] = {
+        "deployment_mode": app_settings.worker.deployment_mode,
+        "remote_browser_enabled": app_settings.worker.remote_browser_enabled,
+    }
+    worker_queue: WorkerQueue | None = getattr(request.app.state, "worker_queue", None)
+    if worker_queue is not None:
+        try:
+            active_workers = await worker_queue.list_active_workers()
+            queue_depths = await worker_queue.get_queue_depths()
+            workers_status.update(
+                {
+                    "active_workers": len(active_workers),
+                    "workers": active_workers,
+                    "queues": queue_depths,
+                }
+            )
+        except Exception as exc:
+            workers_status["error"] = str(exc)
+
     health_info: dict[str, Any] = {
-        "status": "healthy",
+        "status": "draining" if is_draining else "healthy",
+        "draining": is_draining,
+        "active_requests": drain_coordinator.active_requests if drain_coordinator else 0,
         "version": __version__,
         "environment": app_settings.environment,
+        "deployment_mode": app_settings.worker.deployment_mode,
+        "telemetry_enabled": app_settings.telemetry.enabled,
         "configuration": {
             "pdf_concurrency": pdf_limit,
             "batch_concurrency": batch_limit,
@@ -375,6 +433,8 @@ async def health_check(request: Request) -> dict[str, Any]:
             "cpu_cores": multiprocessing.cpu_count(),
             "respect_robots_txt": app_settings.crawling.respect_robots_txt,
             "user_agent": app_settings.crawling.user_agent,
+            "ocr_enabled": app_settings.ocr.enabled,
+            "webhooks_enabled": app_settings.webhook.enabled,
         },
         "services": {
             "job_manager": job_manager_status,
@@ -387,9 +447,12 @@ async def health_check(request: Request) -> dict[str, Any]:
                 "utilization_percent": round(pdf_util, 1),
             },
             "scheduler": scheduler_status,
+            "workers": workers_status,
         },
     }
     health_info.update(get_auth_status(app_settings))
+    if is_draining:
+        return JSONResponse(status_code=503, content=health_info)
     return health_info
 
 

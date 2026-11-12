@@ -1,16 +1,17 @@
 # Scheduling - Feature History
 
-**Last Updated:** 2026-01-21
+**Last Updated:** 2026-11-12
 
 ## Overview
 
-Enable recurring downloads and automated workflows through cron-based scheduling with APScheduler integration.
+Enable recurring downloads and automated workflows through cron-based scheduling with APScheduler integration and SSRF-safe HMAC-SHA256 webhook delivery.
 
 ---
 
-## Status: ✅ Complete (Sprint 3)
+## Status: ✅ Complete (Sprint 3 + `v0.7.0` Webhooks & Screenshots)
 
-Sprint 3 completed: 2026-01-21
+- Sprint 3 completed: 2026-01-21 (Cron scheduling, CRUD API, retry logic, execution history)
+- `v0.7.0` completed: 2026-11-12 (SSRF-safe HMAC-SHA256 completion/failure webhooks + `"screenshot"` output format)
 
 ---
 
@@ -22,12 +23,8 @@ Sprint 3 completed: 2026-01-21
 | Schedule CRUD API | P1 | Low | ✅ Complete |
 | Job history/logging | P2 | Low | ✅ Complete |
 | Job execution with retry | P1 | Medium | ✅ Complete |
-
-## Planned Features
-
-| Feature | Priority | Complexity | Status |
-|---------|----------|------------|--------|
-| Webhook on completion | P3 | Medium | 📋 Backlog |
+| Webhook on completion/failure (`webhook_url`, `webhook_secret`) | P2 | Medium | ✅ Complete (`v0.7.0`) |
+| Screenshot output format (`format: "screenshot"`) | P2 | Medium | ✅ Complete (`v0.7.0`) |
 
 ### API Implemented
 - `POST /schedules` - Create scheduled job with cron expression

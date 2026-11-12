@@ -5,12 +5,17 @@ import inspect
 import logging
 import os
 import time
+from collections.abc import Sequence
 from contextlib import asynccontextmanager
 from typing import Any
 from urllib.parse import urlparse
 
+from playwright.async_api import TimeoutError as PlaywrightTimeoutError
+
 from .browser import BrowserConfig, BrowserPool, BrowserPoolError
+from .browser.actions import BrowserAction, execute_browser_actions
 from .config import get_settings
+from .telemetry import get_tracer
 from .validation import URLValidationError, sanitize_user_agent, validate_url_async
 
 logger = logging.getLogger(__name__)
@@ -265,13 +270,22 @@ class PlaywrightPDFGenerator:
 
             self.mark_context_released()
 
-    async def generate_pdf(self, url: str, options: dict[str, Any] | None = None) -> bytes:
+    async def generate_pdf(
+        self,
+        url: str,
+        options: dict[str, Any] | None = None,
+        *,
+        actions: Sequence[BrowserAction] | None = None,
+        wait_for_selector: str | None = None,
+    ) -> bytes:
         """
         Generate PDF from URL using optimized browser pool with automatic resource cleanup.
 
         Args:
             url: The URL to convert to PDF
             options: PDF generation options
+            actions: Optional declarative browser actions to run before PDF capture
+            wait_for_selector: Optional CSS selector to wait for before capture
 
         Returns:
             PDF content as bytes
@@ -280,7 +294,7 @@ class PlaywrightPDFGenerator:
             PDFGeneratorError: If PDF generation fails
         """
         # Default PDF options - use instance settings
-        pdf_options = {
+        pdf_options: dict[str, Any] = {
             "format": "A4",
             "print_background": True,
             "margin": {
@@ -297,78 +311,183 @@ class PlaywrightPDFGenerator:
         if options:
             pdf_options.update(options)
 
-        try:
-            # Use automatic resource cleanup with async context manager
-            async with self._get_browser_context() as (browser, context):
-                # Create page in isolated context
-                page = await context.new_page()
-                try:
-                    logger.info(f"Loading page: {url}")
-
-                    # Navigate to page with timeout
+        tracer = get_tracer(__name__)
+        with tracer.start_as_current_span("playwright.generate_pdf") as span:
+            span.set_attribute("http.url", url)
+            try:
+                async with self._get_browser_context() as (browser, context):
+                    page = await context.new_page()
                     try:
-                        response = await page.goto(
-                            url,
-                            wait_until=pdf_options.get("wait_for", "networkidle"),
-                            timeout=pdf_options.get("timeout", 30000),
+                        logger.info(f"Loading page: {url}")
+                        timeout_ms = int(pdf_options.get("timeout", 30000))
+
+                        try:
+                            response = await page.goto(
+                                url,
+                                wait_until=pdf_options.get("wait_for", "networkidle"),
+                                timeout=timeout_ms,
+                            )
+
+                            if not response:
+                                raise PDFGeneratorError(f"Failed to load page: {url}")
+
+                            if response.status >= 400:
+                                raise PDFGeneratorError(
+                                    f"HTTP {response.status}: {response.status_text}",
+                                    status_code=response.status,
+                                )
+
+                        except (PlaywrightTimeoutError, TimeoutError):
+                            raise PDFGeneratorError(f"Timeout loading page: {url}")
+
+                        await page.wait_for_load_state(
+                            "networkidle",
+                            timeout=timeout_ms,
                         )
+
+                        if wait_for_selector:
+                            await page.wait_for_selector(
+                                wait_for_selector,
+                                timeout=timeout_ms,
+                                state="visible",
+                            )
+
+                        if actions:
+                            await execute_browser_actions(
+                                page, actions, default_timeout_ms=timeout_ms
+                            )
+
+                        await self._close_modals(page)
+
+                        logger.info("Generating PDF...")
+
+                        pdf_bytes = await page.pdf(
+                            format=pdf_options.get("format", "A4"),
+                            print_background=pdf_options.get("print_background", True),
+                            margin=pdf_options.get(
+                                "margin",
+                                {
+                                    "top": "20px",
+                                    "right": "20px",
+                                    "bottom": "20px",
+                                    "left": "20px",
+                                },
+                            ),
+                            prefer_css_page_size=True,
+                            display_header_footer=False,
+                        )
+
+                        logger.info(f"PDF generated successfully, size: {len(pdf_bytes)} bytes")
+                        span.set_attribute("pdf.bytes", len(pdf_bytes))
+                        return pdf_bytes
+
+                    finally:
+                        if page:
+                            try:
+                                await page.close()
+                            except Exception:
+                                pass
+
+            except PDFGeneratorError:
+                raise
+            except Exception as e:
+                logger.error(f"Unexpected error generating PDF: {e}")
+                raise PDFGeneratorError(f"PDF generation failed: {e}")
+
+    async def generate_screenshot(
+        self,
+        url: str,
+        options: dict[str, Any] | None = None,
+        *,
+        actions: Sequence[BrowserAction] | None = None,
+        wait_for_selector: str | None = None,
+    ) -> bytes:
+        """Capture a PNG or JPEG screenshot from a URL using the shared browser pool."""
+        shot_options: dict[str, Any] = {
+            "type": "png",
+            "full_page": False,
+            "timeout": self.page_load_timeout,
+        }
+        if options:
+            shot_options.update(options)
+
+        image_type = shot_options.get("type", "png")
+        if image_type not in ("png", "jpeg"):
+            raise PDFGeneratorError(f"Unsupported screenshot format: {image_type}")
+
+        tracer = get_tracer(__name__)
+        with tracer.start_as_current_span("playwright.screenshot") as span:
+            span.set_attribute("http.url", url)
+            span.set_attribute("screenshot.type", image_type)
+            span.set_attribute("screenshot.full_page", bool(shot_options.get("full_page", False)))
+            try:
+                async with self._get_browser_context() as (browser, context):
+                    page = await context.new_page()
+                    try:
+                        timeout_ms = int(shot_options.get("timeout", self.page_load_timeout))
+                        try:
+                            response = await page.goto(
+                                url,
+                                wait_until="domcontentloaded",
+                                timeout=timeout_ms,
+                            )
+                        except (PlaywrightTimeoutError, TimeoutError):
+                            raise PDFGeneratorError(f"Timeout loading page: {url}")
 
                         if not response:
                             raise PDFGeneratorError(f"Failed to load page: {url}")
-
                         if response.status >= 400:
                             raise PDFGeneratorError(
                                 f"HTTP {response.status}: {response.status_text}",
                                 status_code=response.status,
                             )
 
-                    except TimeoutError:
-                        raise PDFGeneratorError(f"Timeout loading page: {url}")
-
-                    # Wait for page to be fully loaded
-                    await page.wait_for_load_state(
-                        "networkidle",
-                        timeout=pdf_options.get("timeout", 30000),
-                    )
-
-                    # Try to close any signup boxes/modals
-                    await self._close_modals(page)
-
-                    logger.info("Generating PDF...")
-
-                    # Generate PDF with specified options
-                    pdf_bytes = await page.pdf(
-                        format=pdf_options.get("format", "A4"),
-                        print_background=pdf_options.get("print_background", True),
-                        margin=pdf_options.get(
-                            "margin",
-                            {
-                                "top": "20px",
-                                "right": "20px",
-                                "bottom": "20px",
-                                "left": "20px",
-                            },
-                        ),
-                        prefer_css_page_size=True,
-                        display_header_footer=False,
-                    )
-
-                    logger.info(f"PDF generated successfully, size: {len(pdf_bytes)} bytes")
-                    return pdf_bytes
-
-                finally:
-                    # Close page resources
-                    if page:
+                        settle_ms = min(timeout_ms, 2500)
                         try:
-                            await page.close()
-                        except Exception:
-                            pass  # Ignore errors during cleanup
+                            await page.wait_for_load_state("networkidle", timeout=settle_ms)
+                        except (PlaywrightTimeoutError, TimeoutError):
+                            logger.debug(
+                                f"Proceeding with screenshot after {settle_ms}ms settle: {url}"
+                            )
 
-        except PDFGeneratorError:
-            raise
-        except Exception as e:
-            logger.error(f"Unexpected error generating PDF: {e}")
-            raise PDFGeneratorError(f"PDF generation failed: {e}")
+                        if wait_for_selector:
+                            await page.wait_for_selector(
+                                wait_for_selector,
+                                timeout=timeout_ms,
+                                state="visible",
+                            )
+
+                        if actions:
+                            await execute_browser_actions(
+                                page, actions, default_timeout_ms=timeout_ms
+                            )
+
+                        await self._close_modals(page)
+
+                        screenshot_kwargs: dict[str, Any] = {
+                            "type": image_type,
+                            "full_page": bool(shot_options.get("full_page", False)),
+                        }
+                        if image_type == "jpeg" and "quality" in shot_options:
+                            screenshot_kwargs["quality"] = int(shot_options["quality"])
+
+                        screenshot_bytes: bytes = await page.screenshot(**screenshot_kwargs)
+                        span.set_attribute("screenshot.bytes", len(screenshot_bytes))
+                        logger.info(
+                            f"Screenshot captured ({image_type}), size: {len(screenshot_bytes)} bytes"
+                        )
+                        return screenshot_bytes
+                    finally:
+                        if page:
+                            try:
+                                await page.close()
+                            except Exception:
+                                pass
+            except PDFGeneratorError:
+                raise
+            except Exception as e:
+                logger.error(f"Unexpected error capturing screenshot: {e}")
+                raise PDFGeneratorError(f"Screenshot generation failed: {e}")
 
     async def _close_modals(self, page):
         """Helper method to close common modal dialogs."""
@@ -438,22 +557,40 @@ async def get_pdf_generator():
         raise
 
 
-async def generate_pdf_from_url(url: str, options: dict[str, Any] | None = None) -> bytes:
-    """
-    Generate PDF from URL using shared generator instance.
-
-    Args:
-        url: The URL to convert to PDF
-        options: PDF generation options
-
-    Returns:
-        PDF content as bytes
-
-    Raises:
-        PDFGeneratorError: If PDF generation fails
-    """
+async def generate_pdf_from_url(
+    url: str,
+    options: dict[str, Any] | None = None,
+    *,
+    actions: Sequence[BrowserAction] | None = None,
+    wait_for_selector: str | None = None,
+) -> bytes:
+    """Generate PDF from URL using shared generator instance."""
     async with get_pdf_generator() as generator:
+        if actions or wait_for_selector:
+            return await generator.generate_pdf(
+                url,
+                options,
+                actions=actions,
+                wait_for_selector=wait_for_selector,
+            )
         return await generator.generate_pdf(url, options)
+
+
+async def generate_screenshot_from_url(
+    url: str,
+    options: dict[str, Any] | None = None,
+    *,
+    actions: Sequence[BrowserAction] | None = None,
+    wait_for_selector: str | None = None,
+) -> bytes:
+    """Capture a screenshot from URL using shared generator instance."""
+    async with get_pdf_generator() as generator:
+        return await generator.generate_screenshot(
+            url,
+            options,
+            actions=actions,
+            wait_for_selector=wait_for_selector,
+        )
 
 
 def set_shared_pdf_generator(generator: PlaywrightPDFGenerator | None) -> None:
