@@ -5,7 +5,8 @@ description = "REST API Downloader - High-performance web service for programmat
 readme = "README.md"
 requires-python = ">=3.10"
 dependencies = [
-    "fastapi>=0.104.0",
+    "fastapi>=0.136.3",
+    "starlette>=1.0.1",
     "uvicorn[standard]>=0.24.0",
     "httpx[http2]>=0.25.0",
     "pydantic>=2.0.0",
