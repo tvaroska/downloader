@@ -1,0 +1,18 @@
+{
+  "config": [
+    "mypy:not-strict",
+    "python:below-3.12",
+    "ruff-ignore:B904",
+    "ruff-ignore:E722",
+    "ruff:ANN",
+    "ruff:C90",
+    "ruff:PLR0911",
+    "ruff:PLR0912",
+    "ruff:PLR0913",
+    "ruff:PLR0915",
+    "ruff:RUF",
+    "ruff:S"
+  ],
+  "oversized_files": {},
+  "narration_comments": 18
+}

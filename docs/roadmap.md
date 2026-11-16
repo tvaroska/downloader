@@ -61,7 +61,9 @@ This document outlines the strategic priorities, completed releases, and deferre
 - Production hardening: streaming `CONTENT_MAX_DOWNLOAD_SIZE` (`HTTP 413` `content_too_large`), redirect & Playwright SSRF route blocking, active `RateLimitMiddleware` (`HTTP 429` + `Retry-After` + `X-RateLimit-*`), `BrowserPool` max-use recycling (`PDF_MAX_USES_PER_BROWSER=50`) & idle scale-to-zero (`PDF_IDLE_TIMEOUT=600s`), structured JSON `uvicorn.access` `path`/`method`/`status_code` fields, and unprivileged container port `:8000`
 - See [docs/features/ethical-crawling.md](features/ethical-crawling.md)
 
-### Deferred Preview (Post-`v0.7.0` / `v0.8.0+`): Multi-Tenant Quotas
+### Deferred Preview (`v0.7.1` Reliability & Post-`v0.7.0` / `v0.8.0+` Multi-Tenant Quotas)
+
+- [ ] **P1 (`v0.7.1` — Binary `Content-Type` Guard Against `OOMKilled` on Text/Multi-Format Routes, `services` `F-2026-11-16-002`):** Guard text, HTML, markdown, and multi-format conversion paths (`src/downloader/http_client.py:190-197,245-274`, `src/downloader/services/content_processor.py:626-627`, and `src/downloader/services/multi_format.py:133-150`) so non-text binary `Content-Type`s (`audio/*`, `video/*`, `application/octet-stream`, archives) are rejected early (`HTTP 415` / structured format error) before buffering up to `50 MB` and running `.decode()` + `json.dumps()` across parallel format tasks.
 
 **Post-`v0.7.0` Backlog** (Deferred until multi-key or Redis-backed multi-tenant deployment): Multi-Tenant Per-Key Quotas
 - 7 tasks (`S5-be-1`..`S5-be-5`, `S5-test-1`, `S5-doc-1`), ~21 hours effort
