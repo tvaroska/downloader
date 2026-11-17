@@ -71,6 +71,10 @@ This document outlines the strategic priorities, completed releases, and deferre
 - `QuotaConfig`, per-key request/bandwidth counters, `X-RateLimit-{Limit,Remaining,Reset}` headers, `GET /usage`, and `HTTP 429` with `Retry-After`
 - Deferred past `v0.7.0` because single-key stateless Kubernetes deployments without `REDIS_URI` do not need Redis-backed tenant accounting (`slowapi` `memory://` already enforces global endpoint rate limits); if activated later, quota storage should support `QUOTA_STORAGE_URI → REDIS_URI → memory://` parity
 
+**Post-`v0.7.0` Backlog — Stateless MCP `2026-07-28` Adapter**
+- Expose extraction, Playwright `render_pdf`, and `/batch` crawls over stateless `2026-07-28` Streamable HTTP MCP using `SEP-2663` Tasks (`io.modelcontextprotocol/tasks`) for non-blocking async jobs
+- Return extracted markdown/PDF outputs as `downloader://jobs/{id}/article.md` MCP Resources instead of inlining large page bodies into tool responses
+
 ### Completed: Sprint 3 — Scheduling API ✅
 
 **Sprint 3** (Complete): Scheduling CRUD API
