@@ -3,12 +3,10 @@
 import httpx
 import pytest
 
-from src.downloader.http_client import (
+from downloader.http_client import (
     HTTPClient,
     HTTPClientError,
     HTTPTimeoutError,
-    close_client,
-    get_client,
 )
 
 
@@ -97,13 +95,11 @@ class TestHTTPClient:
             assert client is not None
 
     @pytest.mark.asyncio
-    async def test_global_client(self):
-        client1 = await get_client()
-        client2 = await get_client()
-        assert client1 is client2
-
-        await close_client()
-
-        client3 = await get_client()
-        assert client3 is not client1
-        await close_client()
+    async def test_injected_transport(self):
+        transport = httpx.MockTransport(
+            lambda request: httpx.Response(200, content=b"injected", request=request)
+        )
+        async with HTTPClient(transport=transport) as client:
+            body, meta = await client.download("https://example.com")
+            assert body == b"injected"
+            assert meta["status_code"] == 200

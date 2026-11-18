@@ -3,6 +3,7 @@
 import os
 import subprocess
 import sys
+from typing import Any
 
 import pytest
 
@@ -165,7 +166,7 @@ class TestEndpoints:
             "Content-Type": "application/json",
         }
 
-        batch_request = {
+        batch_request: dict[str, Any] = {
             "urls": [
                 {"url": "https://example.com"},
                 {"url": "https://example.org"},

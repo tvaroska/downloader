@@ -2,13 +2,11 @@
 
 import time
 
-from src.downloader.metrics import (
+from downloader.metrics import (
     MetricsCollector,
-    MetricSnapshot,
     PerformanceMetrics,
     get_metrics_collector,
     increment_counter,
-    record_html_rendering_cache_hit,
     record_html_rendering_detection,
     record_html_rendering_duration,
     record_html_rendering_failure,
@@ -402,46 +400,6 @@ class TestMetricsCollectorPrometheus:
         assert 'le="+Inf"' in output
 
 
-class TestMetricsCollectorRecentMetrics:
-    """Tests for recent metrics retrieval."""
-
-    def test_get_recent_metrics_empty(self):
-        """Test get_recent_metrics returns empty list for non-existent metric."""
-        collector = MetricsCollector()
-        result = collector.get_recent_metrics("nonexistent", seconds=300)
-        assert result == []
-
-    def test_get_recent_metrics_within_window(self):
-        """Test get_recent_metrics returns metrics within time window."""
-        collector = MetricsCollector()
-        collector.set_gauge("test", 1.0)
-        collector.set_gauge("test", 2.0)
-
-        result = collector.get_recent_metrics("test", seconds=300)
-
-        assert len(result) == 2
-
-    def test_get_recent_metrics_outside_window(self):
-        """Test get_recent_metrics excludes metrics outside time window."""
-        collector = MetricsCollector()
-
-        # Add an old metric by manipulating history directly
-        old_snapshot = MetricSnapshot(
-            timestamp=time.time() - 600,  # 10 minutes ago
-            value=1.0,
-        )
-        collector._metrics_history["test"].append(old_snapshot)
-
-        # Add a recent metric
-        collector.set_gauge("test", 2.0)
-
-        # Only get last 5 minutes
-        result = collector.get_recent_metrics("test", seconds=300)
-
-        assert len(result) == 1
-        assert result[0].value == 2.0
-
-
 class TestHealthScore:
     """Tests for system health score calculation."""
 
@@ -577,7 +535,7 @@ class TestModuleFunctions:
     def test_record_request_wrapper(self):
         """Test record_request module function delegates to collector."""
         # Reset global collector
-        import src.downloader.metrics as metrics_module
+        import downloader.metrics as metrics_module
 
         metrics_module._metrics_collector = MetricsCollector()
 
@@ -588,7 +546,7 @@ class TestModuleFunctions:
 
     def test_set_gauge_wrapper(self):
         """Test set_gauge module function delegates to collector."""
-        import src.downloader.metrics as metrics_module
+        import downloader.metrics as metrics_module
 
         metrics_module._metrics_collector = MetricsCollector()
 
@@ -599,7 +557,7 @@ class TestModuleFunctions:
 
     def test_increment_counter_wrapper(self):
         """Test increment_counter module function delegates to collector."""
-        import src.downloader.metrics as metrics_module
+        import downloader.metrics as metrics_module
 
         metrics_module._metrics_collector = MetricsCollector()
 
@@ -614,7 +572,7 @@ class TestHTMLRenderingMetrics:
 
     def test_record_html_rendering_detection(self):
         """Test record_html_rendering_detection increments counter."""
-        import src.downloader.metrics as metrics_module
+        import downloader.metrics as metrics_module
 
         metrics_module._metrics_collector = MetricsCollector()
 
@@ -623,20 +581,9 @@ class TestHTMLRenderingMetrics:
         collector = get_metrics_collector()
         assert collector._counters["html_rendering_detections_total"] == 1
 
-    def test_record_html_rendering_cache_hit(self):
-        """Test record_html_rendering_cache_hit increments counter."""
-        import src.downloader.metrics as metrics_module
-
-        metrics_module._metrics_collector = MetricsCollector()
-
-        record_html_rendering_cache_hit()
-
-        collector = get_metrics_collector()
-        assert collector._counters["html_rendering_cache_hits_total"] == 1
-
     def test_record_html_rendering_duration(self):
         """Test record_html_rendering_duration updates histogram and gauge."""
-        import src.downloader.metrics as metrics_module
+        import downloader.metrics as metrics_module
 
         metrics_module._metrics_collector = MetricsCollector()
 
@@ -648,7 +595,7 @@ class TestHTMLRenderingMetrics:
 
     def test_record_html_rendering_failure(self):
         """Test record_html_rendering_failure increments counter."""
-        import src.downloader.metrics as metrics_module
+        import downloader.metrics as metrics_module
 
         metrics_module._metrics_collector = MetricsCollector()
 
@@ -659,7 +606,7 @@ class TestHTMLRenderingMetrics:
 
     def test_record_html_rendering_success(self):
         """Test record_html_rendering_success increments counter and sets ratio."""
-        import src.downloader.metrics as metrics_module
+        import downloader.metrics as metrics_module
 
         metrics_module._metrics_collector = MetricsCollector()
 
@@ -671,7 +618,7 @@ class TestHTMLRenderingMetrics:
 
     def test_record_html_rendering_success_zero_original(self):
         """Test record_html_rendering_success handles zero original size."""
-        import src.downloader.metrics as metrics_module
+        import downloader.metrics as metrics_module
 
         metrics_module._metrics_collector = MetricsCollector()
 

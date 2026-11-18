@@ -8,9 +8,10 @@ from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Any
 
 from apscheduler.triggers.cron import CronTrigger
-from fastapi import APIRouter, Depends, HTTPException, Path, Query
+from fastapi import APIRouter, Depends, HTTPException, Path, Query, Request
 
 from ..auth import get_api_key
+from ..config import Settings, get_settings
 from ..dependencies import ExecutionStorageDep, SchedulerDep
 from ..models.responses import ErrorResponse
 from ..models.schedule import (
@@ -27,30 +28,20 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 
-# Module-level executor reference (set at startup via set_executor())
 _executor: ScheduledJobExecutor | None = None
-
-
-def set_executor(executor: ScheduledJobExecutor) -> None:
-    """Set the executor instance for scheduled jobs.
-
-    This function is called at application startup to inject the executor
-    dependency into this module. APScheduler jobs run outside FastAPI's
-    request context, so we use this module-level reference instead.
-
-    Args:
-        executor: The executor instance to use for job execution.
-    """
-    global _executor
-    _executor = executor
-    logger.info("Executor set for scheduled jobs")
-
 
 router = APIRouter()
 
 
+def set_executor(executor: ScheduledJobExecutor | None) -> None:
+    """Register the `ScheduledJobExecutor` invoked by APScheduler cron triggers."""
+    global _executor
+    _executor = executor
+    if executor is not None:
+        logger.info("Executor set for scheduled jobs")
+
+
 def _require_scheduler(scheduler: SchedulerDep) -> SchedulerService:
-    """Get scheduler service or raise 503 if not available."""
     if scheduler is None:
         raise HTTPException(
             status_code=503,
@@ -62,7 +53,7 @@ def _require_scheduler(scheduler: SchedulerDep) -> SchedulerService:
     return scheduler
 
 
-async def scheduled_download_job(
+async def scheduled_download_job(  # noqa: PLR0913
     schedule_id: str,
     url: str,
     format: str,
@@ -71,25 +62,12 @@ async def scheduled_download_job(
     webhook_secret: str | None = None,
     **_extra: Any,
 ) -> None:
-    """Job function executed by APScheduler for scheduled downloads.
-
-    This function is called by APScheduler when a scheduled job triggers.
-    It delegates to the executor for actual download execution with retry logic.
-
-    Args:
-        schedule_id: Unique identifier for the schedule.
-        url: URL to download.
-        format: Output format (text, markdown, html, pdf, screenshot, json, raw).
-        headers: Optional custom HTTP headers.
-        webhook_url: Optional HTTP(S) callback URL notified after completion/failure.
-        webhook_secret: Optional HMAC-SHA256 signing secret.
-    """
+    """Entrypoint invoked by APScheduler when a scheduled cron job fires."""
     if _executor is None:
         logger.error(f"[SCHEDULE-{schedule_id}] Executor not initialized, cannot execute job")
         return
 
     logger.info(f"[SCHEDULE-{schedule_id}] Starting execution: {url} (format={format})")
-
     try:
         execution = await _executor.execute(
             schedule_id,
@@ -99,7 +77,6 @@ async def scheduled_download_job(
             webhook_url=webhook_url,
             webhook_secret=webhook_secret,
         )
-
         if execution.success:
             logger.info(
                 f"[SCHEDULE-{schedule_id}] Completed in {execution.duration:.2f}s "
@@ -110,68 +87,78 @@ async def scheduled_download_job(
                 f"[SCHEDULE-{schedule_id}] Failed after {execution.attempt} attempts: "
                 f"{execution.error_message}"
             )
-    except Exception as e:
-        logger.exception(f"[SCHEDULE-{schedule_id}] Unexpected error during execution: {e}")
+    except Exception as exc:  # noqa: BLE001
+        # Prevent unhandled callback exceptions from crashing APScheduler's event-loop runner.
+        logger.exception(f"[SCHEDULE-{schedule_id}] Unexpected error during execution: {exc}")
 
 
 def _format_cron_trigger(trigger: CronTrigger) -> str:
-    """Format CronTrigger back to cron expression string."""
     if hasattr(trigger, "fields"):
-        # APScheduler CronTrigger fields: second, minute, hour, day, month, day_of_week, year
-        # We extract minute through day_of_week (indices 1-5) for standard 5-field cron
         fields = trigger.fields
         if len(fields) >= 6:
             return f"{fields[1]} {fields[2]} {fields[3]} {fields[4]} {fields[5]}"
-    # Fallback: return string representation
     return str(trigger)
+
+
+def _job_to_schedule_response(job: Any) -> ScheduleResponse:
+    kwargs = job.kwargs or {}
+    created_at_str = kwargs.get("created_at")
+    created_at = datetime.fromisoformat(created_at_str) if created_at_str else datetime.now(UTC)
+    stored_expr = kwargs.get("cron_expression")
+    cron_expr = stored_expr if isinstance(stored_expr, str) else _format_cron_trigger(job.trigger)
+    return ScheduleResponse(
+        id=job.id,
+        name=job.name or "",
+        url=kwargs.get("url", ""),
+        cron_expression=cron_expr,
+        format=kwargs.get("format", "text"),
+        headers=kwargs.get("headers"),
+        enabled=job.next_run_time is not None,
+        created_at=created_at,
+        next_run_time=job.next_run_time,
+        webhook_url=kwargs.get("webhook_url"),
+    )
 
 
 @router.post("/schedules", response_model=ScheduleResponse)
 async def create_schedule(
     schedule_data: ScheduleCreate,
+    request: Request,
     scheduler: SchedulerDep = None,
-    api_key: str | None = Depends(get_api_key),
+    _api_key: str | None = Depends(get_api_key),
 ) -> ScheduleResponse:
-    """Create a new scheduled download job.
-
-    The cron expression must be in standard 5-field UNIX format:
-    minute hour day_of_month month day_of_week
-
-    Examples:
-    - "0 9 * * *" - Daily at 9 AM
-    - "0 9 * * 1-5" - Weekdays at 9 AM
-    - "*/15 * * * *" - Every 15 minutes
-    """
+    """Create a new scheduled download job."""
     svc = _require_scheduler(scheduler)
+    active_settings: Settings = getattr(request.app.state, "settings", None) or get_settings()
 
     try:
-        validated_url = await validate_url_async(schedule_data.url)
+        validated_url = await validate_url_async(schedule_data.url, active_settings)
         validated_webhook_url = (
-            await validate_url_async(schedule_data.webhook_url)
+            await validate_url_async(schedule_data.webhook_url, active_settings)
             if schedule_data.webhook_url
             else None
         )
         sanitized_headers = sanitize_custom_headers(schedule_data.headers)
+        trigger = CronTrigger.from_crontab(schedule_data.cron_expression)
+    except (ValueError, URLValidationError) as exc:
+        raise HTTPException(
+            status_code=400,
+            detail=ErrorResponse(error=str(exc), error_type="validation_error").model_dump(),
+        ) from exc
 
-        # Generate unique ID
+    try:
         schedule_id = str(uuid.uuid4())
         created_at = datetime.now(UTC)
-
-        # Create cron trigger from expression
-        trigger = CronTrigger.from_crontab(schedule_data.cron_expression)
-
-        # Store schedule metadata in job's kwargs for later retrieval
         job_kwargs = {
             "schedule_id": schedule_id,
             "url": validated_url,
             "format": schedule_data.format,
             "headers": sanitized_headers,
             "created_at": created_at.isoformat(),
+            "cron_expression": schedule_data.cron_expression,
             "webhook_url": validated_webhook_url,
             "webhook_secret": schedule_data.webhook_secret,
         }
-
-        # Add job to scheduler
         job = svc.scheduler.add_job(
             func=scheduled_download_job,
             trigger=trigger,
@@ -180,13 +167,10 @@ async def create_schedule(
             kwargs=job_kwargs,
             replace_existing=False,
         )
-
-        # Pause job if not enabled
         if not schedule_data.enabled:
             job.pause()
 
         logger.info(f"Created schedule {schedule_id}: {schedule_data.name}")
-
         return ScheduleResponse(
             id=schedule_id,
             name=schedule_data.name,
@@ -199,97 +183,52 @@ async def create_schedule(
             next_run_time=job.next_run_time,
             webhook_url=validated_webhook_url,
         )
-
-    except (ValueError, URLValidationError) as e:
-        # Cron validation error (should be caught by Pydantic, but handle here too)
-        raise HTTPException(
-            status_code=400,
-            detail=ErrorResponse(
-                error=str(e),
-                error_type="validation_error",
-            ).model_dump(),
-        ) from e
     except HTTPException:
         raise
-    except Exception as e:
-        logger.exception(f"Failed to create schedule: {e}")
+    except Exception as exc:  # noqa: BLE001
+        logger.exception(f"Failed to create schedule: {exc}")
         raise HTTPException(
             status_code=500,
             detail=ErrorResponse(
                 error="Failed to create schedule",
                 error_type="schedule_creation_error",
             ).model_dump(),
-        ) from e
+        ) from exc
 
 
 @router.get("/schedules", response_model=ScheduleListResponse)
 async def list_schedules(
     scheduler: SchedulerDep = None,
-    api_key: str | None = Depends(get_api_key),
+    _api_key: str | None = Depends(get_api_key),
 ) -> ScheduleListResponse:
     """List all scheduled download jobs."""
     svc = _require_scheduler(scheduler)
-
     try:
-        jobs = svc.get_jobs()
-
-        schedules = []
-        for job in jobs:
-            # Extract schedule data from job kwargs
-            kwargs = job.kwargs or {}
-
-            # Parse created_at from kwargs, fallback to now if not stored
-            created_at_str = kwargs.get("created_at")
-            if created_at_str:
-                created_at = datetime.fromisoformat(created_at_str)
-            else:
-                created_at = datetime.now(UTC)
-
-            schedules.append(
-                ScheduleResponse(
-                    id=job.id,
-                    name=job.name or "",
-                    url=kwargs.get("url", ""),
-                    cron_expression=_format_cron_trigger(job.trigger),
-                    format=kwargs.get("format", "text"),
-                    headers=kwargs.get("headers"),
-                    enabled=job.next_run_time is not None,
-                    created_at=created_at,
-                    next_run_time=job.next_run_time,
-                    webhook_url=kwargs.get("webhook_url"),
-                )
-            )
-
-        return ScheduleListResponse(
-            schedules=schedules,
-            total=len(schedules),
-        )
-
+        schedules = [_job_to_schedule_response(job) for job in svc.get_jobs()]
+        return ScheduleListResponse(schedules=schedules, total=len(schedules))
     except HTTPException:
         raise
-    except Exception as e:
-        logger.exception(f"Failed to list schedules: {e}")
+    except Exception as exc:  # noqa: BLE001
+        logger.exception(f"Failed to list schedules: {exc}")
         raise HTTPException(
             status_code=500,
             detail=ErrorResponse(
                 error="Failed to list schedules",
                 error_type="schedule_list_error",
             ).model_dump(),
-        ) from e
+        ) from exc
 
 
 @router.get("/schedules/{schedule_id}", response_model=ScheduleResponse)
 async def get_schedule(
     schedule_id: str = Path(..., description="Schedule identifier"),
     scheduler: SchedulerDep = None,
-    api_key: str | None = Depends(get_api_key),
+    _api_key: str | None = Depends(get_api_key),
 ) -> ScheduleResponse:
     """Get details of a specific scheduled job."""
     svc = _require_scheduler(scheduler)
-
     try:
         job = svc.get_job(schedule_id)
-
         if job is None:
             raise HTTPException(
                 status_code=404,
@@ -298,62 +237,33 @@ async def get_schedule(
                     error_type="schedule_not_found",
                 ).model_dump(),
             )
-
-        kwargs = job.kwargs or {}
-
-        # Parse created_at from kwargs
-        created_at_str = kwargs.get("created_at")
-        if created_at_str:
-            created_at = datetime.fromisoformat(created_at_str)
-        else:
-            created_at = datetime.now(UTC)
-
-        return ScheduleResponse(
-            id=job.id,
-            name=job.name or "",
-            url=kwargs.get("url", ""),
-            cron_expression=_format_cron_trigger(job.trigger),
-            format=kwargs.get("format", "text"),
-            headers=kwargs.get("headers"),
-            enabled=job.next_run_time is not None,
-            created_at=created_at,
-            next_run_time=job.next_run_time,
-            webhook_url=kwargs.get("webhook_url"),
-        )
-
+        return _job_to_schedule_response(job)
     except HTTPException:
         raise
-    except Exception as e:
-        logger.exception(f"Failed to get schedule {schedule_id}: {e}")
+    except Exception as exc:  # noqa: BLE001
+        logger.exception(f"Failed to get schedule {schedule_id}: {exc}")
         raise HTTPException(
             status_code=500,
             detail=ErrorResponse(
                 error="Failed to get schedule",
                 error_type="schedule_get_error",
             ).model_dump(),
-        ) from e
+        ) from exc
 
 
 @router.get("/schedules/{schedule_id}/history", response_model=ScheduleExecutionListResponse)
-async def get_schedule_history(
+async def get_schedule_history(  # noqa: PLR0913
     schedule_id: str = Path(..., description="Schedule identifier"),
     limit: int = Query(20, ge=1, le=100, description="Maximum results per page"),
     offset: int = Query(0, ge=0, description="Number of results to skip"),
     scheduler: SchedulerDep = None,
     execution_storage: ExecutionStorageDep = None,
-    api_key: str | None = Depends(get_api_key),
+    _api_key: str | None = Depends(get_api_key),
 ) -> ScheduleExecutionListResponse:
-    """Get execution history for a scheduled job.
-
-    Returns past executions ordered by start time (newest first).
-    Each execution includes start time, duration, status, and error message if failed.
-    """
+    """Get paginated execution history for a scheduled job."""
     svc = _require_scheduler(scheduler)
-
     try:
-        # Verify schedule exists
         job = svc.get_job(schedule_id)
-
         if job is None:
             raise HTTPException(
                 status_code=404,
@@ -362,8 +272,6 @@ async def get_schedule_history(
                     error_type="schedule_not_found",
                 ).model_dump(),
             )
-
-        # Check execution storage is available
         if execution_storage is None:
             raise HTTPException(
                 status_code=503,
@@ -373,42 +281,37 @@ async def get_schedule_history(
                 ).model_dump(),
             )
 
-        # Get executions with pagination
         executions = await execution_storage.get_executions(schedule_id, limit, offset)
         total = await execution_storage.get_execution_count(schedule_id)
-
         return ScheduleExecutionListResponse(
             executions=executions,
             total=total,
             limit=limit,
             offset=offset,
         )
-
     except HTTPException:
         raise
-    except Exception as e:
-        logger.exception(f"Failed to get history for schedule {schedule_id}: {e}")
+    except Exception as exc:  # noqa: BLE001
+        logger.exception(f"Failed to get history for schedule {schedule_id}: {exc}")
         raise HTTPException(
             status_code=500,
             detail=ErrorResponse(
                 error="Failed to get schedule history",
                 error_type="schedule_history_error",
             ).model_dump(),
-        ) from e
+        ) from exc
 
 
 @router.delete("/schedules/{schedule_id}")
 async def delete_schedule(
     schedule_id: str = Path(..., description="Schedule identifier"),
     scheduler: SchedulerDep = None,
-    api_key: str | None = Depends(get_api_key),
-) -> dict:
+    _api_key: str | None = Depends(get_api_key),
+) -> dict[str, Any]:
     """Remove a scheduled job."""
     svc = _require_scheduler(scheduler)
-
     try:
         job = svc.get_job(schedule_id)
-
         if job is None:
             raise HTTPException(
                 status_code=404,
@@ -417,23 +320,17 @@ async def delete_schedule(
                     error_type="schedule_not_found",
                 ).model_dump(),
             )
-
         svc.remove_job(schedule_id)
         logger.info(f"Deleted schedule {schedule_id}")
-
-        return {
-            "success": True,
-            "message": f"Schedule {schedule_id} deleted successfully",
-        }
-
+        return {"success": True, "message": f"Schedule {schedule_id} deleted successfully"}
     except HTTPException:
         raise
-    except Exception as e:
-        logger.exception(f"Failed to delete schedule {schedule_id}: {e}")
+    except Exception as exc:  # noqa: BLE001
+        logger.exception(f"Failed to delete schedule {schedule_id}: {exc}")
         raise HTTPException(
             status_code=500,
             detail=ErrorResponse(
                 error="Failed to delete schedule",
                 error_type="schedule_deletion_error",
             ).model_dump(),
-        ) from e
+        ) from exc

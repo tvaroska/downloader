@@ -1,11 +1,14 @@
-"""Image-to-text OCR transformer backed by Pillow and pytesseract."""
+"""Image-to-text OCR transformer backed by Pillow, pytesseract, and a dedicated executor."""
 
 from __future__ import annotations
 
 import asyncio
 import io
 import logging
+import os
 import re
+import threading
+from concurrent.futures import ThreadPoolExecutor
 
 import pytesseract
 from PIL import Image, UnidentifiedImageError
@@ -28,6 +31,9 @@ SUPPORTED_IMAGE_MIME_TYPES = frozenset(
     }
 )
 
+_ocr_executor: ThreadPoolExecutor | None = None
+_ocr_executor_lock = threading.Lock()
+
 
 class OCRError(Exception):
     """Base error for image OCR extraction failures."""
@@ -39,6 +45,29 @@ class OCRUnavailableError(OCRError):
 
 class OCRProcessingError(OCRError):
     """Raised when an image payload cannot be decoded or OCR fails/times out."""
+
+
+def _get_ocr_executor() -> ThreadPoolExecutor:
+    """Return a dedicated bounded thread pool so CPU-bound OCR never starves DNS lookups."""
+    global _ocr_executor
+    with _ocr_executor_lock:
+        if _ocr_executor is None:
+            workers = max(2, min(4, os.cpu_count() or 2))
+            _ocr_executor = ThreadPoolExecutor(
+                max_workers=workers,
+                thread_name_prefix="downloader-ocr",
+            )
+        return _ocr_executor
+
+
+def shutdown_ocr_executor() -> None:
+    """Shut down the dedicated OCR thread pool if initialized."""
+    global _ocr_executor
+    with _ocr_executor_lock:
+        executor = _ocr_executor
+        _ocr_executor = None
+    if executor is not None:
+        executor.shutdown(wait=False, cancel_futures=True)
 
 
 def is_ocr_image_content_type(content_type: str | None) -> bool:
@@ -65,11 +94,19 @@ def _run_tesseract_sync(
     timeout: float,
     max_image_pixels: int,
 ) -> str:
-    # Protect against decompression bombs before decoding arbitrary remote images.
+    # Pillow raises DecompressionBombError only above 2x MAX_IMAGE_PIXELS, so enforce
+    # the configured pixel cap explicitly on img.size before decoding pixel buffers.
     prev_limit = Image.MAX_IMAGE_PIXELS
     Image.MAX_IMAGE_PIXELS = max_image_pixels
     try:
         with Image.open(io.BytesIO(image_bytes)) as img:
+            width, height = img.size
+            pixel_count = width * height
+            if pixel_count > max_image_pixels:
+                raise OCRProcessingError(
+                    f"Image dimensions ({width}x{height} = {pixel_count} pixels) exceed "
+                    f"configured maximum ({max_image_pixels} pixels)"
+                )
             img.load()
             text: str = pytesseract.image_to_string(
                 img,
@@ -77,6 +114,8 @@ def _run_tesseract_sync(
                 timeout=timeout,
             )
             return _normalize_ocr_text(text)
+    except OCRProcessingError:
+        raise
     except pytesseract.TesseractNotFoundError as exc:
         raise OCRUnavailableError(
             "OCR engine (tesseract-ocr) is not installed on this runtime."
@@ -104,7 +143,7 @@ async def extract_text_from_image(
     language: str | None = None,
     settings: Settings | None = None,
 ) -> str:
-    """Extract text from image bytes asynchronously in a worker thread."""
+    """Extract text from image bytes asynchronously in the dedicated OCR thread pool."""
     cfg = settings or get_settings()
     if not cfg.ocr.enabled:
         raise OCRUnavailableError(
@@ -112,11 +151,13 @@ async def extract_text_from_image(
         )
 
     effective_lang = validate_ocr_language(language, cfg.ocr.default_language)
+    loop = asyncio.get_running_loop()
     tracer = get_tracer(__name__)
     with tracer.start_as_current_span("ocr.extract_text") as span:
         span.set_attribute("ocr.language", effective_lang)
         span.set_attribute("ocr.input_bytes", len(image_bytes))
-        text = await asyncio.to_thread(
+        text = await loop.run_in_executor(
+            _get_ocr_executor(),
             _run_tesseract_sync,
             image_bytes,
             effective_lang,

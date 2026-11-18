@@ -1,0 +1,129 @@
+# Declarative Structural & Security AST Contract (ast-grep)
+# Enforces Ports, Adapters and Contracts boundaries and auth invariants (`R45`, `R46`, `R54`, `R72`):
+# 1. `auth.py` must compare API keys via `secrets.compare_digest`, never `==` / `!=`.
+# 2. `services/` must never import `fastapi` or `starlette`.
+# 3. Core/service modules must never import `main`, `routes`, or `pytest` test hooks.
+# 4. All imports use canonical `downloader.*`, never `src.downloader.*`.
+# 5. `subprocess(..., shell=True)`, `os.system()`, and `eval()` are forbidden in `src/`.
+
+id: auth-no-direct-equality-on-keys
+language: Python
+severity: error
+message: "Security violation (R54): API keys/tokens in auth.py must be compared with secrets.compare_digest(), never == or !=."
+files:
+  - "src/downloader/auth.py"
+metadata:
+  test_path: "src/downloader/auth.py"
+  invalid_examples:
+    - "return api_key == expected"  # pragma: allowlist secret
+    - "return expected == api_key"  # pragma: allowlist secret
+    - "if api_key != expected:\n    return False"  # pragma: allowlist secret
+    - "return token == expected"  # pragma: allowlist secret
+  valid_examples:
+    - "return secrets.compare_digest(api_key.encode('utf-8'), expected.encode('utf-8'))"
+    - "if expected is None:\n    return True"
+    - "return scheme.lower() == 'bearer'"
+rule:
+  kind: comparison_operator
+  regex: "\\b(api_key|expected|token|secret|credentials)\\b.*(==|!=)|(==|!=).*\\b(api_key|expected|token|secret|credentials)\\b"
+---
+id: services-no-fastapi-imports
+language: Python
+severity: error
+message: "Port violation (R45): src/downloader/services/ must remain transport-agnostic and never import fastapi or starlette."
+files:
+  - "src/downloader/services/**/*.py"
+metadata:
+  test_path: "src/downloader/services/probe.py"
+  invalid_examples:
+    - "from fastapi import HTTPException, Response"
+    - "import fastapi"
+    - "from starlette.responses import JSONResponse"
+  valid_examples:
+    - "from .content_negotiation import format_to_mime_type"
+    - "import json"
+rule:
+  any:
+    - kind: import_statement
+      regex: "(?s)^import\\s+(.+,\\s*)*(fastapi|starlette)(\\b|\\.)"
+    - kind: import_from_statement
+      regex: "(?s)^from\\s+(fastapi|starlette)(\\b|\\.)"
+---
+id: no-main-or-routes-import-in-core
+language: Python
+severity: error
+message: "Port violation (R46): core/service modules must not import main, routes, or branch on pytest."
+files:
+  - "src/downloader/**/*.py"
+ignores:
+  - "src/downloader/main.py"
+  - "src/downloader/api.py"
+  - "src/downloader/worker.py"
+  - "src/downloader/routes/**"
+metadata:
+  test_path: "src/downloader/services/probe.py"
+  invalid_examples:
+    - "from ..main import app"
+    - "from downloader.main import app"
+    - "from ..routes import batch"
+    - "import pytest"
+  valid_examples:
+    - "from ..ports import BrowserRenderer, JobStore, WorkQueue"
+    - "from ..validation import EgressPolicy"
+rule:
+  any:
+    - kind: import_statement
+      regex: "(?s)^import\\s+(.+,\\s*)*(pytest|downloader\\.(main|routes))(\\b|\\.)"
+    - kind: import_from_statement
+      regex: "(?s)^from\\s+(pytest|(downloader\\.|\\.+\\s*)(main|routes))(\\b|\\.)"
+    - kind: import_from_statement
+      regex: "(?s)^from\\s+(downloader|\\.+)+\\s+import\\s+(.*[\\s,(])?(main|routes)\\b"
+---
+id: no-dual-module-src-downloader-imports
+language: Python
+severity: error
+message: "Import hygiene (R72): import 'downloader.*', never 'src.downloader.*'."
+files:
+  - "src/**/*.py"
+  - "tests/**/*.py"
+  - "examples/**/*.py"
+ignores:
+  - "tests/smoke/test_repo_hygiene.py"
+  - "tests/test_isolation_guard.py"
+metadata:
+  test_path: "tests/unit/probe.py"
+  invalid_examples:
+    - "from src.downloader.main import app"
+    - "import src.downloader.config"
+  valid_examples:
+    - "from downloader.main import app"
+    - "import downloader.config"
+rule:
+  any:
+    - kind: import_statement
+      regex: "(?s)^import\\s+(.+,\\s*)*src\\.downloader(\\b|\\.)"
+    - kind: import_from_statement
+      regex: "(?s)^from\\s+src(\\.downloader\\b|\\s+import\\s+downloader\\b)"
+---
+id: no-subprocess-shell-true-or-eval
+language: Python
+severity: error
+message: "Security violation: subprocess with shell=True, os.system(), and eval() are forbidden in src/."
+files:
+  - "src/**/*.py"
+metadata:
+  test_path: "src/downloader/probe.py"
+  invalid_examples:
+    - "subprocess.run(cmd, shell=True)"
+    - "os.system(cmd)"
+    - "eval(raw_expr)"
+  valid_examples:
+    - "int(raw_value)"
+rule:
+  any:
+    - pattern: subprocess.$FN($$$, shell=True)
+    - pattern: subprocess.$FN($$$, shell=True, $$$)
+    - pattern: subprocess.$FN(shell=True)
+    - pattern: subprocess.$FN(shell=True, $$$)
+    - pattern: os.system($$$)
+    - pattern: eval($$$)

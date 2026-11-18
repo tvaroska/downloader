@@ -10,6 +10,7 @@ import logging
 from collections.abc import Sequence
 from typing import Any, Literal
 
+from playwright.async_api import Error as PlaywrightError
 from playwright.async_api import TimeoutError as PlaywrightTimeoutError
 from pydantic import BaseModel, Field, ValidationError, model_validator
 
@@ -108,6 +109,43 @@ def parse_actions_param(raw: str | None) -> list[BrowserAction]:
     return actions
 
 
+async def _run_selector_action(page: Any, action: BrowserAction, timeout: int) -> None:
+    assert action.selector is not None
+    if action.type == "click":
+        await page.click(action.selector, timeout=timeout)
+    elif action.type == "fill":
+        assert action.value is not None
+        await page.fill(action.selector, action.value, timeout=timeout)
+    elif action.type == "select":
+        assert action.value is not None
+        await page.select_option(action.selector, action.value, timeout=timeout)
+    elif action.type == "hover":
+        await page.hover(action.selector, timeout=timeout)
+    else:
+        await page.wait_for_selector(action.selector, timeout=timeout, state="visible")
+
+
+async def _dispatch_single_action(page: Any, action: BrowserAction, timeout: int) -> None:
+    if action.type == "press":
+        assert action.key is not None
+        if action.selector:
+            await page.press(action.selector, action.key, timeout=timeout)
+        else:
+            await page.keyboard.press(action.key)
+        return
+    if action.type == "scroll":
+        if action.selector:
+            locator = page.locator(action.selector).first
+            await locator.scroll_into_view_if_needed(timeout=timeout)
+        else:
+            await page.mouse.wheel(action.x, action.y)
+        return
+    if action.type == "wait":
+        await page.wait_for_timeout(action.duration_ms)
+        return
+    await _run_selector_action(page, action, timeout)
+
+
 async def execute_browser_actions(
     page: Any,
     actions: Sequence[BrowserAction],
@@ -127,41 +165,13 @@ async def execute_browser_actions(
         for idx, action in enumerate(actions):
             timeout = min(action.timeout_ms, default_timeout_ms)
             try:
-                if action.type == "click":
-                    assert action.selector is not None
-                    await page.click(action.selector, timeout=timeout)
-                elif action.type == "fill":
-                    assert action.selector is not None and action.value is not None
-                    await page.fill(action.selector, action.value, timeout=timeout)
-                elif action.type == "select":
-                    assert action.selector is not None and action.value is not None
-                    await page.select_option(action.selector, action.value, timeout=timeout)
-                elif action.type == "press":
-                    assert action.key is not None
-                    if action.selector:
-                        await page.press(action.selector, action.key, timeout=timeout)
-                    else:
-                        await page.keyboard.press(action.key)
-                elif action.type == "hover":
-                    assert action.selector is not None
-                    await page.hover(action.selector, timeout=timeout)
-                elif action.type == "scroll":
-                    if action.selector:
-                        locator = page.locator(action.selector).first
-                        await locator.scroll_into_view_if_needed(timeout=timeout)
-                    else:
-                        await page.mouse.wheel(action.x, action.y)
-                elif action.type == "wait_for_selector":
-                    assert action.selector is not None
-                    await page.wait_for_selector(action.selector, timeout=timeout, state="visible")
-                elif action.type == "wait":
-                    await page.wait_for_timeout(action.duration_ms)
+                await _dispatch_single_action(page, action, timeout)
                 executed += 1
             except (PlaywrightTimeoutError, TimeoutError) as exc:
                 raise BrowserActionError(
                     f"Action #{idx} ({action.type}) timed out after {timeout}ms: {exc}"
                 ) from exc
-            except Exception as exc:
+            except (PlaywrightError, RuntimeError, OSError, ValueError, AssertionError) as exc:
                 raise BrowserActionError(f"Action #{idx} ({action.type}) failed: {exc}") from exc
 
         span.set_attribute("browser.actions.executed", executed)

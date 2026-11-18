@@ -8,15 +8,15 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
-from src.downloader.browser.egress_proxy import BrowserEgressProxy
-from src.downloader.browser.manager import BrowserPool
-from src.downloader.content_converter import render_html_with_playwright
-from src.downloader.pdf_generator import (
+from downloader.browser.egress_proxy import BrowserEgressProxy
+from downloader.browser.manager import BrowserPool
+from downloader.content_converter import render_html_with_playwright
+from downloader.pdf_generator import (
     PlaywrightPDFGenerator,
     install_ssrf_route_guard,
     validate_browser_navigation,
 )
-from src.downloader.validation import SSRFProtectionError
+from downloader.validation import SSRFProtectionError
 
 
 @pytest.mark.unit
@@ -87,7 +87,7 @@ class TestBrowserSSRFRedirectAndContextHardening:
 
         with (
             patch(
-                "src.downloader.content_converter.get_shared_pdf_generator",
+                "downloader.content_converter.get_shared_pdf_generator",
                 return_value=mock_gen,
             ),
             pytest.raises(SSRFProtectionError),

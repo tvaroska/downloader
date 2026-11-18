@@ -8,20 +8,20 @@ from unittest.mock import AsyncMock, patch
 
 import pytest
 
-from src.downloader.dependencies import (
+from downloader.dependencies import (
     get_http_client,
     get_job_manager_dependency,
 )
-from src.downloader.http_client import HTTPClientError, HTTPTimeoutError
-from src.downloader.job_manager import JobStatus
-from src.downloader.main import app
-from src.downloader.models.responses import BatchRequest, BatchURLRequest
-from src.downloader.pdf_generator import PDFGeneratorError
-from src.downloader.routes.batch import (
+from downloader.http_client import HTTPClientError, HTTPTimeoutError
+from downloader.job_manager import JobStatus
+from downloader.main import app
+from downloader.models.responses import BatchRequest, BatchURLRequest
+from downloader.pdf_generator import PDFGeneratorError
+from downloader.services.batch_processor import (
     process_background_batch_job,
     process_single_url_in_batch,
 )
-from src.downloader.validation import URLValidationError
+from downloader.validation import URLValidationError
 
 
 class TestBatchProcessing:
@@ -101,7 +101,7 @@ class TestBatchProcessing:
         mock_job_manager,
     ):
         """Test batch processing with mix of successful and failed URLs."""
-        from src.downloader.http_client import HTTPClientError
+        from downloader.http_client import HTTPClientError
 
         def mock_download_side_effect(url, priority=None):
             if "fail.com" in url:
@@ -220,7 +220,7 @@ class TestBatchProcessing:
         mock_job_manager,
     ):
         """Test batch processing with timeout scenarios."""
-        from src.downloader.http_client import HTTPTimeoutError
+        from downloader.http_client import HTTPTimeoutError
 
         mock_client = AsyncMock()
         mock_client.download.side_effect = HTTPTimeoutError("Request timed out")
@@ -368,45 +368,40 @@ class TestProcessSingleUrlInBatch:
         """Test successful text format processing."""
         url_request = BatchURLRequest(url="https://example.com", format="text")
 
-        with patch("src.downloader.routes.batch._playwright_fallback_for_content") as mock_fallback:
-            mock_fallback.return_value = "Hello World"
-
-            result = await process_single_url_in_batch(
-                url_request=url_request,
-                default_format="text",
-                timeout=30,
-                request_id="TEST-001",
-                http_client=mock_http_client,
-                pdf_semaphore=pdf_semaphore,
-            )
+        result = await process_single_url_in_batch(
+            url_request=url_request,
+            default_format="text",
+            timeout=30,
+            request_id="TEST-001",
+            http_client=mock_http_client,
+            pdf_semaphore=pdf_semaphore,
+        )
 
         assert result.success is True
         assert result.format == "text"
-        assert result.content == "Hello World"
+        assert result.content is not None
+        assert "Hello World" in result.content
         assert result.status_code == 200
-        assert result.size == len(b"Hello World")
-        assert result.duration > 0
+        assert result.size == len(result.content.encode("utf-8"))
+        assert result.duration is not None and result.duration > 0
 
     @pytest.mark.asyncio
     async def test_markdown_format_success(self, mock_http_client, pdf_semaphore):
         """Test successful markdown format processing."""
         url_request = BatchURLRequest(url="https://example.com", format="markdown")
 
-        with patch("src.downloader.routes.batch._playwright_fallback_for_content") as mock_fallback:
-            mock_fallback.return_value = "# Hello World"
-
-            result = await process_single_url_in_batch(
-                url_request=url_request,
-                default_format="text",
-                timeout=30,
-                request_id="TEST-001",
-                http_client=mock_http_client,
-                pdf_semaphore=pdf_semaphore,
-            )
+        result = await process_single_url_in_batch(
+            url_request=url_request,
+            default_format="text",
+            timeout=30,
+            request_id="TEST-001",
+            http_client=mock_http_client,
+            pdf_semaphore=pdf_semaphore,
+        )
 
         assert result.success is True
         assert result.format == "markdown"
-        assert result.content == "# Hello World"
+        assert result.content is not None and "Hello World" in result.content
         assert result.status_code == 200
 
     @pytest.mark.asyncio
@@ -425,7 +420,7 @@ class TestProcessSingleUrlInBatch:
 
         assert result.success is True
         assert result.format == "html"
-        assert "<html>" in result.content
+        assert result.content is not None and "<html>" in result.content
         assert result.status_code == 200
         assert result.content_type == "text/html"
 
@@ -438,7 +433,7 @@ class TestProcessSingleUrlInBatch:
             return b"%PDF-1.4 test pdf content"
 
         with patch(
-            "src.downloader.routes.batch.generate_pdf_from_url",
+            "downloader.pdf_generator.generate_pdf_from_url",
             side_effect=mock_generate_pdf,
         ):
             result = await process_single_url_in_batch(
@@ -477,6 +472,7 @@ class TestProcessSingleUrlInBatch:
         assert result.content_type == "application/json"
         assert result.status_code == 200
 
+        assert result.content is not None
         parsed = json.loads(result.content)
         assert parsed["success"] is True
         assert "content" in parsed
@@ -511,7 +507,7 @@ class TestProcessSingleUrlInBatch:
         url_request = BatchURLRequest(url="invalid-url", format="text")
 
         with patch(
-            "src.downloader.routes.batch.validate_url_async", new_callable=AsyncMock
+            "downloader.services.batch_processor.validate_url_async", new_callable=AsyncMock
         ) as mock_validate:
             mock_validate.side_effect = URLValidationError("Invalid URL format")
 
@@ -527,7 +523,7 @@ class TestProcessSingleUrlInBatch:
         assert result.success is False
         assert result.error_type == "validation_error"
         assert result.status_code == 400
-        assert "Invalid URL format" in result.error
+        assert result.error is not None and "Invalid URL format" in result.error
 
     @pytest.mark.asyncio
     async def test_asyncio_timeout_error(self, pdf_semaphore):
@@ -548,7 +544,7 @@ class TestProcessSingleUrlInBatch:
         assert result.success is False
         assert result.error_type == "timeout_error"
         assert result.status_code == 408
-        assert "timeout" in result.error.lower()
+        assert result.error is not None and "timeout" in result.error.lower()
 
     @pytest.mark.asyncio
     async def test_http_timeout_error(self, pdf_semaphore):
@@ -569,7 +565,7 @@ class TestProcessSingleUrlInBatch:
         assert result.success is False
         assert result.error_type == "timeout_error"
         assert result.status_code == 408
-        assert "timed out" in result.error.lower()
+        assert result.error is not None and "timed out" in result.error.lower()
 
     @pytest.mark.asyncio
     async def test_http_client_error_with_status(self, pdf_semaphore):
@@ -622,7 +618,7 @@ class TestProcessSingleUrlInBatch:
             raise PDFGeneratorError("Failed to generate PDF")
 
         with patch(
-            "src.downloader.routes.batch.generate_pdf_from_url",
+            "downloader.pdf_generator.generate_pdf_from_url",
             side_effect=mock_generate_pdf_error,
         ):
             result = await process_single_url_in_batch(
@@ -637,7 +633,7 @@ class TestProcessSingleUrlInBatch:
         assert result.success is False
         assert result.error_type == "pdf_generation_error"
         assert result.status_code == 500
-        assert "PDF generation failed" in result.error
+        assert result.error is not None and "PDF generation failed" in result.error
 
     @pytest.mark.asyncio
     async def test_unexpected_exception(self, pdf_semaphore):
@@ -747,17 +743,14 @@ class TestProcessBackgroundBatchJob:
             timeout_per_url=30,
         )
 
-        with patch("src.downloader.routes.batch._playwright_fallback_for_content") as mock_fallback:
-            mock_fallback.return_value = "content"
-
-            results, summary = await process_background_batch_job(
-                job_id="test-job-1",
-                batch_request=batch_request,
-                job_manager=mock_job_manager,
-                batch_semaphore=batch_semaphore,
-                http_client=mock_http_client,
-                pdf_semaphore=pdf_semaphore,
-            )
+        results, summary = await process_background_batch_job(
+            job_id="test-job-1",
+            batch_request=batch_request,
+            job_manager=mock_job_manager,
+            batch_semaphore=batch_semaphore,
+            http_client=mock_http_client,
+            pdf_semaphore=pdf_semaphore,
+        )
 
         assert len(results) == 3
         assert all(r["success"] for r in results)
@@ -833,9 +826,9 @@ class TestProcessBackgroundBatchJob:
         )
 
         with patch(
-            "src.downloader.routes.batch.validate_url_async",
+            "downloader.services.batch_processor.validate_url_async",
             new_callable=AsyncMock,
-            side_effect=lambda url: url,
+            side_effect=lambda url, *_args: url,
         ):
             results, summary = await process_background_batch_job(
                 job_id="test-job-3",

@@ -5,16 +5,24 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import logging
-from urllib.parse import urlsplit
+from urllib.parse import SplitResult, urlsplit
 
 from ..config import get_settings
-from ..validation import URLValidationError, resolve_and_validate_host_async
+from ..validation import EgressPolicy, URLValidationError, resolve_and_validate_host_async
 
 logger = logging.getLogger(__name__)
 
 _HEADER_READ_LIMIT = 65536
 _CONNECT_TIMEOUT_SECONDS = 15.0
 _PUMP_CHUNK_BYTES = 65536
+_HOP_BY_HOP_HEADERS = frozenset(
+    {
+        "proxy-connection",
+        "proxy-authorization",
+        "connection",
+        "keep-alive",
+    }
+)
 
 
 def _split_host_port(authority: str, default_port: int) -> tuple[str, int]:
@@ -42,6 +50,36 @@ def _split_host_port(authority: str, default_port: int) -> tuple[str, int]:
     return raw, default_port
 
 
+def _rewrite_http_request_head(
+    method: str,
+    version: str,
+    parsed: SplitResult,
+    header_lines: list[str],
+) -> bytes:
+    origin_path = parsed.path or "/"
+    if parsed.query:
+        origin_path = f"{origin_path}?{parsed.query}"
+
+    forwarded_headers: list[str] = [f"{method} {origin_path} {version}"]
+    has_host = False
+    for hdr in header_lines:
+        if not hdr or ":" not in hdr:
+            continue
+        h_name, _ = hdr.split(":", 1)
+        h_lower = h_name.strip().lower()
+        if h_lower in _HOP_BY_HOP_HEADERS:
+            continue
+        if h_lower == "host":
+            has_host = True
+        forwarded_headers.append(hdr)
+
+    if not has_host:
+        host_hdr = parsed.netloc or (parsed.hostname or "")
+        forwarded_headers.append(f"Host: {host_hdr}")
+    forwarded_headers.append("Connection: close")
+    return ("\r\n".join(forwarded_headers) + "\r\n\r\n").encode("latin-1")
+
+
 async def _pump_stream(reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
     """Forward bytes until EOF or peer disconnect."""
     try:
@@ -54,16 +92,25 @@ async def _pump_stream(reader: asyncio.StreamReader, writer: asyncio.StreamWrite
     except (ConnectionError, asyncio.CancelledError, OSError):
         pass
     finally:
-        with contextlib.suppress(Exception):
+        with contextlib.suppress(OSError, RuntimeError):
             if writer.can_write_eof():
                 writer.write_eof()
+
+
+async def _close_writer(writer: asyncio.StreamWriter | None) -> None:
+    if writer is None:
+        return
+    writer.close()
+    with contextlib.suppress(OSError, RuntimeError, ConnectionError):
+        await writer.wait_closed()
 
 
 class BrowserEgressProxy:
     """Loopback forward proxy that validates and IP-pins every Chromium HTTP and CONNECT hop."""
 
-    def __init__(self) -> None:
+    def __init__(self, *, egress_policy: EgressPolicy | None = None) -> None:
         self._server: asyncio.Server | None = None
+        self._egress_policy = egress_policy
         self.port: int = 0
 
     @property
@@ -92,7 +139,7 @@ class BrowserEgressProxy:
         self._server = None
         self.port = 0
         server.close()
-        with contextlib.suppress(Exception):
+        with contextlib.suppress(OSError, RuntimeError):
             await server.wait_closed()
 
     async def _send_error(
@@ -108,7 +155,7 @@ class BrowserEgressProxy:
             + body
         )
         writer.write(payload)
-        with contextlib.suppress(Exception):
+        with contextlib.suppress(OSError, RuntimeError, ConnectionError):
             await writer.drain()
 
     async def _open_pinned_upstream(
@@ -118,12 +165,59 @@ class BrowserEgressProxy:
     ) -> tuple[asyncio.StreamReader, asyncio.StreamWriter]:
         if not (1 <= port <= 65535):
             raise URLValidationError(f"Invalid port: {port}")
-        validated_ips = await resolve_and_validate_host_async(host, port, get_settings())
+        if self._egress_policy is not None:
+            validated_ips = await self._egress_policy.resolve_host(host, port)
+        else:
+            validated_ips = await resolve_and_validate_host_async(host, port, get_settings())
         connect_target = validated_ips[0] if validated_ips else host
         return await asyncio.wait_for(
             asyncio.open_connection(connect_target, port),
             timeout=_CONNECT_TIMEOUT_SECONDS,
         )
+
+    async def _forward_connect(
+        self,
+        target: str,
+        client_reader: asyncio.StreamReader,
+        client_writer: asyncio.StreamWriter,
+    ) -> asyncio.StreamWriter:
+        host, port = _split_host_port(target, 443)
+        upstream_reader, upstream_writer = await self._open_pinned_upstream(host, port)
+        client_writer.write(b"HTTP/1.1 200 Connection Established\r\n\r\n")
+        await client_writer.drain()
+        await asyncio.gather(
+            _pump_stream(client_reader, upstream_writer),
+            _pump_stream(upstream_reader, client_writer),
+        )
+        return upstream_writer
+
+    async def _forward_http(
+        self,
+        request_line: tuple[str, str, str],
+        header_lines: list[str],
+        client_reader: asyncio.StreamReader,
+        client_writer: asyncio.StreamWriter,
+    ) -> asyncio.StreamWriter | None:
+        method, target, version = request_line
+        parsed = urlsplit(target)
+        if parsed.scheme.lower() != "http" or not parsed.hostname:
+            await self._send_error(
+                client_writer,
+                b"HTTP/1.1 403 Forbidden",
+                b"Blocked non-HTTP scheme in browser proxy",
+            )
+            return None
+
+        port = parsed.port or 80
+        upstream_reader, upstream_writer = await self._open_pinned_upstream(parsed.hostname, port)
+        rewritten_head = _rewrite_http_request_head(method, version, parsed, header_lines)
+        upstream_writer.write(rewritten_head)
+        await upstream_writer.drain()
+        await asyncio.gather(
+            _pump_stream(client_reader, upstream_writer),
+            _pump_stream(upstream_reader, client_writer),
+        )
+        return upstream_writer
 
     async def _handle_client(
         self,
@@ -151,86 +245,21 @@ class BrowserEgressProxy:
                 return
 
             method, target, version = parts
-            method_upper = method.upper()
-
-            if method_upper == "CONNECT":
-                host, port = _split_host_port(target, 443)
-                upstream_reader, upstream_writer = await self._open_pinned_upstream(host, port)
-                client_writer.write(b"HTTP/1.1 200 Connection Established\r\n\r\n")
-                await client_writer.drain()
-                await asyncio.gather(
-                    _pump_stream(client_reader, upstream_writer),
-                    _pump_stream(upstream_reader, client_writer),
+            if method.upper() == "CONNECT":
+                upstream_writer = await self._forward_connect(target, client_reader, client_writer)
+            else:
+                upstream_writer = await self._forward_http(
+                    (method, target, version), lines[1:], client_reader, client_writer
                 )
-                return
-
-            parsed = urlsplit(target)
-            scheme = parsed.scheme.lower()
-            if scheme != "http" or not parsed.hostname:
-                await self._send_error(
-                    client_writer,
-                    b"HTTP/1.1 403 Forbidden",
-                    b"Blocked non-HTTP scheme in browser proxy",
-                )
-                return
-
-            port = parsed.port or 80
-            upstream_reader, upstream_writer = await self._open_pinned_upstream(
-                parsed.hostname, port
-            )
-
-            origin_path = parsed.path or "/"
-            if parsed.query:
-                origin_path = f"{origin_path}?{parsed.query}"
-
-            forwarded_headers: list[str] = [f"{method} {origin_path} {version}"]
-            has_host = False
-            for hdr in lines[1:]:
-                if not hdr or ":" not in hdr:
-                    continue
-                h_name, _ = hdr.split(":", 1)
-                h_lower = h_name.strip().lower()
-                if h_lower in {
-                    "proxy-connection",
-                    "proxy-authorization",
-                    "connection",
-                    "keep-alive",
-                }:
-                    continue
-                if h_lower == "host":
-                    has_host = True
-                forwarded_headers.append(hdr)
-
-            if not has_host:
-                host_hdr = parsed.netloc or parsed.hostname
-                forwarded_headers.append(f"Host: {host_hdr}")
-            forwarded_headers.append("Connection: close")
-
-            rewritten_head = ("\r\n".join(forwarded_headers) + "\r\n\r\n").encode("latin-1")
-            upstream_writer.write(rewritten_head)
-            await upstream_writer.drain()
-
-            await asyncio.gather(
-                _pump_stream(client_reader, upstream_writer),
-                _pump_stream(upstream_reader, client_writer),
-            )
-
         except URLValidationError as exc:
             logger.warning(f"Blocked Chromium egress via SSRF proxy: {exc}")
-            with contextlib.suppress(Exception):
-                await self._send_error(
-                    client_writer,
-                    b"HTTP/1.1 403 Forbidden",
-                    b"Blocked by SSRF protection",
-                )
+            await self._send_error(
+                client_writer,
+                b"HTTP/1.1 403 Forbidden",
+                b"Blocked by SSRF protection",
+            )
         except (asyncio.IncompleteReadError, TimeoutError, ConnectionError, OSError):
-            with contextlib.suppress(Exception):
-                await self._send_error(client_writer, b"HTTP/1.1 502 Bad Gateway")
+            await self._send_error(client_writer, b"HTTP/1.1 502 Bad Gateway")
         finally:
-            if upstream_writer is not None:
-                upstream_writer.close()
-                with contextlib.suppress(Exception):
-                    await upstream_writer.wait_closed()
-            client_writer.close()
-            with contextlib.suppress(Exception):
-                await client_writer.wait_closed()
+            await _close_writer(upstream_writer)
+            await _close_writer(client_writer)

@@ -5,10 +5,10 @@ from unittest.mock import AsyncMock, patch
 
 import pytest
 
-from src.downloader.dependencies import get_http_client, get_pdf_semaphore
-from src.downloader.http_client import HTTPClientError, HTTPTimeoutError
-from src.downloader.main import app
-from src.downloader.pdf_generator import PDFGeneratorError
+from downloader.dependencies import get_http_client, get_pdf_semaphore
+from downloader.http_client import HTTPClientError, HTTPTimeoutError
+from downloader.main import app
+from downloader.pdf_generator import PDFGeneratorError
 
 
 class TestDownloadEndpoint:
@@ -164,7 +164,7 @@ class TestDownloadEndpoint:
         app.dependency_overrides[get_http_client] = mock_get_http_client
         try:
             with patch(
-                "src.downloader.services.content_processor.generate_pdf_from_url",
+                "downloader.pdf_generator.generate_pdf_from_url",
                 return_value=pdf_content,
             ) as mock_generate_pdf:
                 response = api_client.get(
@@ -175,7 +175,8 @@ class TestDownloadEndpoint:
                 assert "Content-Disposition" in response.headers
                 assert "download.pdf" in response.headers["Content-Disposition"]
                 assert response.content == pdf_content
-                mock_generate_pdf.assert_called_once_with("https://example.com")
+                mock_generate_pdf.assert_called_once()
+                assert mock_generate_pdf.call_args.args == ("https://example.com",)
         finally:
             app.dependency_overrides.pop(get_http_client, None)
 
@@ -198,7 +199,7 @@ class TestDownloadEndpoint:
         app.dependency_overrides[get_http_client] = mock_get_http_client
         try:
             with patch(
-                "src.downloader.services.content_processor.generate_pdf_from_url",
+                "downloader.pdf_generator.generate_pdf_from_url",
                 side_effect=PDFGeneratorError("Browser failed to start"),
             ):
                 response = api_client.get(
@@ -335,7 +336,7 @@ class TestRenderParameter:
         app.dependency_overrides[get_http_client] = mock_get_http_client
         try:
             with patch(
-                "src.downloader.services.content_processor.render_html_with_playwright",
+                "downloader.content_converter.render_html_with_playwright",
                 return_value=rendered_content,
             ) as mock_render:
                 response = api_client.get(
@@ -345,7 +346,8 @@ class TestRenderParameter:
                 assert response.status_code == 200
                 assert response.headers["X-Rendered-With-JS"] == "true"
                 assert response.content == rendered_content
-                mock_render.assert_called_once_with("https://example.com", None)
+                mock_render.assert_called_once()
+                assert mock_render.call_args.args == ("https://example.com", None)
         finally:
             app.dependency_overrides.pop(get_http_client, None)
 
@@ -370,7 +372,7 @@ class TestRenderParameter:
         app.dependency_overrides[get_http_client] = mock_get_http_client
         try:
             with patch(
-                "src.downloader.services.content_processor.should_use_playwright_for_html",
+                "downloader.services.content_processor.should_use_playwright_for_html",
                 return_value=False,
             ) as mock_detect:
                 response = api_client.get(
@@ -405,7 +407,7 @@ class TestRenderParameter:
         app.dependency_overrides[get_http_client] = mock_get_http_client
         try:
             with patch(
-                "src.downloader.services.content_processor.should_use_playwright_for_html",
+                "downloader.services.content_processor.should_use_playwright_for_html",
                 return_value=False,
             ) as mock_detect:
                 response = api_client.get(
@@ -439,8 +441,8 @@ class TestRenderParameter:
         app.dependency_overrides[get_http_client] = mock_get_http_client
         try:
             with patch(
-                "src.downloader.services.content_processor.render_html_with_playwright",
-                side_effect=Exception("Browser crash"),
+                "downloader.content_converter.render_html_with_playwright",
+                side_effect=RuntimeError("Browser crash"),
             ):
                 response = api_client.get(
                     "/https://example.com?render=true",
@@ -480,7 +482,7 @@ class TestWaitForParameter:
         app.dependency_overrides[get_http_client] = mock_get_http_client
         try:
             with patch(
-                "src.downloader.services.content_processor.render_html_with_playwright",
+                "downloader.content_converter.render_html_with_playwright",
                 return_value=rendered_content,
             ) as mock_render:
                 response = api_client.get(
@@ -489,14 +491,14 @@ class TestWaitForParameter:
                 )
                 assert response.status_code == 200
                 assert response.headers["X-Rendered-With-JS"] == "true"
-                # Verify render was called with the selector
-                mock_render.assert_called_once_with("https://example.com", ".content")
+                mock_render.assert_called_once()
+                assert mock_render.call_args.args == ("https://example.com", ".content")
         finally:
             app.dependency_overrides.pop(get_http_client, None)
 
     def test_wait_for_selector_timeout(self, api_client):
         """Test that selector timeout returns 408."""
-        from src.downloader.content_converter import SelectorTimeoutError
+        from downloader.content_converter import SelectorTimeoutError
 
         mock_content = b"<html><body><h1>Page</h1></body></html>"
         mock_client = AsyncMock()
@@ -517,7 +519,7 @@ class TestWaitForParameter:
         app.dependency_overrides[get_http_client] = mock_get_http_client
         try:
             with patch(
-                "src.downloader.services.content_processor.render_html_with_playwright",
+                "downloader.content_converter.render_html_with_playwright",
                 side_effect=SelectorTimeoutError(".nonexistent", 10000),
             ):
                 response = api_client.get(
@@ -554,7 +556,7 @@ class TestWaitForParameter:
         app.dependency_overrides[get_http_client] = mock_get_http_client
         try:
             with patch(
-                "src.downloader.services.content_processor.render_html_with_playwright",
+                "downloader.content_converter.render_html_with_playwright",
                 return_value=rendered_content,
             ) as mock_render:
                 response = api_client.get(
@@ -562,7 +564,8 @@ class TestWaitForParameter:
                     headers={"Accept": "text/html"},
                 )
                 assert response.status_code == 200
-                mock_render.assert_called_once_with("https://example.com", "article")
+                mock_render.assert_called_once()
+                assert mock_render.call_args.args == ("https://example.com", "article")
         finally:
             app.dependency_overrides.pop(get_http_client, None)
 

@@ -1,15 +1,19 @@
 """Metrics and monitoring endpoints."""
 
+from __future__ import annotations
+
 import logging
 import multiprocessing
 from datetime import UTC, datetime
 from typing import Any
 
+import redis.exceptions as redis_exc
 from fastapi import APIRouter, Depends, Request, Response
 
 from ..auth import get_api_key
-from ..config import get_settings
+from ..config import Settings, get_settings
 from ..dependencies import BatchSemaphoreDep, PDFSemaphoreDep
+from ..metrics import get_metrics_collector
 
 logger = logging.getLogger(__name__)
 
@@ -19,8 +23,6 @@ router = APIRouter()
 @router.get("/metrics")
 async def get_metrics(_api_key: str | None = Depends(get_api_key)) -> Response:
     """Get Prometheus-formatted metrics for monitoring."""
-    from ..metrics import get_metrics_collector
-
     collector = get_metrics_collector()
     return Response(
         content=collector.get_prometheus_metrics(),
@@ -31,19 +33,13 @@ async def get_metrics(_api_key: str | None = Depends(get_api_key)) -> Response:
 @router.get("/metrics/performance")
 async def get_performance_metrics(_api_key: str | None = Depends(get_api_key)) -> dict[str, Any]:
     """Get detailed performance metrics in JSON format."""
-    from ..metrics import get_metrics_collector
-
-    collector = get_metrics_collector()
-    return collector.get_performance_summary()
+    return get_metrics_collector().get_performance_summary()
 
 
 @router.get("/metrics/health-score")
 async def get_health_score(_api_key: str | None = Depends(get_api_key)) -> dict[str, Any]:
     """Get system health score and diagnostics."""
-    from ..metrics import get_metrics_collector
-
-    collector = get_metrics_collector()
-    return collector.get_system_health_score()
+    return get_metrics_collector().get_system_health_score()
 
 
 @router.get("/metrics/live")
@@ -54,34 +50,29 @@ async def get_live_metrics(
     _api_key: str | None = Depends(get_api_key),
 ) -> dict[str, Any]:
     """Get live system metrics including current concurrency and connection stats."""
-    from ..metrics import get_metrics_collector
+    performance = get_metrics_collector().get_performance_summary()
 
-    collector = get_metrics_collector()
-    performance = collector.get_performance_summary()
-
-    active_settings = getattr(request.app.state, "settings", None) or get_settings()
+    active_settings: Settings = getattr(request.app.state, "settings", None) or get_settings()
     pdf_limit = active_settings.pdf.concurrency
     batch_limit = active_settings.batch.concurrency
     pdf_in_use = max(0, pdf_limit - pdf_semaphore._value)
     batch_in_use = max(0, batch_limit - batch_semaphore._value)
 
-    # Try to get Redis stats
     redis_stats: dict[str, Any] = {}
-    try:
-        job_manager = getattr(request.app.state, "job_manager", None)
-        if job_manager:
+    job_manager = getattr(request.app.state, "job_manager", None)
+    if job_manager is not None and hasattr(job_manager, "get_connection_stats"):
+        try:
             redis_stats = await job_manager.get_connection_stats()
-    except Exception as e:
-        redis_stats = {"status": "error", "error": str(e)}
+        except (redis_exc.RedisError, OSError, RuntimeError) as exc:
+            redis_stats = {"status": "error", "error": str(exc)}
 
-    # Try to get HTTP client stats
     http_stats: dict[str, Any] = {}
-    try:
-        http_client = getattr(request.app.state, "http_client", None)
-        if http_client:
+    http_client = getattr(request.app.state, "http_client", None)
+    if http_client is not None and hasattr(http_client, "get_connection_stats"):
+        try:
             http_stats = http_client.get_connection_stats()
-    except Exception as e:
-        http_stats = {"status": "error", "error": str(e)}
+        except (OSError, RuntimeError, ValueError, TypeError) as exc:
+            http_stats = {"status": "error", "error": str(exc)}
 
     return {
         "timestamp": datetime.now(UTC).isoformat(),

@@ -5,7 +5,7 @@ from unittest.mock import AsyncMock, Mock, patch
 
 import pytest
 
-from src.downloader.browser import BrowserConfig, BrowserPool, BrowserPoolError
+from downloader.browser import BrowserConfig, BrowserPool, BrowserPoolError
 
 
 class TestBrowserConfig:
@@ -399,7 +399,7 @@ class TestBrowserPoolReleaseBrowser:
         browser = await pool.get_browser()
 
         # Mark browser as unhealthy
-        browser.is_connected.return_value = False
+        mock_browser.is_connected.return_value = False
 
         await pool.release_browser(browser)
 
@@ -497,9 +497,8 @@ class TestBrowserPoolReplaceBrowser:
         # Mock _launch_browser to return a new browser
         new_browser = Mock()
         new_browser.is_connected.return_value = True
-        pool._launch_browser = AsyncMock(return_value=new_browser)
-
-        await pool._replace_browser(mock_browser)
+        with patch.object(pool, "_launch_browser", new=AsyncMock(return_value=new_browser)):
+            await pool._replace_browser(mock_browser)
 
         assert mock_browser not in pool._all_browsers
         assert mock_browser not in pool._browser_health
@@ -521,9 +520,8 @@ class TestBrowserPoolReplaceBrowser:
 
         new_browser = Mock()
         new_browser.is_connected.return_value = True
-        pool._launch_browser = AsyncMock(return_value=new_browser)
-
-        await pool._replace_browser(mock_browser)
+        with patch.object(pool, "_launch_browser", new=AsyncMock(return_value=new_browser)):
+            await pool._replace_browser(mock_browser)
 
         # Should have the new browser
         assert new_browser in pool._all_browsers
@@ -546,9 +544,8 @@ class TestBrowserPoolReplaceBrowser:
 
         new_browser = Mock()
         new_browser.is_connected.return_value = True
-        pool._launch_browser = AsyncMock(return_value=new_browser)
-
-        await pool._replace_browser(mock_browser)
+        with patch.object(pool, "_launch_browser", new=AsyncMock(return_value=new_browser)):
+            await pool._replace_browser(mock_browser)
 
         health = pool._browser_health[new_browser]
         assert health["usage_count"] == 0
@@ -570,10 +567,10 @@ class TestBrowserPoolReplaceBrowser:
         pool._browser_health[mock_browser] = {"usage_count": 5, "pid": None}
 
         # Make launch fail
-        pool._launch_browser = AsyncMock(side_effect=Exception("Launch failed"))
-
-        # Should not raise
-        await pool._replace_browser(mock_browser)
+        with patch.object(
+            pool, "_launch_browser", new=AsyncMock(side_effect=RuntimeError("Launch failed"))
+        ):
+            await pool._replace_browser(mock_browser)
 
         # Old browser should be removed
         assert mock_browser not in pool._all_browsers
@@ -641,90 +638,12 @@ class TestBrowserPoolClose:
         assert pool._playwright is None
 
 
-class TestBrowserPoolStats:
-    """Test BrowserPool.get_pool_stats()."""
-
-    def test_get_pool_stats_available_count(self):
-        """Test get_pool_stats returns correct available count."""
-        pool = BrowserPool()
-
-        # Add 3 browsers, 2 in queue (available)
-        mock_browser1 = Mock()
-        mock_browser2 = Mock()
-        mock_browser3 = Mock()
-        pool._all_browsers.add(mock_browser1)
-        pool._all_browsers.add(mock_browser2)
-        pool._all_browsers.add(mock_browser3)
-        pool._browser_health[mock_browser1] = {"usage_count": 0}
-        pool._browser_health[mock_browser2] = {"usage_count": 0}
-        pool._browser_health[mock_browser3] = {"usage_count": 0}
-
-        # Put 2 browsers in available queue
-        pool._available_browsers.put_nowait(mock_browser1)
-        pool._available_browsers.put_nowait(mock_browser2)
-
-        stats = pool.get_pool_stats()
-
-        assert stats["total_browsers"] == 3
-        assert stats["available_browsers"] == 2
-        assert stats["busy_browsers"] == 1
-
-    def test_get_pool_stats_usage_total(self):
-        """Test get_pool_stats returns correct usage total."""
-        pool = BrowserPool()
-
-        mock_browser1 = Mock()
-        mock_browser2 = Mock()
-        pool._all_browsers.add(mock_browser1)
-        pool._all_browsers.add(mock_browser2)
-        pool._browser_health[mock_browser1] = {"usage_count": 3}
-        pool._browser_health[mock_browser2] = {"usage_count": 2}
-
-        stats = pool.get_pool_stats()
-        assert stats["total_usage"] == 5
-
-    def test_get_pool_stats_efficiency(self):
-        """Test get_pool_stats calculates efficiency correctly."""
-        pool = BrowserPool()
-
-        mock_browser1 = Mock()
-        mock_browser2 = Mock()
-        pool._all_browsers.add(mock_browser1)
-        pool._all_browsers.add(mock_browser2)
-        pool._browser_health[mock_browser1] = {"usage_count": 2}
-        pool._browser_health[mock_browser2] = {"usage_count": 2}
-
-        stats = pool.get_pool_stats()
-        # 4 total usage / 2 browsers = 2.0 efficiency
-        assert stats["pool_efficiency"] == 2.0
-
-    def test_get_pool_stats_empty_pool(self):
-        """Test get_pool_stats with empty pool."""
-        pool = BrowserPool()
-        stats = pool.get_pool_stats()
-
-        assert stats["total_browsers"] == 0
-        assert stats["available_browsers"] == 0
-        assert stats["busy_browsers"] == 0
-        assert stats["total_usage"] == 0
-        assert stats["pool_efficiency"] == 0
-
-    def test_get_pool_stats_memory_limit(self):
-        """Test get_pool_stats includes memory limit."""
-        config = BrowserConfig(memory_limit_mb=256)
-        pool = BrowserPool(config)
-
-        stats = pool.get_pool_stats()
-
-        assert stats["memory_limit_mb"] == 256
-
-
 class TestBrowserPoolContext:
     """Test BrowserPool.create_context()."""
 
     @pytest.mark.asyncio
     async def test_create_context_default_settings(self):
-        """Test create_context uses default settings."""
+        """Test create_context uses default settings including accept_downloads=False."""
         pool = BrowserPool()
 
         mock_browser = Mock()
@@ -737,6 +656,8 @@ class TestBrowserPoolContext:
         call_kwargs = mock_browser.new_context.call_args[1]
         assert "Mozilla" in call_kwargs["user_agent"]
         assert call_kwargs["viewport"] == {"width": 1280, "height": 720}
+        assert call_kwargs["accept_downloads"] is False
+        assert call_kwargs["service_workers"] == "block"
 
     @pytest.mark.asyncio
     async def test_create_context_custom_user_agent(self):
@@ -756,13 +677,15 @@ class TestBrowserPoolContext:
     @pytest.mark.asyncio
     async def test_create_context_custom_viewport(self):
         """Test create_context uses custom viewport."""
+        from playwright.async_api import ViewportSize
+
         pool = BrowserPool()
 
         mock_browser = Mock()
         mock_context = AsyncMock()
         mock_browser.new_context = AsyncMock(return_value=mock_context)
 
-        custom_viewport = {"width": 1920, "height": 1080}
+        custom_viewport: ViewportSize = {"width": 1920, "height": 1080}
         await pool.create_context(mock_browser, viewport=custom_viewport)
 
         call_kwargs = mock_browser.new_context.call_args[1]

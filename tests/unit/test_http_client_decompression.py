@@ -9,8 +9,8 @@ import brotli
 import httpx
 import pytest
 
-from src.downloader.crawling.robots import RobotsChecker
-from src.downloader.http_client import ContentTooLargeError, HTTPClient, HTTPClientError
+from downloader.crawling.robots import RobotsChecker
+from downloader.http_client import ContentTooLargeError, HTTPClient, HTTPClientError
 
 
 @pytest.mark.unit

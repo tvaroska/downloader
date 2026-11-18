@@ -6,8 +6,9 @@ from unittest.mock import AsyncMock, MagicMock, call, patch
 
 import pytest
 
-from src.downloader.browser.manager import BrowserConfig, BrowserPool
-from src.downloader.validation import URLValidationError, validate_url
+from downloader.browser.manager import BrowserConfig, BrowserPool
+from downloader.validation import URLValidationError
+from tests.conftest import validate_url_sync as validate_url
 
 
 class TestFileURLBlocking:
@@ -142,8 +143,8 @@ class TestProcessCleanup:
         pool = BrowserPool()
         test_pid = 12345
 
-        with patch("src.downloader.browser.manager.os.kill") as mock_kill:
-            with patch("src.downloader.browser.manager.asyncio.sleep", new_callable=AsyncMock):
+        with patch("downloader.browser.manager.os.kill") as mock_kill:
+            with patch("downloader.browser.manager.asyncio.sleep", new_callable=AsyncMock):
                 # Process terminates after SIGTERM
                 mock_kill.side_effect = [None, ProcessLookupError()]
 
@@ -159,9 +160,9 @@ class TestProcessCleanup:
         pool = BrowserPool(config)
         test_pid = 12345
 
-        with patch("src.downloader.browser.manager.os.kill") as mock_kill:
+        with patch("downloader.browser.manager.os.kill") as mock_kill:
             with patch(
-                "src.downloader.browser.manager.asyncio.sleep", new_callable=AsyncMock
+                "downloader.browser.manager.asyncio.sleep", new_callable=AsyncMock
             ) as mock_sleep:
                 # Process terminates after SIGTERM
                 mock_kill.side_effect = [None, ProcessLookupError()]
@@ -175,8 +176,8 @@ class TestProcessCleanup:
         pool = BrowserPool()
         test_pid = 12345
 
-        with patch("src.downloader.browser.manager.os.kill") as mock_kill:
-            with patch("src.downloader.browser.manager.asyncio.sleep", new_callable=AsyncMock):
+        with patch("downloader.browser.manager.os.kill") as mock_kill:
+            with patch("downloader.browser.manager.asyncio.sleep", new_callable=AsyncMock):
                 # Process stays alive: SIGTERM, check (0), then SIGKILL
                 mock_kill.side_effect = [None, None, None]
 
@@ -196,8 +197,8 @@ class TestProcessCleanup:
         pool = BrowserPool()
         test_pid = 12345
 
-        with patch("src.downloader.browser.manager.os.kill") as mock_kill:
-            with patch("src.downloader.browser.manager.asyncio.sleep", new_callable=AsyncMock):
+        with patch("downloader.browser.manager.os.kill") as mock_kill:
+            with patch("downloader.browser.manager.asyncio.sleep", new_callable=AsyncMock):
                 # Process terminates: SIGTERM succeeds, check raises ProcessLookupError
                 mock_kill.side_effect = [None, ProcessLookupError()]
 
@@ -214,8 +215,8 @@ class TestProcessCleanup:
         pool = BrowserPool()
         test_pid = 12345
 
-        with patch("src.downloader.browser.manager.os.kill") as mock_kill:
-            with patch("src.downloader.browser.manager.asyncio.sleep", new_callable=AsyncMock):
+        with patch("downloader.browser.manager.os.kill") as mock_kill:
+            with patch("downloader.browser.manager.asyncio.sleep", new_callable=AsyncMock):
                 mock_kill.side_effect = PermissionError("Operation not permitted")
 
                 # Should not raise exception
@@ -228,8 +229,8 @@ class TestProcessCleanup:
         pool = BrowserPool()
         test_pid = 12345
 
-        with patch("src.downloader.browser.manager.os.kill") as mock_kill:
-            with patch("src.downloader.browser.manager.asyncio.sleep", new_callable=AsyncMock):
+        with patch("downloader.browser.manager.os.kill") as mock_kill:
+            with patch("downloader.browser.manager.asyncio.sleep", new_callable=AsyncMock):
                 mock_kill.side_effect = ProcessLookupError("No such process")
 
                 # Should not raise exception
@@ -279,7 +280,7 @@ class TestProcessCleanup:
         mock_browser.close = AsyncMock()
 
         with patch(
-            "src.downloader.browser.manager.asyncio.wait_for", new_callable=AsyncMock
+            "downloader.browser.manager.asyncio.wait_for", new_callable=AsyncMock
         ) as mock_wait_for:
             mock_wait_for.return_value = None
 

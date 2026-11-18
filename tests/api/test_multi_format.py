@@ -2,8 +2,9 @@
 
 from unittest.mock import AsyncMock
 
-from src.downloader.dependencies import get_http_client
-from src.downloader.main import app
+from downloader.dependencies import get_http_client
+from downloader.main import app
+from downloader.services.content_negotiation import format_to_mime_type, parse_accept_headers
 
 
 class TestMultiFormat:
@@ -11,64 +12,48 @@ class TestMultiFormat:
 
     def test_parse_accept_headers_single(self):
         """Test parsing single Accept header."""
-        from src.downloader.services.content_processor import parse_accept_headers
-
         result = parse_accept_headers("text/html")
         assert result == ["html"]
 
     def test_parse_accept_headers_comma_separated(self):
         """Test parsing comma-separated Accept header."""
-        from src.downloader.services.content_processor import parse_accept_headers
-
         result = parse_accept_headers("text/html, text/markdown, application/pdf")
         assert set(result) == {"html", "markdown", "pdf"}
 
     def test_parse_accept_headers_with_quality(self):
         """Test parsing Accept header with quality parameters."""
-        from src.downloader.services.content_processor import parse_accept_headers
-
         result = parse_accept_headers("text/html;q=0.9, text/markdown;q=1.0")
         assert set(result) == {"html", "markdown"}
 
     def test_parse_accept_headers_list(self):
         """Test parsing list of Accept headers."""
-        from src.downloader.services.content_processor import parse_accept_headers
-
         result = parse_accept_headers(["text/html", "text/markdown"])
         assert set(result) == {"html", "markdown"}
 
     def test_parse_accept_headers_empty(self):
         """Test parsing empty Accept header."""
-        from src.downloader.services.content_processor import parse_accept_headers
-
         assert parse_accept_headers(None) == []
         assert parse_accept_headers("") == []
         assert parse_accept_headers([]) == []
 
     def test_parse_accept_headers_unsupported(self):
         """Test parsing with unsupported formats."""
-        from src.downloader.services.content_processor import parse_accept_headers
-
         result = parse_accept_headers("text/html, application/xml, text/markdown")
         assert set(result) == {"html", "markdown"}
         assert "application/xml" not in result
 
     def test_parse_accept_headers_duplicates(self):
         """Test parsing with duplicate formats."""
-        from src.downloader.services.content_processor import parse_accept_headers
-
         result = parse_accept_headers("text/html, text/html, text/markdown")
         assert result == ["html", "markdown"]
 
     def test_format_to_mime_type(self):
         """Test format to MIME type conversion."""
-        from src.downloader.services.content_processor import _format_to_mime_type
-
-        assert _format_to_mime_type("html") == "text/html"
-        assert _format_to_mime_type("markdown") == "text/markdown"
-        assert _format_to_mime_type("pdf") == "application/pdf"
-        assert _format_to_mime_type("text") == "text/plain"
-        assert _format_to_mime_type("json") == "application/json"
+        assert format_to_mime_type("html") == "text/html"
+        assert format_to_mime_type("markdown") == "text/markdown"
+        assert format_to_mime_type("pdf") == "application/pdf"
+        assert format_to_mime_type("text") == "text/plain"
+        assert format_to_mime_type("json") == "application/json"
 
     def test_multi_format_basic(self, api_client):
         """Test basic multi-format request with 2 formats."""

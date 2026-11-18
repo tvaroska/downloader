@@ -19,8 +19,8 @@ check:
     uv lock --check --offline --no-config
     uv run --no-sync ruff check src/ tests/ examples/
     uv run --no-sync ruff format --check src/ tests/ examples/
-    uv run --no-sync mypy src/
-    uv run --no-sync pytest -p no:cacheprovider -n auto -m "not (integration or e2e or network or requires_redis or requires_playwright)"
+    uv run --no-sync mypy src/ tests/
+    uv run --no-sync pytest -p no:cacheprovider --cov=src/downloader -n auto -m "not (integration or e2e or network or requires_redis or requires_playwright)"
     uv run --no-sync pytest -p no:cacheprovider sdks/python/tests -c sdks/python/pyproject.toml
     node --test sdks/javascript/test/client.test.mjs
     if command -v tsc >/dev/null 2>&1; then
@@ -36,11 +36,11 @@ test:
 
 # Run development server
 dev:
-    REDIS_URI="redis://localhost:6379" uv run python -m uvicorn src.downloader.main:app --host 0.0.0.0 --port 8000 --reload
+    REDIS_URI="redis://localhost:6379" uv run python -m uvicorn downloader.main:app --host 0.0.0.0 --port 8000 --reload
 
 # Run split worker process locally against Redis
 worker:
-    REDIS_URI="redis://localhost:6379" DEPLOYMENT_MODE="worker" uv run python -m src.downloader.worker
+    REDIS_URI="redis://localhost:6379" DEPLOYMENT_MODE="worker" uv run python -m downloader.worker
 
 # Run split API + Worker + Redis stack via Docker Compose
 split:

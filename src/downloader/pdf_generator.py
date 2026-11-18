@@ -1,22 +1,27 @@
-"""PDF generation using Playwright for JavaScript rendering."""
+"""BrowserSession lifecycle, SSRF route guard, modal closer, and PDF/screenshot capture."""
+
+from __future__ import annotations
 
 import asyncio
 import inspect
 import logging
 import os
 import time
-from collections.abc import Sequence
+from collections.abc import AsyncIterator, Sequence
 from contextlib import asynccontextmanager
 from typing import Any
 from urllib.parse import urlparse
 
+from playwright.async_api import Error as PlaywrightError
 from playwright.async_api import TimeoutError as PlaywrightTimeoutError
 
 from .browser import BrowserConfig, BrowserPool, BrowserPoolError
 from .browser.actions import BrowserAction, BrowserActionError, execute_browser_actions
 from .config import get_settings
+from .http_client import ContentTooLargeError
 from .telemetry import get_tracer
 from .validation import (
+    EgressPolicy,
     SSRFProtectionError,
     URLValidationError,
     sanitize_user_agent,
@@ -30,6 +35,14 @@ DEFAULT_BROWSER_USER_AGENT = (
     "(KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
 )
 _ALLOWED_INLINE_SCHEMES = frozenset({"data", "blob", "about"})
+_MODAL_CLOSE_SELECTORS: tuple[str, ...] = (
+    '[aria-label="close"]',
+    '[title="Close"]',
+    '[aria-label="Close"]',
+    '[title="close"]',
+    ".modal-close",
+    ".close-button",
+)
 
 
 async def _maybe_await(value: Any) -> Any:
@@ -63,29 +76,39 @@ def resolve_browser_user_agent(explicit_user_agent: str | None = None) -> str:
     return DEFAULT_BROWSER_USER_AGENT
 
 
+def _make_ssrf_route_guard(egress_policy: EgressPolicy | None):
+    async def _guard(route: Any) -> None:
+        req_url = getattr(getattr(route, "request", None), "url", "") or ""
+        parsed = urlparse(req_url)
+        scheme = parsed.scheme.lower()
+
+        if scheme in _ALLOWED_INLINE_SCHEMES:
+            await _maybe_await(route.continue_())
+            return
+
+        if scheme not in ("http", "https"):
+            logger.warning(f"Blocked browser request with disallowed scheme '{scheme}': {req_url}")
+            await _maybe_await(route.abort("accessdenied"))
+            return
+
+        try:
+            if egress_policy is not None:
+                await egress_policy.validate_url(req_url)
+            else:
+                await validate_url_async(req_url, get_settings())
+        except URLValidationError as exc:
+            logger.warning(f"Blocked browser request failing SSRF validation ({req_url}): {exc}")
+            await _maybe_await(route.abort("accessdenied"))
+            return
+
+        await _maybe_await(route.continue_())
+
+    return _guard
+
+
 async def _ssrf_route_guard(route: Any) -> None:
     """Block SSRF and non-HTTP(S) subrequests inside Playwright browser contexts."""
-    req_url = getattr(getattr(route, "request", None), "url", "") or ""
-    parsed = urlparse(req_url)
-    scheme = parsed.scheme.lower()
-
-    if scheme in _ALLOWED_INLINE_SCHEMES:
-        await _maybe_await(route.continue_())
-        return
-
-    if scheme not in ("http", "https"):
-        logger.warning(f"Blocked browser request with disallowed scheme '{scheme}': {req_url}")
-        await _maybe_await(route.abort("accessdenied"))
-        return
-
-    try:
-        await validate_url_async(req_url, get_settings())
-    except URLValidationError as exc:
-        logger.warning(f"Blocked browser request failing SSRF validation ({req_url}): {exc}")
-        await _maybe_await(route.abort("accessdenied"))
-        return
-
-    await _maybe_await(route.continue_())
+    await _make_ssrf_route_guard(None)(route)
 
 
 def _collect_redirect_chain_urls(request_obj: Any) -> list[str]:
@@ -104,7 +127,10 @@ def _collect_redirect_chain_urls(request_obj: Any) -> list[str]:
     return hops
 
 
-async def _validate_browser_url_candidate(candidate_url: str) -> None:
+async def _validate_browser_url_candidate(
+    candidate_url: str,
+    egress_policy: EgressPolicy | None = None,
+) -> None:
     """Validate a single browser navigation or redirect URL against scheme and SSRF policy."""
     parsed = urlparse(candidate_url)
     scheme = parsed.scheme.lower()
@@ -114,56 +140,79 @@ async def _validate_browser_url_candidate(candidate_url: str) -> None:
         raise SSRFProtectionError(
             f"Browser navigated to disallowed scheme '{scheme}': {candidate_url}"
         )
-    await validate_url_async(candidate_url, get_settings())
+    if egress_policy is not None:
+        await egress_policy.validate_url(candidate_url)
+    else:
+        await validate_url_async(candidate_url, get_settings())
 
 
-async def install_ssrf_route_guard(context: Any) -> None:
+def _register_redirect_listener(
+    context: Any,
+    egress_policy: EgressPolicy | None,
+) -> tuple[Any, Any] | None:
+    on_fn = getattr(context, "on", None)
+    if not callable(on_fn):
+        return None
+    violations: list[URLValidationError] = []
+    pending_checks: set[asyncio.Task[None]] = set()
+    try:
+        context._ssrf_redirect_violations = violations
+        context._ssrf_redirect_tasks = pending_checks
+    except (AttributeError, TypeError):
+        return None
+
+    async def _check_redirected_request(req: Any) -> None:
+        for hop_url in _collect_redirect_chain_urls(req):
+            try:
+                await _validate_browser_url_candidate(hop_url, egress_policy)
+            except URLValidationError as exc:
+                logger.warning(f"Blocked redirected browser request ({hop_url}): {exc}")
+                violations.append(exc)
+                return
+
+    def _on_request(req: Any) -> None:
+        prev = getattr(req, "redirected_from", None)
+        if prev is None or not isinstance(getattr(req, "url", None), str):
+            return
+        try:
+            loop = asyncio.get_running_loop()
+        except RuntimeError:
+            return
+        task = loop.create_task(_check_redirected_request(req))
+        pending_checks.add(task)
+        task.add_done_callback(pending_checks.discard)
+
+    return on_fn, _on_request
+
+
+async def install_ssrf_route_guard(
+    context: Any,
+    *,
+    egress_policy: EgressPolicy | None = None,
+) -> None:
     """Register SSRF route interception and subresource redirect tracking on a BrowserContext."""
     route_fn = getattr(context, "route", None)
-    if callable(route_fn):
-        await _maybe_await(route_fn("**/*", _ssrf_route_guard))
+    if not callable(route_fn):
+        raise TypeError("BrowserContext must expose a callable route() method for SSRF protection")
 
-    on_fn = getattr(context, "on", None)
-    if callable(on_fn):
-        violations: list[URLValidationError] = []
-        pending_checks: set[asyncio.Task[None]] = set()
+    guard = _ssrf_route_guard if egress_policy is None else _make_ssrf_route_guard(egress_policy)
+    await _maybe_await(route_fn("**/*", guard))
+
+    listener = _register_redirect_listener(context, egress_policy)
+    if listener is not None:
+        on_fn, on_request = listener
         try:
-            context._ssrf_redirect_violations = violations
-            context._ssrf_redirect_tasks = pending_checks
-        except Exception:
-            return
-
-        async def _check_redirected_request(req: Any) -> None:
-            for hop_url in _collect_redirect_chain_urls(req):
-                try:
-                    await _validate_browser_url_candidate(hop_url)
-                except URLValidationError as exc:
-                    logger.warning(f"Blocked redirected browser request ({hop_url}): {exc}")
-                    violations.append(exc)
-                    return
-
-        def _on_request(req: Any) -> None:
-            prev = getattr(req, "redirected_from", None)
-            if prev is None or not isinstance(getattr(req, "url", None), str):
-                return
-            try:
-                loop = asyncio.get_running_loop()
-            except RuntimeError:
-                return
-            task = loop.create_task(_check_redirected_request(req))
-            pending_checks.add(task)
-            task.add_done_callback(pending_checks.discard)
-
-        try:
-            await _maybe_await(on_fn("request", _on_request))
-        except Exception:
-            pass
+            await _maybe_await(on_fn("request", on_request))
+        except (PlaywrightError, RuntimeError, TypeError) as exc:
+            logger.debug(f"Could not attach redirect listener on browser context: {exc}")
 
 
 async def validate_browser_navigation(
     page: Any,
     response: Any = None,
     context: Any = None,
+    *,
+    egress_policy: EgressPolicy | None = None,
 ) -> None:
     """Re-validate every redirect hop in `response.request.redirected_from` and final `page.url`."""
     if context is not None:
@@ -191,21 +240,159 @@ async def validate_browser_navigation(
         if url_str in seen:
             continue
         seen.add(url_str)
-        await _validate_browser_url_candidate(url_str)
+        await _validate_browser_url_candidate(url_str, egress_policy)
+
+
+async def close_page_modals(page: Any) -> None:
+    """Best-effort dismissal of common signup/cookie modal overlays."""
+    for selector in _MODAL_CLOSE_SELECTORS:
+        try:
+            close_buttons = await page.query_selector_all(selector)
+        except (PlaywrightError, TimeoutError, RuntimeError, OSError) as exc:
+            logger.debug(f"Modal selector lookup skipped for {selector}: {exc}")
+            continue
+        for button in close_buttons:
+            try:
+                await button.click(timeout=1000)
+                logger.debug(f"Closed modal/popup with selector: {selector}")
+                await page.wait_for_timeout(500)
+            except (PlaywrightError, TimeoutError, RuntimeError, OSError) as exc:
+                logger.debug(f"Modal close click ignored for {selector}: {exc}")
+
+
+def enforce_rendered_output_size(
+    payload: bytes,
+    *,
+    max_output_bytes: int | None = None,
+    egress_policy: EgressPolicy | None = None,
+) -> bytes:
+    """Reject rendered HTML, PDF, or screenshot outputs exceeding `max_download_size`."""
+    cap = (
+        max_output_bytes
+        if max_output_bytes is not None
+        else (
+            egress_policy.settings.content.max_download_size
+            if egress_policy is not None
+            else get_settings().content.max_download_size
+        )
+    )
+    if len(payload) > cap:
+        raise ContentTooLargeError(max_size=cap, actual_size=len(payload))
+    return payload
 
 
 class PDFGeneratorError(Exception):
-    """Raised when PDF generation fails."""
+    """Raised when PDF or screenshot generation fails."""
 
     def __init__(self, message: str, status_code: int | None = None) -> None:
         super().__init__(message)
         self.status_code = status_code
 
 
-class PlaywrightPDFGenerator:
-    """PDF generator using Playwright with browser pooling for concurrent PDF generation."""
+class BrowserSession:
+    """Single async context manager acquiring an isolated, SSRF-guarded `(context, page)`."""
 
     def __init__(
+        self,
+        generator: Any,
+        *,
+        user_agent: str | None = None,
+        egress_policy: EgressPolicy | None = None,
+    ) -> None:
+        self._generator = generator
+        self._user_agent = user_agent
+        self._egress_policy = egress_policy
+        self._pool: Any = None
+        self.browser: Any = None
+        self.context: Any = None
+        self.page: Any = None
+        self._acquired_mark = False
+
+    async def __aenter__(self) -> tuple[Any, Any]:
+        if self._generator is None:
+            raise PDFGeneratorError("PDF generator pool not initialized")
+
+        mark_acq = getattr(self._generator, "mark_context_acquired", None)
+        if callable(mark_acq) and (
+            isinstance(self._generator, PlaywrightPDFGenerator)
+            or "mark_context_acquired" in getattr(self._generator, "__dict__", {})
+        ):
+            mark_acq()
+            self._acquired_mark = True
+
+        try:
+            self._pool = await self._generator.ensure_started()
+            if not self._pool:
+                raise PDFGeneratorError("PDF generator pool not initialized")
+
+            self.browser = await self._pool.get_browser()
+            gen_ua = getattr(self._generator, "user_agent", None)
+            effective_ua = resolve_browser_user_agent(
+                self._user_agent
+                if self._user_agent is not None
+                else (gen_ua if isinstance(gen_ua, str) else None)
+            )
+
+            if (isinstance(BrowserPool, type) and isinstance(self._pool, BrowserPool)) or (
+                "create_context" in getattr(self._pool, "__dict__", {})
+                and callable(getattr(self._pool, "create_context", None))
+            ):
+                self.context = await self._pool.create_context(
+                    self.browser, user_agent=effective_ua
+                )
+            else:
+                self.context = await self.browser.new_context(
+                    user_agent=effective_ua,
+                    viewport={"width": 1280, "height": 720},
+                    ignore_https_errors=False,
+                    java_script_enabled=True,
+                    bypass_csp=False,
+                    service_workers="block",
+                    accept_downloads=False,
+                )
+
+            await install_ssrf_route_guard(self.context, egress_policy=self._egress_policy)
+            self.page = await self.context.new_page()
+            return self.context, self.page
+        except BaseException:
+            await self._cleanup()
+            raise
+
+    async def _cleanup(self) -> None:
+        if self.context is not None:
+            ctx = self.context
+            self.context = None
+            try:
+                await ctx.close()
+            except (PlaywrightError, RuntimeError, OSError) as exc:
+                logger.warning(f"Error closing browser context: {exc}")
+
+        gen_pool = (
+            self._generator.pool if isinstance(self._generator, PlaywrightPDFGenerator) else None
+        )
+        active_pool = gen_pool or self._pool
+        if self.browser is not None and active_pool is not None:
+            br = self.browser
+            self.browser = None
+            try:
+                await active_pool.release_browser(br)
+            except (PlaywrightError, RuntimeError, OSError) as exc:
+                logger.warning(f"Error releasing browser to pool: {exc}")
+
+        if self._acquired_mark:
+            self._acquired_mark = False
+            mark_rel = getattr(self._generator, "mark_context_released", None)
+            if callable(mark_rel):
+                mark_rel()
+
+    async def __aexit__(self, exc_type: Any, exc_val: Any, exc_tb: Any) -> None:
+        await self._cleanup()
+
+
+class PlaywrightPDFGenerator:
+    """PDF and screenshot generator backed by a lazy, idle-reaped `BrowserPool`."""
+
+    def __init__(  # noqa: PLR0913
         self,
         pool_size: int = 3,
         page_load_timeout: int = 30000,
@@ -214,7 +401,9 @@ class PlaywrightPDFGenerator:
         max_uses_per_browser: int = 50,
         idle_timeout: float = 600.0,
         user_agent: str | None = None,
-    ):
+        *,
+        egress_policy: EgressPolicy | None = None,
+    ) -> None:
         self.pool: BrowserPool | None = None
         self._start_lock = asyncio.Lock()
         self.pool_config = BrowserConfig(
@@ -226,13 +415,14 @@ class PlaywrightPDFGenerator:
         self.wait_until = wait_until
         self.idle_timeout = idle_timeout
         self.user_agent = user_agent
+        self._egress_policy = egress_policy
         self._active_contexts: int = 0
         self._last_used_at: float = 0.0
         self._idle_task: asyncio.Task[None] | None = None
 
     @property
     def pool_size(self) -> int:
-        """Get pool size for backward compatibility."""
+        """Return configured browser pool size."""
         return self.pool_config.pool_size
 
     def mark_context_acquired(self) -> None:
@@ -245,13 +435,11 @@ class PlaywrightPDFGenerator:
         self._active_contexts = max(0, self._active_contexts - 1)
         self._last_used_at = time.monotonic()
 
-    async def __aenter__(self):
-        """Async context manager entry."""
+    async def __aenter__(self) -> PlaywrightPDFGenerator:
         await self.start()
         return self
 
-    async def __aexit__(self, exc_type, exc_val, exc_tb):
-        """Async context manager exit."""
+    async def __aexit__(self, exc_type: Any, exc_val: Any, exc_tb: Any) -> None:
         await self.close()
 
     async def _cancel_idle_task(self) -> None:
@@ -266,7 +454,7 @@ class PlaywrightPDFGenerator:
             self._idle_task = None
 
     async def _idle_reaper_loop(self) -> None:
-        """Close the browser pool after idle_timeout with zero active contexts."""
+        """Close the browser pool after `idle_timeout` with zero active contexts."""
         check_interval = max(min(self.idle_timeout / 2.0, 30.0), 0.05)
         try:
             while True:
@@ -291,21 +479,24 @@ class PlaywrightPDFGenerator:
         except asyncio.CancelledError:
             return
 
-    async def start(self):
+    async def start(self) -> None:
         """Initialize browser pool."""
         await self._cancel_idle_task()
         try:
-            pool = BrowserPool(config=self.pool_config)
+            if self._egress_policy is not None:
+                pool = BrowserPool(config=self.pool_config, egress_policy=self._egress_policy)
+            else:
+                pool = BrowserPool(config=self.pool_config)
             await pool.start()
             self.pool = pool
             self._last_used_at = time.monotonic()
             if self.idle_timeout > 0:
                 self._idle_task = asyncio.create_task(self._idle_reaper_loop())
             logger.info("PDF generator initialized with browser pool")
-        except BrowserPoolError as e:
+        except BrowserPoolError as exc:
             self.pool = None
-            logger.error(f"Failed to initialize PDF generator: {e}")
-            raise PDFGeneratorError(f"PDF generator initialization failed: {e}")
+            logger.error(f"Failed to initialize PDF generator: {exc}")
+            raise PDFGeneratorError(f"PDF generator initialization failed: {exc}") from exc
 
     async def ensure_started(self) -> BrowserPool:
         """Lazily initialize browser pool on first use under an async lock."""
@@ -320,7 +511,7 @@ class PlaywrightPDFGenerator:
         assert self.pool is not None
         return self.pool
 
-    async def close(self):
+    async def close(self) -> None:
         """Close browser pool and cleanup."""
         try:
             await self._cancel_idle_task()
@@ -328,52 +519,65 @@ class PlaywrightPDFGenerator:
                 await self.pool.close()
                 self.pool = None
             logger.info("PDF generator closed")
-        except Exception as e:
-            logger.error(f"Error closing PDF generator: {e}")
+        except (PlaywrightError, BrowserPoolError, RuntimeError, OSError) as exc:
+            logger.error(f"Error closing PDF generator: {exc}")
 
     @asynccontextmanager
-    async def _get_browser_context(self):
-        """Async context manager for automatic browser resource cleanup."""
-        self.mark_context_acquired()
-        pool = None
-        browser = None
-        context = None
+    async def _get_browser_context(self) -> AsyncIterator[tuple[Any, Any]]:
+        """Delegate context acquisition and teardown to the shared `BrowserSession`."""
+        session = BrowserSession(self, egress_policy=self._egress_policy)
+        async with session as (context, _page):
+            yield session.browser, context
+
+    async def _navigate_for_capture(
+        self,
+        session: BrowserSession,
+        url: str,
+        *,
+        wait_until: Any,
+        timeouts_ms: tuple[int, int],
+        strict_settle: bool = False,
+    ) -> None:
+        page = session.page
+        timeout_ms, settle_timeout_ms = timeouts_ms
         try:
-            pool = await self.ensure_started()
+            response = await page.goto(url, wait_until=wait_until, timeout=timeout_ms)
+        except (PlaywrightTimeoutError, TimeoutError) as exc:
+            raise PDFGeneratorError(f"Timeout loading page: {url}") from exc
 
-            # Get browser from pool with O(1) selection
-            browser = await pool.get_browser()
-            self._last_used_at = time.monotonic()
-
-            # Create isolated context for this request (security)
-            context = await browser.new_context(
-                user_agent=resolve_browser_user_agent(self.user_agent),
-                viewport={"width": 1280, "height": 720},
-                ignore_https_errors=False,  # Security: don't ignore HTTPS errors
-                java_script_enabled=True,
-                bypass_csp=False,  # Security: respect Content Security Policy
-                service_workers="block",
+        if not response:
+            raise PDFGeneratorError(f"Failed to load page: {url}")
+        if response.status >= 400:
+            raise PDFGeneratorError(
+                f"HTTP {response.status}: {response.status_text}",
+                status_code=response.status,
             )
-            await install_ssrf_route_guard(context)
 
-            yield browser, context
+        await validate_browser_navigation(
+            page, response, session.context, egress_policy=self._egress_policy
+        )
+        try:
+            await page.wait_for_load_state("networkidle", timeout=settle_timeout_ms)
+        except (PlaywrightTimeoutError, TimeoutError) as exc:
+            if strict_settle:
+                raise PDFGeneratorError(f"Timeout loading page: {url}") from exc
+            logger.debug(f"Proceeding after {settle_timeout_ms}ms settle: {url}")
 
-        finally:
-            # Automatic cleanup - guaranteed to run even on exceptions
-            if context:
-                try:
-                    await context.close()  # This closes all pages in context
-                except Exception as e:
-                    logger.warning(f"Error closing browser context: {e}")
-
-            active_pool = self.pool or pool
-            if browser and active_pool:
-                try:
-                    await active_pool.release_browser(browser)
-                except Exception as e:
-                    logger.warning(f"Error releasing browser to pool: {e}")
-
-            self.mark_context_released()
+    async def _run_pre_capture_steps(
+        self,
+        page: Any,
+        context: Any,
+        *,
+        wait_for_selector: str | None,
+        actions: Sequence[BrowserAction] | None,
+        timeout_ms: int,
+    ) -> None:
+        if wait_for_selector:
+            await page.wait_for_selector(wait_for_selector, timeout=timeout_ms, state="visible")
+        if actions:
+            await execute_browser_actions(page, actions, default_timeout_ms=timeout_ms)
+        await close_page_modals(page)
+        await validate_browser_navigation(page, None, context, egress_policy=self._egress_policy)
 
     async def generate_pdf(
         self,
@@ -382,125 +586,66 @@ class PlaywrightPDFGenerator:
         *,
         actions: Sequence[BrowserAction] | None = None,
         wait_for_selector: str | None = None,
+        max_output_bytes: int | None = None,
     ) -> bytes:
-        """
-        Generate PDF from URL using optimized browser pool with automatic resource cleanup.
-
-        Args:
-            url: The URL to convert to PDF
-            options: PDF generation options
-            actions: Optional declarative browser actions to run before PDF capture
-            wait_for_selector: Optional CSS selector to wait for before capture
-
-        Returns:
-            PDF content as bytes
-
-        Raises:
-            PDFGeneratorError: If PDF generation fails
-        """
-        # Default PDF options - use instance settings
+        """Generate PDF from URL with `BrowserSession` isolation and `max_download_size` check."""
         pdf_options: dict[str, Any] = {
             "format": "A4",
             "print_background": True,
-            "margin": {
-                "top": "20px",
-                "right": "20px",
-                "bottom": "20px",
-                "left": "20px",
-            },
+            "margin": {"top": "20px", "right": "20px", "bottom": "20px", "left": "20px"},
             "wait_for": self.wait_until,
             "timeout": self.page_load_timeout,
         }
-
-        # Override with custom options
         if options:
             pdf_options.update(options)
 
+        timeout_ms = int(pdf_options.get("timeout", 30000))
         tracer = get_tracer(__name__)
         with tracer.start_as_current_span("playwright.generate_pdf") as span:
             span.set_attribute("http.url", url)
             try:
-                async with self._get_browser_context() as (browser, context):
-                    page = await context.new_page()
-                    try:
-                        logger.info(f"Loading page: {url}")
-                        timeout_ms = int(pdf_options.get("timeout", 30000))
-
-                        try:
-                            response = await page.goto(
-                                url,
-                                wait_until=pdf_options.get("wait_for", "networkidle"),
-                                timeout=timeout_ms,
-                            )
-
-                            if not response:
-                                raise PDFGeneratorError(f"Failed to load page: {url}")
-
-                            if response.status >= 400:
-                                raise PDFGeneratorError(
-                                    f"HTTP {response.status}: {response.status_text}",
-                                    status_code=response.status,
-                                )
-
-                        except (PlaywrightTimeoutError, TimeoutError):
-                            raise PDFGeneratorError(f"Timeout loading page: {url}")
-
-                        await validate_browser_navigation(page, response, context)
-
-                        await page.wait_for_load_state(
-                            "networkidle",
-                            timeout=timeout_ms,
-                        )
-
-                        if wait_for_selector:
-                            await page.wait_for_selector(
-                                wait_for_selector,
-                                timeout=timeout_ms,
-                                state="visible",
-                            )
-
-                        if actions:
-                            await execute_browser_actions(
-                                page, actions, default_timeout_ms=timeout_ms
-                            )
-
-                        await self._close_modals(page)
-                        await validate_browser_navigation(page, None, context)
-
-                        logger.info("Generating PDF...")
-
-                        pdf_bytes = await page.pdf(
-                            format=pdf_options.get("format", "A4"),
-                            print_background=pdf_options.get("print_background", True),
-                            margin=pdf_options.get(
-                                "margin",
-                                {
-                                    "top": "20px",
-                                    "right": "20px",
-                                    "bottom": "20px",
-                                    "left": "20px",
-                                },
-                            ),
-                            prefer_css_page_size=True,
-                            display_header_footer=False,
-                        )
-
-                        logger.info(f"PDF generated successfully, size: {len(pdf_bytes)} bytes")
-                        span.set_attribute("pdf.bytes", len(pdf_bytes))
-                        return pdf_bytes
-
-                    finally:
-                        if page:
-                            try:
-                                await page.close()
-                            except Exception:
-                                pass
-
-            except (PDFGeneratorError, BrowserActionError, URLValidationError):
+                session = BrowserSession(self, egress_policy=self._egress_policy)
+                async with session as (context, page):
+                    logger.info(f"Loading page: {url}")
+                    await self._navigate_for_capture(
+                        session,
+                        url,
+                        wait_until=pdf_options.get("wait_for", "networkidle"),
+                        timeouts_ms=(timeout_ms, timeout_ms),
+                        strict_settle=True,
+                    )
+                    await self._run_pre_capture_steps(
+                        page,
+                        context,
+                        wait_for_selector=wait_for_selector,
+                        actions=actions,
+                        timeout_ms=timeout_ms,
+                    )
+                    pdf_bytes: bytes = await page.pdf(
+                        format=pdf_options.get("format", "A4"),
+                        print_background=pdf_options.get("print_background", True),
+                        margin=pdf_options["margin"],
+                        prefer_css_page_size=True,
+                        display_header_footer=False,
+                    )
+                    enforce_rendered_output_size(
+                        pdf_bytes,
+                        max_output_bytes=max_output_bytes,
+                        egress_policy=self._egress_policy,
+                    )
+                    span.set_attribute("pdf.bytes", len(pdf_bytes))
+                    logger.info(f"PDF generated successfully, size: {len(pdf_bytes)} bytes")
+                    return pdf_bytes
+            except (
+                PDFGeneratorError,
+                BrowserActionError,
+                URLValidationError,
+                ContentTooLargeError,
+            ):
                 raise
-            except Exception as e:
-                logger.error(f"Unexpected error generating PDF: {e}")
-                raise PDFGeneratorError(f"PDF generation failed: {e}")
+            except (PlaywrightError, TimeoutError, RuntimeError, OSError, ValueError) as exc:
+                logger.error(f"Unexpected error generating PDF: {exc}")
+                raise PDFGeneratorError(f"PDF generation failed: {exc}") from exc
 
     async def generate_screenshot(
         self,
@@ -509,8 +654,9 @@ class PlaywrightPDFGenerator:
         *,
         actions: Sequence[BrowserAction] | None = None,
         wait_for_selector: str | None = None,
+        max_output_bytes: int | None = None,
     ) -> bytes:
-        """Capture a PNG or JPEG screenshot from a URL using the shared browser pool."""
+        """Capture a PNG or JPEG screenshot from a URL with `max_download_size` enforcement."""
         shot_options: dict[str, Any] = {
             "type": "png",
             "full_page": False,
@@ -523,123 +669,67 @@ class PlaywrightPDFGenerator:
         if image_type not in ("png", "jpeg"):
             raise PDFGeneratorError(f"Unsupported screenshot format: {image_type}")
 
+        timeout_ms = int(shot_options.get("timeout", self.page_load_timeout))
         tracer = get_tracer(__name__)
         with tracer.start_as_current_span("playwright.screenshot") as span:
             span.set_attribute("http.url", url)
             span.set_attribute("screenshot.type", image_type)
             span.set_attribute("screenshot.full_page", bool(shot_options.get("full_page", False)))
             try:
-                async with self._get_browser_context() as (browser, context):
-                    page = await context.new_page()
-                    try:
-                        timeout_ms = int(shot_options.get("timeout", self.page_load_timeout))
-                        try:
-                            response = await page.goto(
-                                url,
-                                wait_until="domcontentloaded",
-                                timeout=timeout_ms,
-                            )
-                        except (PlaywrightTimeoutError, TimeoutError):
-                            raise PDFGeneratorError(f"Timeout loading page: {url}")
+                session = BrowserSession(self, egress_policy=self._egress_policy)
+                async with session as (context, page):
+                    await self._navigate_for_capture(
+                        session,
+                        url,
+                        wait_until="domcontentloaded",
+                        timeouts_ms=(timeout_ms, min(timeout_ms, 2500)),
+                    )
+                    await self._run_pre_capture_steps(
+                        page,
+                        context,
+                        wait_for_selector=wait_for_selector,
+                        actions=actions,
+                        timeout_ms=timeout_ms,
+                    )
+                    screenshot_kwargs: dict[str, Any] = {
+                        "type": image_type,
+                        "full_page": bool(shot_options.get("full_page", False)),
+                    }
+                    if image_type == "jpeg" and "quality" in shot_options:
+                        screenshot_kwargs["quality"] = int(shot_options["quality"])
 
-                        if not response:
-                            raise PDFGeneratorError(f"Failed to load page: {url}")
-                        if response.status >= 400:
-                            raise PDFGeneratorError(
-                                f"HTTP {response.status}: {response.status_text}",
-                                status_code=response.status,
-                            )
-
-                        await validate_browser_navigation(page, response, context)
-
-                        settle_ms = min(timeout_ms, 2500)
-                        try:
-                            await page.wait_for_load_state("networkidle", timeout=settle_ms)
-                        except (PlaywrightTimeoutError, TimeoutError):
-                            logger.debug(
-                                f"Proceeding with screenshot after {settle_ms}ms settle: {url}"
-                            )
-
-                        if wait_for_selector:
-                            await page.wait_for_selector(
-                                wait_for_selector,
-                                timeout=timeout_ms,
-                                state="visible",
-                            )
-
-                        if actions:
-                            await execute_browser_actions(
-                                page, actions, default_timeout_ms=timeout_ms
-                            )
-
-                        await self._close_modals(page)
-                        await validate_browser_navigation(page, None, context)
-
-                        screenshot_kwargs: dict[str, Any] = {
-                            "type": image_type,
-                            "full_page": bool(shot_options.get("full_page", False)),
-                        }
-                        if image_type == "jpeg" and "quality" in shot_options:
-                            screenshot_kwargs["quality"] = int(shot_options["quality"])
-
-                        screenshot_bytes: bytes = await page.screenshot(**screenshot_kwargs)
-                        span.set_attribute("screenshot.bytes", len(screenshot_bytes))
-                        logger.info(
-                            f"Screenshot captured ({image_type}), size: {len(screenshot_bytes)} bytes"
-                        )
-                        return screenshot_bytes
-                    finally:
-                        if page:
-                            try:
-                                await page.close()
-                            except Exception:
-                                pass
-            except (PDFGeneratorError, BrowserActionError, URLValidationError):
+                    screenshot_bytes: bytes = await page.screenshot(**screenshot_kwargs)
+                    enforce_rendered_output_size(
+                        screenshot_bytes,
+                        max_output_bytes=max_output_bytes,
+                        egress_policy=self._egress_policy,
+                    )
+                    span.set_attribute("screenshot.bytes", len(screenshot_bytes))
+                    logger.info(
+                        f"Screenshot captured ({image_type}), size: {len(screenshot_bytes)} bytes"
+                    )
+                    return screenshot_bytes
+            except (
+                PDFGeneratorError,
+                BrowserActionError,
+                URLValidationError,
+                ContentTooLargeError,
+            ):
                 raise
-            except Exception as e:
-                logger.error(f"Unexpected error capturing screenshot: {e}")
-                raise PDFGeneratorError(f"Screenshot generation failed: {e}")
-
-    async def _close_modals(self, page):
-        """Helper method to close common modal dialogs."""
-        try:
-            close_selectors = [
-                '[aria-label="close"]',
-                '[title="Close"]',
-                '[aria-label="Close"]',
-                '[title="close"]',
-                ".modal-close",
-                ".close-button",
-            ]
-            for selector in close_selectors:
-                close_buttons = await page.query_selector_all(selector)
-                for button in close_buttons:
-                    try:
-                        await button.click(timeout=1000)
-                        logger.debug(f"Closed modal/popup with selector: {selector}")
-                        await page.wait_for_timeout(500)  # Brief wait after closing
-                    except Exception:
-                        pass  # Ignore if click fails
-        except Exception:
-            pass  # Ignore any errors during modal closing
+            except (PlaywrightError, TimeoutError, RuntimeError, OSError, ValueError) as exc:
+                logger.error(f"Unexpected error capturing screenshot: {exc}")
+                raise PDFGeneratorError(f"Screenshot generation failed: {exc}") from exc
 
 
-# Global instance for reuse
 _pdf_generator: PlaywrightPDFGenerator | None = None
 _initialization_lock = asyncio.Lock()
 
 
 @asynccontextmanager
-async def get_pdf_generator():
-    """
-    Get or create a shared PDF generator instance.
-
-    Yields:
-        PlaywrightPDFGenerator: The PDF generator instance
-    """
+async def get_pdf_generator() -> AsyncIterator[PlaywrightPDFGenerator]:
+    """Get or create the shared `PlaywrightPDFGenerator` instance."""
     global _pdf_generator
 
-    # Use lock to prevent multiple simultaneous initializations
     async with _initialization_lock:
         if _pdf_generator is None:
             cfg = get_settings()
@@ -656,11 +746,11 @@ async def get_pdf_generator():
             _pdf_generator = generator
 
     try:
+        assert _pdf_generator is not None
         yield _pdf_generator
-    except Exception as e:
-        logger.error(f"Error in PDF generator: {e}")
-        # Don't recreate on every error - only close if it's a severe error
-        if "initialization failed" in str(e).lower():
+    except (PDFGeneratorError, BrowserPoolError, PlaywrightError, RuntimeError, OSError) as exc:
+        logger.error(f"Error in PDF generator: {exc}")
+        if "initialization failed" in str(exc).lower():
             async with _initialization_lock:
                 if _pdf_generator:
                     await _pdf_generator.close()
@@ -674,15 +764,17 @@ async def generate_pdf_from_url(
     *,
     actions: Sequence[BrowserAction] | None = None,
     wait_for_selector: str | None = None,
+    max_output_bytes: int | None = None,
 ) -> bytes:
     """Generate PDF from URL using shared generator instance."""
     async with get_pdf_generator() as generator:
-        if actions or wait_for_selector:
+        if actions or wait_for_selector or max_output_bytes is not None:
             return await generator.generate_pdf(
                 url,
                 options,
                 actions=actions,
                 wait_for_selector=wait_for_selector,
+                max_output_bytes=max_output_bytes,
             )
         return await generator.generate_pdf(url, options)
 
@@ -693,9 +785,18 @@ async def generate_screenshot_from_url(
     *,
     actions: Sequence[BrowserAction] | None = None,
     wait_for_selector: str | None = None,
+    max_output_bytes: int | None = None,
 ) -> bytes:
     """Capture a screenshot from URL using shared generator instance."""
     async with get_pdf_generator() as generator:
+        if max_output_bytes is not None:
+            return await generator.generate_screenshot(
+                url,
+                options,
+                actions=actions,
+                wait_for_selector=wait_for_selector,
+                max_output_bytes=max_output_bytes,
+            )
         return await generator.generate_screenshot(
             url,
             options,
@@ -715,7 +816,7 @@ def get_shared_pdf_generator() -> PlaywrightPDFGenerator | None:
     return _pdf_generator
 
 
-async def cleanup_pdf_generator():
+async def cleanup_pdf_generator() -> None:
     """Cleanup global PDF generator instance."""
     global _pdf_generator
     if _pdf_generator:

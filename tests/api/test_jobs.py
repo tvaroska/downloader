@@ -2,9 +2,9 @@
 
 from datetime import UTC, datetime
 
-from src.downloader.dependencies import get_job_manager_dependency
-from src.downloader.job_manager import JobInfo, JobResult, JobStatus
-from src.downloader.main import app
+from downloader.dependencies import get_job_manager_dependency
+from downloader.job_manager import JobInfo, JobResult, JobStatus
+from downloader.main import app
 
 
 class TestJobEndpoints:

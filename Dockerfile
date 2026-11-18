@@ -72,4 +72,4 @@ HEALTHCHECK --interval=30s --timeout=10s --start-period=5s --retries=3 \
     CMD curl -f http://localhost:8000/health || exit 1
 
 # Run application with graceful connection draining budget
-CMD ["python", "-m", "uvicorn", "src.downloader.main:app", "--host", "0.0.0.0", "--port", "8000", "--timeout-graceful-shutdown", "35"]
+CMD ["python", "-m", "uvicorn", "downloader.main:app", "--host", "0.0.0.0", "--port", "8000", "--timeout-graceful-shutdown", "35"]

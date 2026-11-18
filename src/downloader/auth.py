@@ -1,11 +1,13 @@
-"""Authentication middleware and utilities."""
+"""Authentication middleware and constant-time API-key verification."""
+
+from __future__ import annotations
 
 import logging
 import os
 import secrets
-import sys
 from collections.abc import Mapping
 from pathlib import Path
+from typing import Any
 
 from fastapi import Depends, HTTPException, Request, status
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
@@ -14,15 +16,11 @@ from .config import AuthConfig, Settings, get_settings
 
 logger = logging.getLogger(__name__)
 
-
-# Security scheme for API key authentication
 security = HTTPBearer(auto_error=False)
 
 
 class APIKeyError(Exception):
     """Raised when API key authentication fails."""
-
-    pass
 
 
 def _resolve_configured_api_key(settings: Settings | None = None) -> str | None:
@@ -38,7 +36,7 @@ def _resolve_configured_api_key(settings: Settings | None = None) -> str | None:
             raw = active.auth.api_key
     elif "DOWNLOADER_KEY" in os.environ:
         raw = os.environ.get("DOWNLOADER_KEY")
-    elif "pytest" not in sys.modules and Path(".env").is_file():
+    elif AuthConfig.model_config.get("env_file") and Path(".env").is_file():
         raw = AuthConfig().api_key
 
     cleaned = raw.strip() if isinstance(raw, str) else ""
@@ -46,36 +44,17 @@ def _resolve_configured_api_key(settings: Settings | None = None) -> str | None:
 
 
 def is_auth_enabled(settings: Settings | None = None) -> bool:
-    """
-    Check if API key authentication is enabled.
-
-    Args:
-        settings: Optional settings instance (will load from environment/.env if not provided)
-
-    Returns:
-        True if API key is configured
-    """
+    """Return True if API key authentication is configured."""
     return _resolve_configured_api_key(settings) is not None
 
 
 def verify_api_key(api_key: str, settings: Settings | None = None) -> bool:
-    """
-    Verify if the provided API key is valid using constant-time digest comparison.
-
-    Args:
-        api_key: The API key to verify
-        settings: Optional settings instance
-
-    Returns:
-        True if the API key is valid, False otherwise
-    """
+    """Verify `api_key` against configured key using constant-time `secrets.compare_digest`."""
     expected = _resolve_configured_api_key(settings)
     if expected is None:
         return True
-
     if not isinstance(api_key, str) or not api_key:
         return False
-
     return secrets.compare_digest(api_key.encode("utf-8"), expected.encode("utf-8"))
 
 
@@ -98,46 +77,24 @@ async def get_api_key(
     request: Request,
     credentials: HTTPAuthorizationCredentials | None = Depends(security),
 ) -> str | None:
-    """
-    Extract API key from request headers.
-
-    Supports multiple authentication methods:
-    1. Bearer token in Authorization header
-    2. X-API-Key header
-
-    Args:
-        request: FastAPI request object
-        credentials: Bearer token credentials
-
-    Returns:
-        API key if found, None otherwise
-
-    Raises:
-        HTTPException: If authentication is required but missing/invalid
-    """
+    """Validate Bearer or X-API-Key credentials when authentication is enabled."""
     scope = getattr(request, "scope", None)
     app_obj = scope.get("app") if isinstance(scope, Mapping) else None
     state_obj = getattr(app_obj, "state", None)
     candidate = getattr(state_obj, "settings", None)
     req_settings = candidate if isinstance(candidate, Settings) else None
 
-    # Skip authentication if not enabled
     if not is_auth_enabled(req_settings):
         return None
 
-    api_key = None
-
-    # Method 1: Bearer token
+    api_key: str | None = None
     if credentials and credentials.credentials:
         api_key = credentials.credentials
         logger.debug("API key found in Authorization header")
-
-    # Method 2: X-API-Key header
     elif "x-api-key" in request.headers:
         api_key = request.headers["x-api-key"]
         logger.debug("API key found in X-API-Key header")
 
-    # Verify the API key
     if not api_key:
         logger.warning("API key authentication required but not provided")
         raise HTTPException(
@@ -166,18 +123,9 @@ async def get_api_key(
     return api_key
 
 
-def get_auth_status(settings: Settings | None = None) -> dict:
-    """
-    Get current authentication status information.
-
-    Args:
-        settings: Optional settings instance (will load from get_settings() if not provided)
-
-    Returns:
-        Dictionary with authentication status information
-    """
+def get_auth_status(settings: Settings | None = None) -> dict[str, Any]:
+    """Return authentication status summary for `/health`."""
     auth_enabled = is_auth_enabled(settings)
-
     return {
         "auth_enabled": auth_enabled,
         "auth_methods": [

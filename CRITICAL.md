@@ -21,6 +21,8 @@ Registry of protected/sensitive paths. Any task touching a path here
 | `src/downloader/pdf_generator.py` / `src/downloader/content_converter.py` | Unified `pdf_semaphore` browser concurrency, Playwright SSRF `context.route("**/*", ...)` guard, screenshot/PDF capture, and idle browser scale-to-zero. |
 | `src/downloader/drain.py` | Graceful shutdown connection draining (`DrainCoordinator`, `DrainMiddleware`, `/health` `503` readiness transition). |
 | `src/downloader/worker.py` / `src/downloader/worker_queue.py` | Split API/worker Redis `BLMOVE` job queue, remote browser RPC dispatch, and worker heartbeat lifecycle. |
+| `src/downloader/ports.py` / `src/downloader/errors.py` | Hexagonal `BrowserRenderer`, `JobStore`, and `WorkQueue` contracts, single `pdf_semaphore` capacity gate, and deterministic exception-to-HTTP classification. |
+| `specs/ast.rules.yaml` / `tests/test_isolation_guard.py` | Declarative AST security and port-isolation rules (`secrets.compare_digest`, framework-free `services/`, `downloader.*` import hygiene). |
 | `Dockerfile` / `docker-compose.split.yml` / `docker-compose.prod.yml` | Production image (`tesseract-ocr`, Playwright Chromium, graceful drain) + deploy configs; non-root container, prod secrets. |
 | `cloudbuild.yaml` / `ci/trigger.yaml` | Cloud Build CI/CD pipeline + GitHub triggers; controls verification gates and Artifact Registry release pushes. |
 | `DOWNLOADER_KEY`, `REDIS_URI` (env/secrets) | Auth key + datastore credentials. Never commit real values. |

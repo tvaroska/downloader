@@ -1,7 +1,7 @@
 """Tests for batch processing authentication scenarios."""
 
-from src.downloader.dependencies import get_http_client, get_job_manager_dependency
-from src.downloader.main import app
+from downloader.dependencies import get_http_client, get_job_manager_dependency
+from downloader.main import app
 
 
 class TestBatchAuthentication:

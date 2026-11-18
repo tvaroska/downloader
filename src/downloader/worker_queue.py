@@ -1,4 +1,4 @@
-"""Redis-backed reliable job queue, remote browser RPC, and worker heartbeat registry."""
+"""Redis-backed `WorkQueue` adapter for batch jobs, browser RPC, and worker heartbeats."""
 
 from __future__ import annotations
 
@@ -85,17 +85,20 @@ class WorkerQueue:
             },
             separators=(",", ":"),
         )
-        await self.redis.lpush(BATCH_PENDING_QUEUE, payload)  # type: ignore[misc]
+        await cast(Any, self.redis.lpush(BATCH_PENDING_QUEUE, payload))
         logger.info(f"Enqueued batch job {job_id} onto {BATCH_PENDING_QUEUE}")
 
     async def pop_batch_job(self, timeout: float = 2.0) -> BatchQueueEnvelope | None:
         """Atomically move the oldest queued batch job into the processing list."""
-        raw = await self.redis.blmove(  # type: ignore[misc]
-            BATCH_PENDING_QUEUE,
-            BATCH_PROCESSING_QUEUE,
-            timeout=int(max(1, round(timeout))),
-            src="RIGHT",
-            dest="LEFT",
+        raw = await cast(
+            Any,
+            self.redis.blmove(
+                BATCH_PENDING_QUEUE,
+                BATCH_PROCESSING_QUEUE,
+                timeout=int(max(1, round(timeout))),
+                src="RIGHT",
+                dest="LEFT",
+            ),
         )
         if not raw:
             return None
@@ -106,23 +109,26 @@ class WorkerQueue:
                 trace_headers=dict(data.get("trace_headers") or {}),
                 raw_payload=str(raw),
             )
-        except Exception as exc:
+        except (json.JSONDecodeError, KeyError, TypeError, ValueError) as exc:
             logger.error(f"Malformed batch queue payload discarded: {exc}")
             await self.ack_batch_job(str(raw))
             return None
 
     async def ack_batch_job(self, raw_payload: str) -> None:
-        await self.redis.lrem(BATCH_PROCESSING_QUEUE, 1, raw_payload)  # type: ignore[misc]
+        await cast(Any, self.redis.lrem(BATCH_PROCESSING_QUEUE, 1, raw_payload))
 
     async def requeue_processing_jobs(self) -> int:
         """Requeue any orphaned batch entries left in processing after a crash."""
         moved = 0
         while True:
-            item = await self.redis.lmove(  # type: ignore[misc]
-                BATCH_PROCESSING_QUEUE,
-                BATCH_PENDING_QUEUE,
-                src="RIGHT",
-                dest="LEFT",
+            item = await cast(
+                Any,
+                self.redis.lmove(
+                    BATCH_PROCESSING_QUEUE,
+                    BATCH_PENDING_QUEUE,
+                    src="RIGHT",
+                    dest="LEFT",
+                ),
             )
             if not item:
                 break
@@ -140,8 +146,8 @@ class WorkerQueue:
         if not task.trace_headers:
             task = task.model_copy(update={"trace_headers": inject_trace_headers()})
         result_key = f"{BROWSER_RESULT_PREFIX}{task.task_id}"
-        await self.redis.lpush(BROWSER_PENDING_QUEUE, task.model_dump_json())  # type: ignore[misc]
-        raw = await self.redis.blpop([result_key], timeout=timeout)  # type: ignore[misc]
+        await cast(Any, self.redis.lpush(BROWSER_PENDING_QUEUE, task.model_dump_json()))
+        raw = await cast(Any, self.redis.blpop([result_key], timeout=timeout))
         if not raw:
             raise TimeoutError(
                 f"Remote browser worker timed out after {timeout:.1f}s for task {task.task_id}"
@@ -150,7 +156,7 @@ class WorkerQueue:
         return BrowserTaskResponse.model_validate_json(payload)
 
     async def pop_browser_task(self, timeout: float = 2.0) -> BrowserTaskRequest | None:
-        raw = await self.redis.brpop([BROWSER_PENDING_QUEUE], timeout=timeout)  # type: ignore[misc]
+        raw = await cast(Any, self.redis.brpop([BROWSER_PENDING_QUEUE], timeout=timeout))
         if not raw:
             return None
         _, payload = raw
@@ -207,8 +213,10 @@ class WorkerQueue:
             if not raw:
                 continue
             try:
-                workers.append(json.loads(raw))
-            except Exception:
+                parsed = json.loads(raw)
+                if isinstance(parsed, dict):
+                    workers.append(parsed)
+            except (json.JSONDecodeError, TypeError, ValueError):
                 continue
         return workers
 

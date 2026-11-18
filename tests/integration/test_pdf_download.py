@@ -5,9 +5,9 @@ from unittest.mock import AsyncMock, patch
 
 import pytest
 
-from src.downloader.dependencies import get_http_client, get_pdf_semaphore
-from src.downloader.main import app
-from src.downloader.pdf_generator import PDFGeneratorError
+from downloader.dependencies import get_http_client, get_pdf_semaphore
+from downloader.main import app
+from downloader.pdf_generator import PDFGeneratorError
 
 
 @pytest.mark.integration
@@ -37,7 +37,7 @@ class TestPDFDownload:
         app.dependency_overrides[get_http_client] = mock_get_http_client
         try:
             with patch(
-                "src.downloader.services.content_processor.generate_pdf_from_url",
+                "downloader.services.content_processor.generate_pdf_from_url",
                 return_value=pdf_content,
             ) as mock_generate_pdf:
                 response = api_client.get(
@@ -73,7 +73,7 @@ class TestPDFDownload:
         app.dependency_overrides[get_http_client] = mock_get_http_client
         try:
             with patch(
-                "src.downloader.services.content_processor.generate_pdf_from_url",
+                "downloader.services.content_processor.generate_pdf_from_url",
                 side_effect=PDFGeneratorError("Browser failed to start"),
             ):
                 response = api_client.get(

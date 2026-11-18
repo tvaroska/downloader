@@ -3,15 +3,9 @@
     "mypy:not-strict",
     "ruff-ignore:B904",
     "ruff:ANN",
-    "ruff:BLE",
-    "ruff:C90",
-    "ruff:PLR0911",
-    "ruff:PLR0912",
-    "ruff:PLR0913",
-    "ruff:PLR0915",
     "ruff:RUF",
     "ruff:S"
   ],
   "oversized_files": {},
-  "narration_comments": 18
+  "narration_comments": 0
 }

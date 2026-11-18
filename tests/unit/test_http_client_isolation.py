@@ -5,8 +5,8 @@ from __future__ import annotations
 import httpx
 import pytest
 
-from src.downloader.crawling.robots import RobotsChecker
-from src.downloader.http_client import HTTPClient
+from downloader.crawling.robots import RobotsChecker
+from downloader.http_client import HTTPClient
 
 
 @pytest.mark.unit

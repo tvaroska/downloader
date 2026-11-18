@@ -4,7 +4,7 @@ from unittest.mock import AsyncMock, patch
 
 import pytest
 
-from src.downloader.pdf_generator import (
+from downloader.pdf_generator import (
     PDFGeneratorError,
     PlaywrightPDFGenerator,
     generate_pdf_from_url,
@@ -90,6 +90,7 @@ class TestPlaywrightPDFGenerator:
 
         assert result == b"%PDF-1.4 lazy"
         assert generator.pool is pool_instance
+        assert pool_instance is not None
         pool_instance.start.assert_called_once()
 
 
@@ -226,7 +227,7 @@ class TestGlobalPDFFunctions:
     @pytest.mark.asyncio
     async def test_generate_pdf_from_url(self):
         """Test generate_pdf_from_url function."""
-        with patch("src.downloader.pdf_generator.get_pdf_generator") as mock_get_generator:
+        with patch("downloader.pdf_generator.get_pdf_generator") as mock_get_generator:
             mock_generator = AsyncMock()
             mock_generator.generate_pdf = AsyncMock(return_value=b"PDF content")
 
@@ -243,11 +244,11 @@ class TestGlobalPDFFunctions:
     @pytest.mark.asyncio
     async def test_get_pdf_generator_creates_new(self):
         """Test that get_pdf_generator creates new instance when none exists."""
-        import src.downloader.pdf_generator
+        import downloader.pdf_generator
 
-        src.downloader.pdf_generator._pdf_generator = None
+        downloader.pdf_generator._pdf_generator = None
 
-        with patch("src.downloader.pdf_generator.PlaywrightPDFGenerator") as mock_class:
+        with patch("downloader.pdf_generator.PlaywrightPDFGenerator") as mock_class:
             mock_instance = AsyncMock()
             mock_class.return_value = mock_instance
 
@@ -258,10 +259,10 @@ class TestGlobalPDFFunctions:
     @pytest.mark.asyncio
     async def test_get_pdf_generator_reuses_existing(self):
         """Test that get_pdf_generator reuses existing instance."""
-        import src.downloader.pdf_generator
+        import downloader.pdf_generator
 
         existing_instance = AsyncMock()
-        src.downloader.pdf_generator._pdf_generator = existing_instance
+        downloader.pdf_generator._pdf_generator = existing_instance
 
         async with get_pdf_generator() as generator:
             assert generator == existing_instance

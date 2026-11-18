@@ -198,6 +198,47 @@ class StandardsBaselineTest(unittest.TestCase):
             "New numbered-step or banner comments; comments explain why, not what",
         )
 
+    def test_baseline_scanner_positive_control(self) -> None:
+        """Positive control in an isolated tmp_path verifying config, size, and narration detection (`R56`)."""
+        import sys
+        import tempfile
+        from unittest.mock import patch
+
+        with tempfile.TemporaryDirectory() as raw_dir:
+            tmp_path = Path(raw_dir)
+            (tmp_path / "pyproject.toml").write_text(
+                '[project]\nname = "probe"\nrequires-python = ">=3.11"\n'
+                '[tool.ruff.lint]\nselect = ["E"]\nignore = ["BLE001"]\n',
+                encoding="utf-8",
+            )
+            pkg_dir = tmp_path / "pkg"
+            pkg_dir.mkdir()
+            banner = "# " + ("=" * 16)
+            step_one = "# " + "1. Initialize client"
+            step_two = "# " + "Step 2: Run query"
+            oversized_lines = [banner, step_one, step_two] + [
+                f"x_{idx} = {idx}" for idx in range(MAX_SOURCE_LINES + 2)
+            ]
+            (pkg_dir / "big.py").write_text("\n".join(oversized_lines) + "\n", encoding="utf-8")
+
+            ignored_dir = tmp_path / "node_modules"
+            ignored_dir.mkdir()
+            (ignored_dir / "ignored.js").write_text("// " + ("=" * 20) + "\n", encoding="utf-8")
+
+            with patch.object(sys.modules[__name__], "REPO_ROOT", tmp_path):
+                measured = measure()
+
+            self.assertIsNotNone(measured["config"])
+            assert measured["config"] is not None
+            self.assertIn("ruff:BLE", measured["config"])
+            self.assertIn("ruff-ignore:BLE001", measured["config"])
+            self.assertIn("mypy:missing", measured["config"])
+            self.assertIn("uv-lock:missing", measured["config"])
+            self.assertIn("python:below-3.12", measured["config"])
+            self.assertIn("pkg/big.py", measured["oversized_files"])
+            self.assertGreater(measured["oversized_files"]["pkg/big.py"], MAX_SOURCE_LINES)
+            self.assertEqual(measured["narration_comments"], 3)
+
 
 if __name__ == "__main__":
     unittest.main()

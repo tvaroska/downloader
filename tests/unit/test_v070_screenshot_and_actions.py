@@ -10,19 +10,19 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import pytest
 from fastapi.testclient import TestClient
 
-from src.downloader.browser.actions import (
+from downloader.browser.actions import (
     MAX_BROWSER_ACTIONS,
     BrowserAction,
     BrowserActionError,
     execute_browser_actions,
     parse_actions_param,
 )
-from src.downloader.content_converter import SelectorTimeoutError
-from src.downloader.crawling import RobotsDisallowedError
-from src.downloader.dependencies import get_domain_throttle, get_http_client, get_robots_checker
-from src.downloader.main import app
-from src.downloader.models.responses import BatchURLRequest
-from src.downloader.services.batch_processor import process_single_url_in_batch
+from downloader.content_converter import SelectorTimeoutError
+from downloader.crawling import RobotsDisallowedError
+from downloader.dependencies import get_domain_throttle, get_http_client, get_robots_checker
+from downloader.main import app
+from downloader.models.responses import BatchURLRequest
+from downloader.services.batch_processor import process_single_url_in_batch
 
 
 class _FakeLocator:
@@ -194,11 +194,11 @@ class TestScreenshotAndRenderEndpoints:
 
         with (
             patch(
-                "src.downloader.routes.download.validate_url_async",
+                "downloader.routes.download.validate_url_async",
                 new=AsyncMock(return_value="https://example.com"),
             ),
             patch(
-                "src.downloader.services.content_negotiation.generate_screenshot_from_url",
+                "downloader.pdf_generator.generate_screenshot_from_url",
                 new=AsyncMock(side_effect=[fake_png, fake_jpeg]),
             ) as mock_shot,
             TestClient(app) as client,
@@ -226,11 +226,11 @@ class TestScreenshotAndRenderEndpoints:
         fake_png = b"\x89PNG\r\n\x1a\nSHOT"
         with (
             patch(
-                "src.downloader.routes.download.validate_url_async",
+                "downloader.routes.download.validate_url_async",
                 new=AsyncMock(return_value="https://example.com"),
             ),
             patch(
-                "src.downloader.services.content_negotiation.generate_screenshot_from_url",
+                "downloader.pdf_generator.generate_screenshot_from_url",
                 new=AsyncMock(return_value=fake_png),
             ),
             TestClient(app) as client,
@@ -252,11 +252,11 @@ class TestScreenshotAndRenderEndpoints:
         self._setup_mock_dependencies()
         with (
             patch(
-                "src.downloader.routes.download.validate_url_async",
+                "downloader.routes.download.validate_url_async",
                 new=AsyncMock(return_value="https://example.com"),
             ),
             patch(
-                "src.downloader.services.content_processor.generate_pdf_from_url",
+                "downloader.pdf_generator.generate_pdf_from_url",
                 new=AsyncMock(return_value=b"%PDF-1.7 test"),
             ),
             TestClient(app) as client,
@@ -270,11 +270,11 @@ class TestScreenshotAndRenderEndpoints:
         self._setup_mock_dependencies()
         with (
             patch(
-                "src.downloader.routes.download.validate_url_async",
+                "downloader.routes.download.validate_url_async",
                 new=AsyncMock(return_value="https://example.com"),
             ),
             patch(
-                "src.downloader.services.content_processor.render_html_with_playwright",
+                "downloader.content_converter.render_html_with_playwright",
                 new=AsyncMock(return_value=b"<html><body><h1>Clicked!</h1></body></html>"),
             ) as mock_render,
             TestClient(app) as client,
@@ -288,6 +288,7 @@ class TestScreenshotAndRenderEndpoints:
             assert resp.status_code == 200
             assert "# Clicked!" in resp.text
             assert resp.headers["x-rendered-with-js"] == "true"
+            assert mock_render.await_args is not None
             _, kwargs = mock_render.await_args
             assert len(kwargs["actions"]) == 1
             assert kwargs["actions"][0].type == "click"
@@ -300,19 +301,19 @@ class TestScreenshotAndRenderEndpoints:
         mock_robots = self._setup_mock_dependencies()
         with (
             patch(
-                "src.downloader.routes.render.validate_url_async",
+                "downloader.routes.render.validate_url_async",
                 new=AsyncMock(return_value="https://example.com"),
             ),
             patch(
-                "src.downloader.services.content_processor.render_html_with_playwright",
+                "downloader.content_converter.render_html_with_playwright",
                 new=AsyncMock(return_value=b"<html><body><h1>App</h1><p>Done</p></body></html>"),
             ),
             patch(
-                "src.downloader.services.content_processor.generate_pdf_from_url",
+                "downloader.pdf_generator.generate_pdf_from_url",
                 new=AsyncMock(return_value=b"%PDF-1.7 rendered"),
             ),
             patch(
-                "src.downloader.services.content_negotiation.generate_screenshot_from_url",
+                "downloader.pdf_generator.generate_screenshot_from_url",
                 new=AsyncMock(return_value=b"\x89PNG\r\n\x1a\nRENDER"),
             ),
             TestClient(app) as client,
@@ -357,11 +358,11 @@ class TestScreenshotAndRenderEndpoints:
         self._setup_mock_dependencies()
         with (
             patch(
-                "src.downloader.routes.render.validate_url_async",
+                "downloader.routes.render.validate_url_async",
                 new=AsyncMock(return_value="https://example.com"),
             ),
             patch(
-                "src.downloader.services.content_processor.render_html_with_playwright",
+                "downloader.content_converter.render_html_with_playwright",
                 new=AsyncMock(side_effect=SelectorTimeoutError("#never", 5000)),
             ),
             TestClient(app) as client,
@@ -374,11 +375,11 @@ class TestScreenshotAndRenderEndpoints:
 
         with (
             patch(
-                "src.downloader.routes.render.validate_url_async",
+                "downloader.routes.render.validate_url_async",
                 new=AsyncMock(return_value="https://example.com"),
             ),
             patch(
-                "src.downloader.services.content_processor.render_html_with_playwright",
+                "downloader.content_converter.render_html_with_playwright",
                 new=AsyncMock(side_effect=BrowserActionError("click failed")),
             ),
             TestClient(app) as client,
@@ -409,15 +410,15 @@ class TestScreenshotAndRenderEndpoints:
         )
         with (
             patch(
-                "src.downloader.routes.batch.validate_url_async",
+                "downloader.services.batch_processor.validate_url_async",
                 new=AsyncMock(return_value="https://example.com"),
             ),
             patch(
-                "src.downloader.services.batch_processor.generate_screenshot_from_url",
+                "downloader.pdf_generator.generate_screenshot_from_url",
                 new=AsyncMock(return_value=b"\xff\xd8\xffJPEG"),
             ),
             patch(
-                "src.downloader.services.batch_processor.render_html_with_playwright",
+                "downloader.content_converter.render_html_with_playwright",
                 new=AsyncMock(return_value=b"<html><body><h2>Expanded</h2></body></html>"),
             ),
         ):

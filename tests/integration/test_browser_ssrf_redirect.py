@@ -7,8 +7,8 @@ import contextlib
 
 import pytest
 
-from src.downloader.pdf_generator import PlaywrightPDFGenerator
-from src.downloader.validation import SSRFProtectionError
+from downloader.pdf_generator import PlaywrightPDFGenerator
+from downloader.validation import SSRFProtectionError
 
 
 @pytest.mark.integration

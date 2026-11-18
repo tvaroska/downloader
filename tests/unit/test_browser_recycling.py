@@ -7,9 +7,9 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
-from src.downloader.browser.manager import BrowserConfig, BrowserPool
-from src.downloader.config import reload_settings
-from src.downloader.pdf_generator import (
+from downloader.browser.manager import BrowserConfig, BrowserPool
+from downloader.config import reload_settings
+from downloader.pdf_generator import (
     DEFAULT_BROWSER_USER_AGENT,
     PlaywrightPDFGenerator,
     _ssrf_route_guard,
@@ -32,7 +32,7 @@ class TestBrowserPoolMaxUsesRecycling:
             launched_browsers.append(b)
             return b
 
-        with patch("src.downloader.browser.manager.async_playwright") as mock_pw_fn:
+        with patch("downloader.browser.manager.async_playwright") as mock_pw_fn:
             pw_instance = AsyncMock()
             pw_instance.chromium.launch = AsyncMock(side_effect=lambda **_kw: _make_browser())
             pw_instance.stop = AsyncMock()
@@ -48,7 +48,7 @@ class TestBrowserPoolMaxUsesRecycling:
                 b1 = await pool.get_browser()
                 assert b1 is first_browser
                 await pool.release_browser(b1)
-                assert pool.get_pool_stats()["recycled_count"] == 0
+                assert pool._recycled_count == 0
                 assert len(launched_browsers) == 1
                 first_browser.close.assert_not_awaited()
 
@@ -57,10 +57,9 @@ class TestBrowserPoolMaxUsesRecycling:
                 assert b2 is first_browser
                 await pool.release_browser(b2)
 
-                stats = pool.get_pool_stats()
-                assert stats["recycled_count"] == 1
-                assert stats["max_uses_per_browser"] == 2
-                assert stats["available_browsers"] == 1
+                assert pool._recycled_count == 1
+                assert pool.config.max_uses_per_browser == 2
+                assert pool._available_browsers.qsize() == 1
                 assert len(launched_browsers) == 2
                 first_browser.close.assert_awaited_once()
 
@@ -95,7 +94,7 @@ class TestPlaywrightIdleScaleToZero:
             created_pools.append(p)
             return p
 
-        with patch("src.downloader.pdf_generator.BrowserPool", side_effect=_make_pool):
+        with patch("downloader.pdf_generator.BrowserPool", side_effect=_make_pool):
             gen = PlaywrightPDFGenerator(pool_size=2, max_uses_per_browser=25, idle_timeout=0.1)
             try:
                 assert gen.pool is None

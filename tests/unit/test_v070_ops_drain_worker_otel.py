@@ -12,21 +12,21 @@ import pytest
 from fastapi.testclient import TestClient
 from opentelemetry.sdk.trace.export.in_memory_span_exporter import InMemorySpanExporter
 
-from src.downloader.config import Settings, TelemetryConfig, reload_settings
-from src.downloader.dependencies import get_job_manager_dependency
-from src.downloader.drain import DrainCoordinator
-from src.downloader.job_manager import JobInfo, JobManager, JobStatus
-from src.downloader.logging_config import CustomJsonFormatter
-from src.downloader.main import app
-from src.downloader.telemetry import (
+from downloader.config import Settings, TelemetryConfig, reload_settings
+from downloader.dependencies import get_job_manager_dependency
+from downloader.drain import DrainCoordinator
+from downloader.job_manager import JobInfo, JobManager, JobStatus
+from downloader.logging_config import CustomJsonFormatter
+from downloader.main import app
+from downloader.telemetry import (
     configure_telemetry,
     extract_trace_context,
     get_tracer,
     inject_trace_headers,
     shutdown_telemetry,
 )
-from src.downloader.worker import process_worker_batch_envelope, process_worker_browser_task
-from src.downloader.worker_queue import (
+from downloader.worker import process_worker_batch_envelope, process_worker_browser_task
+from downloader.worker_queue import (
     BrowserTaskRequest,
     BrowserTaskResponse,
     WorkerQueue,
@@ -294,10 +294,10 @@ class TestSplitWorkerArchitecture:
 
         with (
             patch(
-                "src.downloader.worker.process_background_batch_job",
+                "downloader.worker.process_background_batch_job",
                 new=AsyncMock(return_value=([{"url": "https://example.com"}], {"total": 1})),
             ),
-            patch("src.downloader.worker.notify_batch_webhook", new=AsyncMock()) as mock_hook,
+            patch("downloader.worker.notify_batch_webhook", new=AsyncMock()) as mock_hook,
         ):
             await process_worker_batch_envelope(
                 env,
@@ -314,7 +314,7 @@ class TestSplitWorkerArchitecture:
         # Remote browser task execution
         task = BrowserTaskRequest(kind="pdf", url="https://example.com")
         with patch(
-            "src.downloader.worker.generate_pdf_from_url",
+            "downloader.worker.generate_pdf_from_url",
             new=AsyncMock(return_value=b"%PDF-1.7 worker"),
         ):
             browser_resp = await process_worker_browser_task(
@@ -326,7 +326,7 @@ class TestSplitWorkerArchitecture:
     def test_redis_job_store_parses_redis_and_rediss_uris_without_url_kwarg_error(self) -> None:
         from redis.connection import SSLConnection
 
-        from src.downloader.scheduler.service import _get_redis_job_store
+        from downloader.scheduler.service import _get_redis_job_store
 
         plain = _get_redis_job_store("redis://redis-host:6380/2")
         assert plain.jobs_key == "scheduler:jobs"

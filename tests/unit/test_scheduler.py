@@ -11,25 +11,25 @@ Tests for:
 import base64
 import json
 from datetime import UTC, datetime, timedelta
-from unittest.mock import AsyncMock, MagicMock, patch
+from unittest.mock import AsyncMock, patch
 
 import pytest
 from pydantic import ValidationError
 
-from src.downloader.config import SchedulerConfig
-from src.downloader.models.schedule import (
+from downloader.config import SchedulerConfig
+from downloader.models.schedule import (
     ExecutionStatus,
     ScheduleCreate,
     ScheduleExecution,
     ScheduleResponse,
 )
-from src.downloader.scheduler.executor import (
+from downloader.scheduler.executor import (
     MAX_ATTEMPTS,
     RETRY_DELAYS,
     ScheduledJobExecutor,
 )
-from src.downloader.scheduler.service import SchedulerService
-from src.downloader.scheduler.storage import DEFAULT_EXECUTION_TTL, ExecutionStorage
+from downloader.scheduler.service import SchedulerService
+from downloader.scheduler.storage import DEFAULT_EXECUTION_TTL, ExecutionStorage
 
 # ============= Model Validation Tests =============
 
@@ -76,7 +76,7 @@ class TestScheduleModelValidation:
     def test_schedule_create_url_required(self):
         """Test that url is a required field."""
         with pytest.raises(ValidationError) as exc_info:
-            ScheduleCreate(
+            ScheduleCreate(  # type: ignore[call-arg]
                 name="Test",
                 cron_expression="0 9 * * *",
             )
@@ -426,26 +426,6 @@ class TestExecutionStorageOperations:
         assert call_args[0][0] == list_key
 
     @pytest.mark.asyncio
-    async def test_get_execution_found(self, storage, mock_redis, sample_execution):
-        """Test retrieving an existing execution record."""
-        mock_redis.get.return_value = sample_execution.model_dump_json()
-
-        result = await storage.get_execution("sched-456", "exec-123")
-
-        assert result is not None
-        assert result.execution_id == "exec-123"
-        assert result.schedule_id == "sched-456"
-
-    @pytest.mark.asyncio
-    async def test_get_execution_not_found(self, storage, mock_redis):
-        """Test retrieving a non-existent execution returns None."""
-        mock_redis.get.return_value = None
-
-        result = await storage.get_execution("sched-456", "nonexistent")
-
-        assert result is None
-
-    @pytest.mark.asyncio
     async def test_get_executions_with_pagination(self, storage, mock_redis, sample_execution):
         """Test get_executions with pagination parameters."""
         mock_redis.zrevrange.return_value = [b"exec-1", b"exec-2"]
@@ -558,8 +538,8 @@ class TestSchedulerServiceInit:
         settings = SchedulerConfig(job_store_type="redis")
 
         with patch(
-            "src.downloader.scheduler.service._get_redis_job_store",
-            side_effect=Exception("Connection refused"),
+            "downloader.scheduler.service._get_redis_job_store",
+            side_effect=OSError("Connection refused"),
         ):
             service = SchedulerService(redis_uri="redis://badhost:6379", settings=settings)
 
@@ -761,18 +741,6 @@ class TestSchedulerServiceJobManagement:
         # Should not raise
         service.remove_job("job-123")
 
-    def test_set_executor(self, service):
-        """Test set_executor stores the executor."""
-        mock_executor = MagicMock()
-
-        service.set_executor(mock_executor)
-
-        assert service.executor is mock_executor
-
-    def test_executor_property_none(self, service):
-        """Test executor property returns None when not set."""
-        assert service.executor is None
-
 
 # ============= ScheduledJobExecutor Tests =============
 
@@ -816,43 +784,33 @@ class TestScheduledJobExecutorProcessContent:
 
     @pytest.mark.asyncio
     async def test_process_content_text_format(self, executor):
-        """Test text format conversion."""
+        """Test text format conversion through shared convert()."""
         content = b"<html><body><p>Hello World</p></body></html>"
         metadata = {"content_type": "text/html"}
 
-        with patch(
-            "src.downloader.scheduler.executor.convert_content_to_text",
-            return_value="Hello World",
-        ) as mock_convert:
-            result = await executor._process_content(
-                url="https://example.com",
-                content=content,
-                metadata=metadata,
-                format="text",
-            )
+        result = await executor._process_content(
+            url="https://example.com",
+            content=content,
+            metadata=metadata,
+            format="text",
+        )
 
-            mock_convert.assert_called_once_with(content, "text/html")
-            assert result == "Hello World"
+        assert "Hello World" in result
 
     @pytest.mark.asyncio
     async def test_process_content_markdown_format(self, executor):
-        """Test markdown format conversion."""
+        """Test markdown format conversion through shared convert()."""
         content = b"<html><body><h1>Title</h1></body></html>"
         metadata = {"content_type": "text/html"}
 
-        with patch(
-            "src.downloader.scheduler.executor.convert_content_to_markdown",
-            return_value="# Title",
-        ) as mock_convert:
-            result = await executor._process_content(
-                url="https://example.com",
-                content=content,
-                metadata=metadata,
-                format="markdown",
-            )
+        result = await executor._process_content(
+            url="https://example.com",
+            content=content,
+            metadata=metadata,
+            format="markdown",
+        )
 
-            mock_convert.assert_called_once_with(content, "text/html")
-            assert result == "# Title"
+        assert "# Title" in result
 
     @pytest.mark.asyncio
     async def test_process_content_html_format(self, executor):
@@ -936,8 +894,8 @@ class TestScheduledJobExecutorProcessContent:
         metadata = {"content_type": "text/html"}
 
         with patch(
-            "src.downloader.scheduler.executor.generate_pdf_from_url",
-            return_value=b"%PDF-1.4 content",
+            "downloader.pdf_generator.generate_pdf_from_url",
+            new=AsyncMock(return_value=b"%PDF-1.4 content"),
         ) as mock_pdf:
             result = await executor._process_content(
                 url="https://example.com",
@@ -946,7 +904,7 @@ class TestScheduledJobExecutorProcessContent:
                 format="pdf",
             )
 
-            mock_pdf.assert_called_once_with("https://example.com")
+            mock_pdf.assert_awaited_once_with("https://example.com")
             assert result == b"%PDF-1.4 content"
 
     @pytest.mark.asyncio

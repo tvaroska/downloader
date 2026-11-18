@@ -1,4 +1,4 @@
-"""Response models for API endpoints."""
+"""Request and response schemas for download, render, and batch endpoints."""
 
 from typing import Literal, TypedDict
 
@@ -33,7 +33,6 @@ class HTTPErrorResponse(BaseModel):
     detail: ErrorResponse
 
 
-# Batch processing models
 class BatchURLRequest(BaseModel):
     """Individual URL request within a batch."""
 
@@ -134,20 +133,6 @@ class BatchURLResult(BaseModel):
     status_code: int | None = Field(None, description="HTTP status code")
 
 
-class BatchResponse(BaseModel):
-    """Response model for batch processing."""
-
-    success: bool = Field(..., description="Overall batch success")
-    total_requests: int = Field(..., description="Total number of URLs processed")
-    successful_requests: int = Field(..., description="Number of successful requests")
-    failed_requests: int = Field(..., description="Number of failed requests")
-    success_rate: float = Field(..., description="Success rate as percentage")
-    total_duration: float = Field(..., description="Total processing time in seconds")
-    results: list[BatchURLResult] = Field(..., description="Individual URL results")
-    batch_id: str | None = Field(None, description="Unique batch identifier")
-
-
-# Job-based models
 class JobSubmissionResponse(BaseModel):
     """Response model for job submission."""
 
@@ -174,31 +159,3 @@ class JobStatusResponse(BaseModel):
     error_message: str | None = Field(None, description="Error message if job failed")
     results_available: bool = Field(..., description="Whether results are available for download")
     expires_at: str | None = Field(None, description="Job expiration timestamp")
-
-
-# Concurrency stats models
-class ConcurrencyInfo(BaseModel):
-    """Model for concurrency information of a specific service."""
-
-    limit: int = Field(..., description="Maximum concurrent operations allowed")
-    available: int = Field(..., description="Currently available slots")
-    in_use: int = Field(..., description="Currently used slots")
-    utilization_percent: float = Field(..., description="Utilization percentage (0-100)")
-
-
-class SystemInfo(BaseModel):
-    """Model for system information."""
-
-    cpu_cores: int = Field(..., description="Number of CPU cores")
-    pdf_scaling_factor: str = Field(..., description="PDF concurrency scaling factor")
-    batch_scaling_factor: str = Field(..., description="Batch concurrency scaling factor")
-
-
-class ConcurrencyStats(BaseModel):
-    """Model for overall concurrency statistics."""
-
-    pdf_concurrency: ConcurrencyInfo = Field(..., description="PDF generation concurrency stats")
-    batch_concurrency: ConcurrencyInfo = Field(
-        ..., description="Batch processing concurrency stats"
-    )
-    system_info: SystemInfo = Field(..., description="System information")

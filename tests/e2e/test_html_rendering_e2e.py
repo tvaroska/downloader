@@ -68,7 +68,7 @@ class TestHTMLRenderingE2E:
         # Verify OpenGraph title
         og_title = soup.find("meta", property="og:title")
         assert og_title is not None, "Missing <meta property='og:title'>"
-        og_title_content = og_title.get("content", "")
+        og_title_content = str(og_title.get("content", "") or "")
         assert len(og_title_content) > 0, "og:title content is empty"
         assert "SHACL" in og_title_content or "Understanding" in og_title_content, (
             f"Unexpected og:title: {og_title_content}"
@@ -77,13 +77,13 @@ class TestHTMLRenderingE2E:
         # Verify OpenGraph description
         og_description = soup.find("meta", property="og:description")
         assert og_description is not None, "Missing <meta property='og:description'>"
-        og_description_content = og_description.get("content", "")
+        og_description_content = str(og_description.get("content", "") or "")
         assert len(og_description_content) > 0, "og:description content is empty"
 
         # Verify OpenGraph image
         og_image = soup.find("meta", property="og:image")
         assert og_image is not None, "Missing <meta property='og:image'>"
-        og_image_content = og_image.get("content", "")
+        og_image_content = str(og_image.get("content", "") or "")
         assert len(og_image_content) > 0, "og:image content is empty"
         assert og_image_content.startswith("http"), f"Invalid og:image URL: {og_image_content}"
 

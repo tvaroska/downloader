@@ -13,21 +13,21 @@ import pytest
 from fastapi.testclient import TestClient
 from PIL import Image
 
-from src.downloader.config import Settings
-from src.downloader.dependencies import (
+from downloader.config import Settings
+from downloader.dependencies import (
     get_domain_throttle,
     get_http_client,
     get_job_manager_dependency,
     get_robots_checker,
     get_scheduler_dependency,
 )
-from src.downloader.job_manager import JobManager
-from src.downloader.main import app
-from src.downloader.models.responses import BatchRequest, BatchURLRequest
-from src.downloader.scheduler.executor import ScheduledJobExecutor
-from src.downloader.services.batch_processor import process_single_url_in_batch
-from src.downloader.services.webhooks import deliver_webhook, sign_webhook_payload
-from src.downloader.transformers.ocr import (
+from downloader.job_manager import JobManager
+from downloader.main import app
+from downloader.models.responses import BatchRequest, BatchURLRequest
+from downloader.scheduler.executor import ScheduledJobExecutor
+from downloader.services.batch_processor import process_single_url_in_batch
+from downloader.services.webhooks import deliver_webhook, sign_webhook_payload
+from downloader.transformers.ocr import (
     OCRProcessingError,
     OCRUnavailableError,
     extract_text_from_image,
@@ -59,7 +59,7 @@ class TestOCRTransformer:
     async def test_extract_text_from_image_and_error_modes(self) -> None:
         png = _make_tiny_png()
         with patch(
-            "src.downloader.transformers.ocr.pytesseract.image_to_string",
+            "downloader.transformers.ocr.pytesseract.image_to_string",
             return_value="  Invoice #42\r\n\r\n\r\nTotal: $99  ",
         ) as mock_ocr:
             text = await extract_text_from_image(png, language="eng+fra")
@@ -73,7 +73,7 @@ class TestOCRTransformer:
         # Missing tesseract binary -> OCRUnavailableError
         with (
             patch(
-                "src.downloader.transformers.ocr.pytesseract.image_to_string",
+                "downloader.transformers.ocr.pytesseract.image_to_string",
                 side_effect=pytesseract.TesseractNotFoundError(),
             ),
             pytest.raises(OCRUnavailableError),
@@ -118,11 +118,11 @@ class TestOCRTransformer:
         try:
             with (
                 patch(
-                    "src.downloader.routes.download.validate_url_async",
+                    "downloader.routes.download.validate_url_async",
                     new=AsyncMock(return_value="https://example.com/receipt.png"),
                 ),
                 patch(
-                    "src.downloader.transformers.ocr.pytesseract.image_to_string",
+                    "downloader.transformers.ocr.pytesseract.image_to_string",
                     return_value="Receipt Total 19.95",
                 ),
                 TestClient(app) as client,
@@ -154,11 +154,11 @@ class TestOCRTransformer:
             # Missing tesseract binary surfaces cleanly as 503 ocr_unavailable
             with (
                 patch(
-                    "src.downloader.routes.download.validate_url_async",
+                    "downloader.routes.download.validate_url_async",
                     new=AsyncMock(return_value="https://example.com/receipt.png"),
                 ),
                 patch(
-                    "src.downloader.transformers.ocr.pytesseract.image_to_string",
+                    "downloader.transformers.ocr.pytesseract.image_to_string",
                     side_effect=pytesseract.TesseractNotFoundError(),
                 ),
                 TestClient(app) as client,
@@ -187,7 +187,7 @@ class TestOCRTransformer:
             )
             with (
                 patch(
-                    "src.downloader.routes.download.validate_url_async",
+                    "downloader.routes.download.validate_url_async",
                     new=AsyncMock(return_value="https://example.com/page.html"),
                 ),
                 TestClient(app) as client,
@@ -218,11 +218,11 @@ class TestOCRTransformer:
         )
         with (
             patch(
-                "src.downloader.routes.batch.validate_url_async",
+                "downloader.services.batch_processor.validate_url_async",
                 new=AsyncMock(return_value="https://example.com/doc.png"),
             ),
             patch(
-                "src.downloader.transformers.ocr.pytesseract.image_to_string",
+                "downloader.transformers.ocr.pytesseract.image_to_string",
                 return_value="Scanned Batch Doc",
             ),
         ):
@@ -271,7 +271,7 @@ class TestWebhookDeliveryAndIntegration:
 
         transport = httpx.MockTransport(_retry_handler)
         with patch(
-            "src.downloader.services.webhooks.validate_url_async",
+            "downloader.services.webhooks.validate_url_async",
             new=AsyncMock(return_value="https://hooks.example.com/cb"),
         ):
             res = await deliver_webhook(
@@ -300,7 +300,7 @@ class TestWebhookDeliveryAndIntegration:
             return httpx.Response(400, text="bad payload")
 
         with patch(
-            "src.downloader.services.webhooks.validate_url_async",
+            "downloader.services.webhooks.validate_url_async",
             new=AsyncMock(return_value="https://hooks.example.com/cb"),
         ):
             res_400 = await deliver_webhook(
@@ -324,8 +324,8 @@ class TestWebhookDeliveryAndIntegration:
         async def _store_results(job_id: str, results, summary) -> None:
             events.append("store_results")
 
-        jm.update_job_status = _update_status  # type: ignore[method-assign]
-        jm.store_job_results = _store_results  # type: ignore[method-assign]
+        jm.update_job_status = _update_status  # type: ignore[method-assign,assignment]
+        jm.store_job_results = _store_results  # type: ignore[method-assign,assignment]
 
         async def _fake_processor(job_id: str, req: BatchRequest):
             events.append("process")
@@ -339,7 +339,7 @@ class TestWebhookDeliveryAndIntegration:
             webhook_url="https://hooks.example.com/batch",
             webhook_secret="sec",  # pragma: allowlist secret
         )
-        with patch("src.downloader.services.batch_processor.deliver_webhook", new=_fake_webhook):
+        with patch("downloader.services.batch_processor.deliver_webhook", new=_fake_webhook):
             task = await jm.start_background_job("job-1", _fake_processor, req)
             await task
 
@@ -362,15 +362,15 @@ class TestWebhookDeliveryAndIntegration:
         )
         with (
             patch(
-                "src.downloader.scheduler.executor.validate_url_async",
+                "downloader.scheduler.executor.validate_url_async",
                 new=AsyncMock(return_value="https://example.com"),
             ),
             patch(
-                "src.downloader.scheduler.executor.generate_screenshot_from_url",
+                "downloader.pdf_generator.generate_screenshot_from_url",
                 new=AsyncMock(return_value=b"\x89PNG\r\n\x1a\nSCHED"),
             ),
             patch(
-                "src.downloader.scheduler.executor.deliver_webhook",
+                "downloader.scheduler.executor.deliver_webhook",
                 new=AsyncMock(),
             ) as mock_hook,
         ):
@@ -385,6 +385,7 @@ class TestWebhookDeliveryAndIntegration:
         assert execution.success is True
         assert execution.content_size == len(b"\x89PNG\r\n\x1a\nSCHED")
         mock_hook.assert_awaited_once()
+        assert mock_hook.await_args is not None
         assert mock_hook.await_args.args[1] == "schedule.completed"
         assert mock_hook.await_args.kwargs["secret"] == "shh"  # pragma: allowlist secret
 
@@ -421,7 +422,7 @@ class TestWebhookDeliveryAndIntegration:
                 assert bad.status_code == 400
 
                 with patch(
-                    "src.downloader.routes.schedules.validate_url_async",
+                    "downloader.routes.schedules.validate_url_async",
                     new=AsyncMock(
                         side_effect=["https://example.com", "https://hooks.example.com/ok"]
                     ),
@@ -469,3 +470,44 @@ class TestWebhookDeliveryAndIntegration:
             app.dependency_overrides.pop(get_robots_checker, None)
             app.dependency_overrides.pop(get_domain_throttle, None)
             app.dependency_overrides.pop(get_http_client, None)
+            app.dependency_overrides.pop(get_job_manager_dependency, None)
+
+
+@pytest.mark.unit
+async def test_pixel_cap_enforced_at_configured_value() -> None:
+    """Reject images between 1x and 2x `max_image_pixels` and run OCR on dedicated thread pool (`R50`)."""
+    import threading
+
+    # 1,100 x 1,000 = 1,100,000 pixels (> 1,000,000 cap, < 2,000,000 where Pillow alone errors)
+    oversized_img = Image.new("RGB", (1100, 1000), color=(255, 255, 255))
+    buf = io.BytesIO()
+    oversized_img.save(buf, format="PNG")
+    oversized_png = buf.getvalue()
+
+    cfg = Settings()
+    cfg.ocr.max_image_pixels = 1_000_000
+
+    with (
+        patch("downloader.transformers.ocr.pytesseract.image_to_string") as mock_tess,
+        pytest.raises(OCRProcessingError, match="exceed"),
+    ):
+        await extract_text_from_image(oversized_png, settings=cfg)
+    mock_tess.assert_not_called()
+
+    # Exact-cap image (1,000 x 1,000 == 1,000,000) succeeds on the dedicated `downloader-ocr` pool
+    exact_img = Image.new("RGB", (1000, 1000), color=(255, 255, 255))
+    ok_buf = io.BytesIO()
+    exact_img.save(ok_buf, format="PNG")
+
+    observed_threads: list[str] = []
+
+    def _fake_ocr(_img: Image.Image, **_kwargs: object) -> str:
+        observed_threads.append(threading.current_thread().name)
+        return "Bounded OCR OK"
+
+    with patch("downloader.transformers.ocr.pytesseract.image_to_string", side_effect=_fake_ocr):
+        out = await extract_text_from_image(ok_buf.getvalue(), settings=cfg)
+
+    assert out == "Bounded OCR OK"
+    assert len(observed_threads) == 1
+    assert observed_threads[0].startswith("downloader-ocr")

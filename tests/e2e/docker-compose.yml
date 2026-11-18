@@ -28,4 +28,4 @@ services:
       timeout: 5s
       retries: 10
       start_period: 30s
-    command: ["uvicorn", "src.downloader.main:app", "--host", "0.0.0.0", "--port", "8000"]
+    command: ["uvicorn", "downloader.main:app", "--host", "0.0.0.0", "--port", "8000"]

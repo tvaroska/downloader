@@ -2,7 +2,7 @@
 
 import pytest
 
-from src.downloader.transformers import html_to_markdown
+from downloader.transformers import html_to_markdown
 
 
 @pytest.mark.unit
@@ -221,25 +221,6 @@ class TestTagStripping:
         assert "Menu items" not in result
         assert "Form content" not in result
 
-    def test_custom_tag_stripping(self):
-        """Test additional tags can be stripped via strip_tags parameter."""
-        html = """
-        <html><body>
-            <div class="advertisement">Buy now!</div>
-            <main>
-                <h1>Article</h1>
-                <p>Real content.</p>
-            </main>
-        </body></html>
-        """
-        # Without custom stripping, advertisement div would appear
-        result_default = html_to_markdown(html, extract_main_content=False)
-        assert "Buy now" in result_default
-
-        # With custom stripping of div tags
-        result_stripped = html_to_markdown(html, strip_tags=["div"], extract_main_content=False)
-        assert "Buy now" not in result_stripped
-
 
 @pytest.mark.unit
 class TestEdgeCases:
@@ -314,44 +295,3 @@ class TestEdgeCases:
         html = '<html><body><h2><a href="https://example.com">Linked Heading</a></h2></body></html>'
         result = html_to_markdown(html)
         assert "## [Linked Heading](https://example.com)" in result
-
-
-@pytest.mark.unit
-class TestParameters:
-    """Test function parameters."""
-
-    def test_setext_heading_style(self):
-        """Test setext heading style produces underlined headings."""
-        html = "<html><body><h1>Title</h1><h2>Subtitle</h2></body></html>"
-        result = html_to_markdown(html, heading_style="setext")
-        # Setext uses === for h1 and --- for h2
-        assert "===" in result or "Title\n=" in result
-        assert "---" in result or "Subtitle\n-" in result
-
-    def test_custom_bullets(self):
-        """Test custom bullet character."""
-        html = """
-        <html><body>
-            <ul>
-                <li>Item A</li>
-                <li>Item B</li>
-            </ul>
-        </body></html>
-        """
-        result = html_to_markdown(html, bullets="-")
-        assert "- Item A" in result
-        assert "- Item B" in result
-
-    def test_extract_main_content_false(self):
-        """Test extract_main_content=False uses full document."""
-        html = """
-        <html><body>
-            <div class="wrapper">
-                <h1>Full Page</h1>
-                <p>All content included.</p>
-            </div>
-        </body></html>
-        """
-        result = html_to_markdown(html, extract_main_content=False)
-        assert "# Full Page" in result
-        assert "All content included" in result

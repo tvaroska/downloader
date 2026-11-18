@@ -38,7 +38,7 @@ def get_tracer(name: str = "downloader") -> trace.Tracer:
 
 
 def get_current_trace_context() -> tuple[str | None, str | None]:
-    """Return (trace_id_hex, span_id_hex) for the active valid span, or (None, None)."""
+    """Return `(trace_id_hex, span_id_hex)` for the active valid span, or `(None, None)`."""
     span = trace.get_current_span()
     if span is None:
         return None, None
@@ -62,6 +62,35 @@ def extract_trace_context(headers: Mapping[str, str] | None) -> Context:
     return propagate.extract(dict(headers))
 
 
+def _instrument_app_and_clients(app: Any, provider: TracerProvider) -> None:
+    global _instrumented_app, _global_instrumented
+
+    if app is not None and _instrumented_app is not app:
+        try:
+            FastAPIInstrumentor.instrument_app(
+                app,
+                tracer_provider=provider,
+                excluded_urls=r"^https?://[^/]+/(health|metrics)(\?.*)?$",
+            )
+            # Rebuild Starlette's compiled middleware stack when instrumented inside lifespan.
+            if hasattr(app, "middleware_stack"):
+                app.middleware_stack = None
+            _instrumented_app = app
+        except (RuntimeError, ValueError, TypeError) as exc:
+            logger.warning(f"Failed to instrument FastAPI app with OpenTelemetry: {exc}")
+
+    if not _global_instrumented:
+        for instr_cls, label in (
+            (HTTPXClientInstrumentor, "HTTPX"),
+            (RedisInstrumentor, "Redis"),
+        ):
+            try:
+                instr_cls().instrument(tracer_provider=provider)
+            except (RuntimeError, ValueError, TypeError) as exc:
+                logger.debug(f"{label} OpenTelemetry instrumentation skipped: {exc}")
+        _global_instrumented = True
+
+
 def configure_telemetry(
     config: TelemetryConfig,
     *,
@@ -69,11 +98,8 @@ def configure_telemetry(
     service_version: str = __version__,
     extra_exporter: SpanExporter | None = None,
 ) -> TracerProvider | None:
-    """Configure OpenTelemetry tracing and auto-instrumentation when enabled.
-
-    Returns the configured TracerProvider or None when OTEL_ENABLED is false.
-    """
-    global _provider, _instrumented_app, _global_instrumented
+    """Configure OpenTelemetry tracing and auto-instrumentation when enabled."""
+    global _provider
 
     if not config.enabled:
         logger.debug("OpenTelemetry disabled (OTEL_ENABLED=false)")
@@ -85,8 +111,10 @@ def configure_telemetry(
             "service.version": service_version,
         }
     )
-    sampler = TraceIdRatioBased(config.traces_sample_rate)
-    provider = TracerProvider(resource=resource, sampler=sampler)
+    provider = TracerProvider(
+        resource=resource,
+        sampler=TraceIdRatioBased(config.traces_sample_rate),
+    )
 
     if config.exporter_otlp_endpoint:
         otlp_exporter = OTLPSpanExporter(endpoint=config.exporter_otlp_endpoint)
@@ -101,31 +129,7 @@ def configure_telemetry(
 
     trace.set_tracer_provider(provider)
     _provider = provider
-
-    if app is not None and _instrumented_app is not app:
-        try:
-            FastAPIInstrumentor.instrument_app(
-                app,
-                tracer_provider=provider,
-                excluded_urls=r"^https?://[^/]+/(health|metrics)(\?.*)?$",
-            )
-            # Rebuild Starlette's compiled middleware stack when instrumented inside lifespan.
-            if hasattr(app, "middleware_stack"):
-                app.middleware_stack = None
-            _instrumented_app = app
-        except Exception as exc:
-            logger.warning(f"Failed to instrument FastAPI app with OpenTelemetry: {exc}")
-
-    if not _global_instrumented:
-        try:
-            HTTPXClientInstrumentor().instrument(tracer_provider=provider)
-        except Exception as exc:
-            logger.debug(f"HTTPX OpenTelemetry instrumentation skipped: {exc}")
-        try:
-            RedisInstrumentor().instrument(tracer_provider=provider)
-        except Exception as exc:
-            logger.debug(f"Redis OpenTelemetry instrumentation skipped: {exc}")
-        _global_instrumented = True
+    _instrument_app_and_clients(app, provider)
 
     logger.info(
         f"OpenTelemetry tracing initialized (service={config.service_name}, "
@@ -143,21 +147,24 @@ def shutdown_telemetry() -> None:
             FastAPIInstrumentor.uninstrument_app(_instrumented_app)
             if hasattr(_instrumented_app, "middleware_stack"):
                 _instrumented_app.middleware_stack = None
-        except Exception:
-            pass
+        except (RuntimeError, ValueError, TypeError, AttributeError) as exc:
+            logger.debug(f"FastAPI OpenTelemetry uninstrument cleanup skipped: {exc}")
         _instrumented_app = None
 
     if _global_instrumented:
-        for instr_cls in (HTTPXClientInstrumentor, RedisInstrumentor):
+        for instr_cls, label in (
+            (HTTPXClientInstrumentor, "HTTPX"),
+            (RedisInstrumentor, "Redis"),
+        ):
             try:
                 instr_cls().uninstrument()
-            except Exception:
-                pass
+            except (RuntimeError, ValueError, TypeError, AttributeError) as exc:
+                logger.debug(f"{label} OpenTelemetry uninstrument cleanup skipped: {exc}")
         _global_instrumented = False
 
     if _provider is not None:
         try:
             _provider.shutdown()
-        except Exception as exc:
+        except (RuntimeError, OSError, ValueError) as exc:
             logger.warning(f"Error shutting down OpenTelemetry provider: {exc}")
         _provider = None

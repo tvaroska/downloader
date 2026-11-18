@@ -1,11 +1,6 @@
-"""Structured logging configuration with separate access and error log handlers.
+"""Structured logging configuration with separate access and error log handlers."""
 
-This module configures Python logging with:
-- JSON structured logging for production
-- Separate handlers for access logs (uvicorn) and error logs (application)
-- Log rotation support
-- Environment-specific configuration
-"""
+from __future__ import annotations
 
 import logging
 import logging.handlers
@@ -23,10 +18,57 @@ from .config import LoggingConfig
 from .telemetry import get_current_trace_context
 
 _UVICORN_ACCESS_RE = re.compile(r'"([A-Z]+)\s+(\S+)\s+HTTP/[^"]+"\s+(\d{3})')
+_STANDARD_RECORD_FIELDS = frozenset(
+    {
+        "name",
+        "msg",
+        "args",
+        "created",
+        "filename",
+        "funcName",
+        "levelname",
+        "levelno",
+        "lineno",
+        "module",
+        "msecs",
+        "message",
+        "pathname",
+        "process",
+        "processName",
+        "relativeCreated",
+        "thread",
+        "threadName",
+        "exc_info",
+        "exc_text",
+        "stack_info",
+        "taskName",
+    }
+)
+
+
+def _attach_uvicorn_access_fields(log_record: dict[str, Any], record: logging.LogRecord) -> None:
+    if isinstance(record.args, tuple) and len(record.args) >= 5:
+        method = str(record.args[1])
+        path = str(record.args[2]).split("?", 1)[0]
+        raw_status = record.args[4]
+        try:
+            status_code: int | str = int(str(raw_status))
+        except (TypeError, ValueError):
+            status_code = str(raw_status)
+        log_record.setdefault("method", method)
+        log_record.setdefault("path", path)
+        log_record.setdefault("status_code", status_code)
+        return
+
+    match = _UVICORN_ACCESS_RE.search(record.getMessage())
+    if match:
+        log_record.setdefault("method", match.group(1))
+        log_record.setdefault("path", match.group(2).split("?", 1)[0])
+        log_record.setdefault("status_code", int(match.group(3)))
 
 
 class CustomJsonFormatter(JsonFormatter):
-    """Custom JSON formatter that adds additional context fields."""
+    """JSON log formatter enriching records with W3C trace context and HTTP access fields."""
 
     def add_fields(
         self,
@@ -34,10 +76,8 @@ class CustomJsonFormatter(JsonFormatter):
         record: logging.LogRecord,
         message_dict: dict[str, Any],
     ) -> None:
-        """Add custom fields to the log record."""
         super().add_fields(log_record, record, message_dict)
 
-        # Add standard fields
         log_record["logger"] = record.name
         log_record["level"] = record.levelname
         log_record["timestamp"] = self.formatTime(record, self.datefmt)
@@ -48,232 +88,107 @@ class CustomJsonFormatter(JsonFormatter):
         if span_id:
             log_record.setdefault("span_id", span_id)
 
-        # Extract structured HTTP fields for uvicorn.access so Cloud Logging filters match jsonPayload.path
         if record.name == "uvicorn.access":
-            if isinstance(record.args, tuple) and len(record.args) >= 5:
-                method = str(record.args[1])
-                raw_path = str(record.args[2])
-                path = raw_path.split("?", 1)[0]
-                raw_status = record.args[4]
-                try:
-                    status_code: int | str = int(str(raw_status))
-                except (TypeError, ValueError):
-                    status_code = str(raw_status)
-                log_record.setdefault("method", method)
-                log_record.setdefault("path", path)
-                log_record.setdefault("status_code", status_code)
-            else:
-                match = _UVICORN_ACCESS_RE.search(record.getMessage())
-                if match:
-                    log_record.setdefault("method", match.group(1))
-                    log_record.setdefault("path", match.group(2).split("?", 1)[0])
-                    log_record.setdefault("status_code", int(match.group(3)))
+            _attach_uvicorn_access_fields(log_record, record)
 
-        # Add exception info if present
         if record.exc_info:
             log_record["exception"] = self.formatException(record.exc_info)
 
-        # Add extra fields from record
         for key, value in record.__dict__.items():
-            if key not in [
-                "name",
-                "msg",
-                "args",
-                "created",
-                "filename",
-                "funcName",
-                "levelname",
-                "levelno",
-                "lineno",
-                "module",
-                "msecs",
-                "message",
-                "pathname",
-                "process",
-                "processName",
-                "relativeCreated",
-                "thread",
-                "threadName",
-                "exc_info",
-                "exc_text",
-                "stack_info",
-                "taskName",
-            ]:
+            if key not in _STANDARD_RECORD_FIELDS:
                 log_record[key] = value
 
 
-def setup_logging(config: LoggingConfig) -> None:
-    """Configure logging with separate access and error handlers.
+def _build_stream_or_file_handler(
+    file_path: str | None,
+    fallback_stream: Any,
+    level: str,
+    formatter: logging.Formatter,
+    rotation: tuple[int, int],
+) -> logging.Handler:
+    rotation_size, rotation_count = rotation
+    handler: logging.Handler
+    if file_path:
+        path_obj = Path(file_path)
+        path_obj.parent.mkdir(parents=True, exist_ok=True)
+        handler = logging.handlers.RotatingFileHandler(
+            filename=str(path_obj),
+            maxBytes=rotation_size,
+            backupCount=rotation_count,
+            encoding="utf-8",
+        )
+    else:
+        handler = logging.StreamHandler(fallback_stream)
+    handler.setLevel(level)
+    handler.setFormatter(formatter)
+    return handler
 
-    Args:
-        config: Logging configuration settings
-    """
-    # Determine formatters
-    formatter: logging.Formatter
-    if config.json_logs:
-        # JSON structured logging for production
-        formatter = CustomJsonFormatter(
+
+def setup_logging(config: LoggingConfig) -> None:
+    """Configure application error and Uvicorn access logging."""
+    formatter: logging.Formatter = (
+        CustomJsonFormatter(
             "%(timestamp)s %(level)s %(logger)s %(message)s",
             datefmt="%Y-%m-%d %H:%M:%S",
         )
-    else:
-        # Human-readable logging for development
-        formatter = logging.Formatter(
+        if config.json_logs
+        else logging.Formatter(
             "%(asctime)s - %(name)s - %(levelname)s - %(message)s",
             datefmt="%Y-%m-%d %H:%M:%S",
         )
+    )
+    access_formatter: logging.Formatter = (
+        formatter
+        if config.json_logs
+        else logging.Formatter(
+            "%(asctime)s - %(levelname)s - %(message)s",
+            datefmt="%Y-%m-%d %H:%M:%S",
+        )
+    )
 
-    # Configure root logger
+    rotation = (config.log_rotation_size, config.log_rotation_count)
     root_logger = logging.getLogger()
     root_logger.setLevel(config.log_level)
     root_logger.handlers.clear()
-
-    # ============================================
-    # ERROR LOG HANDLER (Application Logs)
-    # ============================================
-    error_handler: logging.Handler
-    if config.error_log_file:
-        # File handler with rotation for error logs
-        error_log_path = Path(config.error_log_file)
-        error_log_path.parent.mkdir(parents=True, exist_ok=True)
-
-        error_handler = logging.handlers.RotatingFileHandler(
-            filename=str(error_log_path),
-            maxBytes=config.log_rotation_size,
-            backupCount=config.log_rotation_count,
-            encoding="utf-8",
+    root_logger.addHandler(
+        _build_stream_or_file_handler(
+            config.error_log_file,
+            sys.stderr,
+            config.log_level,
+            formatter,
+            rotation,
         )
-        error_handler.setLevel(config.log_level)
-        error_handler.setFormatter(formatter)
-        root_logger.addHandler(error_handler)
-    else:
-        # Console handler for error logs (stderr)
-        error_handler = logging.StreamHandler(sys.stderr)
-        error_handler.setLevel(config.log_level)
-        error_handler.setFormatter(formatter)
-        root_logger.addHandler(error_handler)
+    )
 
-    # ============================================
-    # ACCESS LOG HANDLER (Uvicorn Access Logs)
-    # ============================================
-    # Configure uvicorn access logger separately
     access_logger = logging.getLogger("uvicorn.access")
     access_logger.setLevel(config.access_log_level)
-    access_logger.propagate = False  # Don't propagate to root logger
+    access_logger.propagate = False
     access_logger.handlers.clear()
-
-    access_handler: logging.Handler
-    if config.access_log_file:
-        # Separate file handler for access logs
-        access_log_path = Path(config.access_log_file)
-        access_log_path.parent.mkdir(parents=True, exist_ok=True)
-
-        access_handler = logging.handlers.RotatingFileHandler(
-            filename=str(access_log_path),
-            maxBytes=config.log_rotation_size,
-            backupCount=config.log_rotation_count,
-            encoding="utf-8",
+    access_logger.addHandler(
+        _build_stream_or_file_handler(
+            config.access_log_file,
+            sys.stdout,
+            config.access_log_level,
+            access_formatter,
+            rotation,
         )
-        access_handler.setLevel(config.access_log_level)
+    )
 
-        # Access logs typically use a different format
-        if config.json_logs:
-            access_handler.setFormatter(formatter)
-        else:
-            # Standard access log format
-            access_formatter = logging.Formatter(
-                "%(asctime)s - %(levelname)s - %(message)s",
-                datefmt="%Y-%m-%d %H:%M:%S",
-            )
-            access_handler.setFormatter(access_formatter)
-
-        access_logger.addHandler(access_handler)
-    else:
-        # Console handler for access logs (stdout)
-        access_handler = logging.StreamHandler(sys.stdout)
-        access_handler.setLevel(config.access_log_level)
-
-        if config.json_logs:
-            access_handler.setFormatter(formatter)
-        else:
-            access_formatter = logging.Formatter(
-                "%(asctime)s - %(levelname)s - %(message)s",
-                datefmt="%Y-%m-%d %H:%M:%S",
-            )
-            access_handler.setFormatter(access_formatter)
-
-        access_logger.addHandler(access_handler)
-
-    # ============================================
-    # CONFIGURE OTHER LOGGERS
-    # ============================================
-
-    # Uvicorn server logger (startup, shutdown messages)
-    server_logger = logging.getLogger("uvicorn")
-    server_logger.setLevel(config.log_level)
-
-    # Uvicorn error logger
-    error_logger = logging.getLogger("uvicorn.error")
-    error_logger.setLevel(config.log_level)
-
-    # Application loggers
-    app_logger = logging.getLogger("src.downloader")
-    app_logger.setLevel(config.log_level)
-
-    # Suppress overly verbose third-party loggers
+    logging.getLogger("uvicorn").setLevel(config.log_level)
+    logging.getLogger("uvicorn.error").setLevel(config.log_level)
+    logging.getLogger("downloader").setLevel(config.log_level)
     logging.getLogger("httpx").setLevel(logging.WARNING)
     logging.getLogger("httpcore").setLevel(logging.WARNING)
     logging.getLogger("playwright").setLevel(logging.WARNING)
 
-    # Log configuration summary
     root_logger.info("Logging configured successfully")
     root_logger.info(f"Log level: {config.log_level}")
     root_logger.info(f"Access log level: {config.access_log_level}")
     root_logger.info(f"JSON logs: {config.json_logs}")
-
-    if config.error_log_file:
-        root_logger.info(f"Error logs: {config.error_log_file}")
-    else:
-        root_logger.info("Error logs: stderr")
-
-    if config.access_log_file:
-        root_logger.info(f"Access logs: {config.access_log_file}")
-    else:
-        root_logger.info("Access logs: stdout")
+    root_logger.info(f"Error logs: {config.error_log_file or 'stderr'}")
+    root_logger.info(f"Access logs: {config.access_log_file or 'stdout'}")
 
 
 def get_logger(name: str) -> logging.Logger:
-    """Get a logger instance with the given name.
-
-    Args:
-        name: Logger name (typically __name__ of the module)
-
-    Returns:
-        Configured logger instance
-    """
+    """Return a named `logging.Logger`."""
     return logging.getLogger(name)
-
-
-def log_with_context(logger: logging.Logger, level: int, message: str, **context) -> None:
-    """Log a message with additional context fields.
-
-    This is particularly useful with JSON logging, where context fields
-    become searchable/filterable attributes.
-
-    Args:
-        logger: Logger instance
-        level: Log level (logging.INFO, logging.ERROR, etc.)
-        message: Log message
-        **context: Additional context fields to include in the log
-
-    Example:
-        log_with_context(
-            logger, logging.INFO,
-            "Download completed",
-            url="https://example.com",
-            status_code=200,
-            size_bytes=1024,
-            duration_ms=234
-        )
-    """
-    logger.log(level, message, extra=context)

@@ -7,8 +7,8 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import pytest
 from playwright.async_api import TimeoutError as PlaywrightTimeoutError
 
-from src.downloader.config import ContentConfig, Settings
-from src.downloader.content_converter import (
+from downloader.config import ContentConfig, Settings
+from downloader.content_converter import (
     convert_content_with_playwright_fallback,
     render_html_with_playwright,
 )
@@ -54,7 +54,7 @@ class TestPlaywrightNavigationResilience:
         mock_page.wait_for_load_state.side_effect = exc_cls("tracker still open")
 
         with patch(
-            "src.downloader.content_converter.get_shared_pdf_generator",
+            "downloader.content_converter.get_shared_pdf_generator",
             return_value=mock_gen,
         ):
             html = await render_html_with_playwright("https://example.com/ad-heavy")
@@ -77,7 +77,7 @@ class TestPlaywrightNavigationResilience:
         mock_page.wait_for_load_state.side_effect = PlaywrightTimeoutError("analytics open")
 
         with patch(
-            "src.downloader.content_converter.get_shared_pdf_generator",
+            "downloader.content_converter.get_shared_pdf_generator",
             return_value=mock_gen,
         ):
             extracted = await convert_content_with_playwright_fallback(
@@ -100,9 +100,9 @@ class TestPlaywrightNavigationResilience:
         tight_settings = Settings(content=ContentConfig(html_js_rendering_timeout=1500))
 
         with (
-            patch("src.downloader.content_converter.get_settings", return_value=tight_settings),
+            patch("downloader.content_converter.get_settings", return_value=tight_settings),
             patch(
-                "src.downloader.content_converter.get_shared_pdf_generator",
+                "downloader.content_converter.get_shared_pdf_generator",
                 return_value=mock_gen,
             ),
         ):
@@ -121,7 +121,7 @@ class TestPlaywrightNavigationResilience:
 
         with (
             patch(
-                "src.downloader.content_converter.get_shared_pdf_generator",
+                "downloader.content_converter.get_shared_pdf_generator",
                 return_value=mock_gen,
             ),
             pytest.raises(PlaywrightTimeoutError),

@@ -4,7 +4,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
-from src.downloader.middleware import (
+from downloader.middleware import (
     MetricsMiddleware,
     SystemMetricsCollector,
     get_system_metrics_collector,
@@ -80,7 +80,7 @@ class TestMetricsMiddlewareDispatch:
         async def mock_call_next(request):
             return mock_response
 
-        with patch("src.downloader.middleware.get_metrics_collector") as mock_get_collector:
+        with patch("downloader.middleware.get_metrics_collector") as mock_get_collector:
             mock_collector = MagicMock()
             mock_get_collector.return_value = mock_collector
 
@@ -109,7 +109,7 @@ class TestMetricsMiddlewareDispatch:
         async def mock_call_next(request):
             return mock_response
 
-        with patch("src.downloader.middleware.get_metrics_collector") as mock_get_collector:
+        with patch("downloader.middleware.get_metrics_collector") as mock_get_collector:
             mock_collector = MagicMock()
             mock_get_collector.return_value = mock_collector
 
@@ -130,7 +130,7 @@ class TestMetricsMiddlewareDispatch:
         async def mock_call_next(request):
             raise ValueError("Test error")
 
-        with patch("src.downloader.middleware.get_metrics_collector") as mock_get_collector:
+        with patch("downloader.middleware.get_metrics_collector") as mock_get_collector:
             mock_collector = MagicMock()
             mock_get_collector.return_value = mock_collector
 
@@ -157,7 +157,7 @@ class TestMetricsMiddlewareDispatch:
         async def mock_call_next(request):
             return mock_response
 
-        with patch("src.downloader.middleware.get_metrics_collector"):
+        with patch("downloader.middleware.get_metrics_collector"):
             response = await middleware.dispatch(mock_request, mock_call_next)
 
             assert "X-Response-Time" in response.headers
@@ -175,7 +175,7 @@ class TestMetricsMiddlewareDispatch:
         async def mock_call_next(request):
             raise RuntimeError("Something went wrong")
 
-        with patch("src.downloader.middleware.get_metrics_collector"):
+        with patch("downloader.middleware.get_metrics_collector"):
             with pytest.raises(RuntimeError, match="Something went wrong"):
                 await middleware.dispatch(mock_request, mock_call_next)
 
@@ -262,6 +262,7 @@ class TestSystemMetricsCollectorStop:
         with patch.object(collector, "_collect_system_metrics", new_callable=AsyncMock):
             await collector.start()
             task = collector._task
+            assert task is not None
 
             await collector.stop()
 
@@ -391,7 +392,7 @@ class TestSystemMetricsCollectorCollect:
         collector = SystemMetricsCollector()
 
         mock_job_manager = AsyncMock()
-        mock_job_manager.get_connection_stats = AsyncMock(side_effect=Exception("Redis error"))
+        mock_job_manager.get_connection_stats = AsyncMock(side_effect=RuntimeError("Redis error"))
 
         mock_app_state = MagicMock()
         mock_app_state.job_manager = mock_job_manager
@@ -417,7 +418,6 @@ class TestSystemMetricsCollectorCollect:
         mock_http_client.get_connection_stats = MagicMock(
             return_value={
                 "status": "healthy",
-                "circuit_breakers": {"example.com": {"state": "closed", "failure_count": 0}},
             }
         )
 
@@ -436,42 +436,13 @@ class TestSystemMetricsCollectorCollect:
         assert http_status_call[0][0][1] == 1
 
     @pytest.mark.asyncio
-    async def test_collect_http_client_metrics_circuit_breaker(self):
-        """Test _collect_http_client_metrics extracts circuit breaker stats."""
-        collector = SystemMetricsCollector()
-
-        mock_http_client = MagicMock()
-        mock_http_client.get_connection_stats = MagicMock(
-            return_value={
-                "status": "healthy",
-                "circuit_breakers": {"example.com": {"state": "closed", "failure_count": 3}},
-            }
-        )
-
-        mock_app_state = MagicMock()
-        mock_app_state.http_client = mock_http_client
-        collector.app_state = mock_app_state
-
-        mock_collector = MagicMock()
-        collector.collector = mock_collector
-
-        await collector._collect_http_client_metrics()
-
-        set_gauge_calls = mock_collector.set_gauge.call_args_list
-        gauge_names = [c[0][0] for c in set_gauge_calls]
-
-        # URL dots should be normalized to underscores
-        assert "circuit_breaker_example_com_failures" in gauge_names
-        assert "circuit_breaker_example_com_state" in gauge_names
-
-    @pytest.mark.asyncio
     async def test_collect_http_client_metrics_exception(self):
         """Test _collect_http_client_metrics sets http_client_status=0 on exception."""
         collector = SystemMetricsCollector()
 
         mock_http_client = MagicMock()
         mock_http_client.get_connection_stats = MagicMock(
-            side_effect=Exception("HTTP client error")
+            side_effect=RuntimeError("HTTP client error")
         )
 
         mock_app_state = MagicMock()
@@ -496,7 +467,7 @@ class TestGetSystemMetricsCollector:
     def test_get_system_metrics_collector_singleton(self):
         """Test get_system_metrics_collector returns singleton."""
         # Reset global
-        import src.downloader.middleware as middleware_module
+        import downloader.middleware as middleware_module
 
         middleware_module._system_metrics_collector = None
 
@@ -507,7 +478,7 @@ class TestGetSystemMetricsCollector:
 
     def test_get_system_metrics_collector_creates_instance(self):
         """Test get_system_metrics_collector creates instance if none exists."""
-        import src.downloader.middleware as middleware_module
+        import downloader.middleware as middleware_module
 
         middleware_module._system_metrics_collector = None
 

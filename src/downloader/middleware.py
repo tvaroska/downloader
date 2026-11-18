@@ -1,99 +1,97 @@
-"""Middleware for request metrics collection and monitoring."""
+"""Middleware for request metrics collection and background system gauge snapshots."""
+
+from __future__ import annotations
 
 import asyncio
+import logging
 import time
 from collections.abc import Callable
 from typing import Any
 
+import redis.exceptions as redis_exc
 from fastapi import Request, Response
 from starlette.middleware.base import BaseHTTPMiddleware
 
 from .metrics import get_metrics_collector
 from .telemetry import get_current_trace_context
 
+logger = logging.getLogger(__name__)
+
+_EXACT_METRIC_PATHS = frozenset(
+    {
+        "/",
+        "/render",
+        "/health",
+        "/schedules",
+        "/metrics",
+        "/metrics/performance",
+        "/metrics/health-score",
+        "/metrics/live",
+        "/docs",
+        "/docs/oauth2-redirect",
+        "/redoc",
+        "/openapi.json",
+    }
+)
+_PREFIX_METRIC_PATHS: tuple[tuple[str, str], ...] = (
+    ("/batch", "/batch"),
+    ("/metrics/", "/metrics"),
+    ("/jobs/", "/jobs/{job_id}"),
+    ("/status/", "/status/{job_id}"),
+    ("/results/", "/results/{job_id}"),
+)
+
 
 class MetricsMiddleware(BaseHTTPMiddleware):
-    """Middleware to collect request metrics automatically."""
+    """Middleware recording per-route request latency, error counters, and `X-Trace-ID`."""
 
-    async def dispatch(self, request: Request, call_next: Callable) -> Response:
-        """Process request and collect metrics."""
-        start_time = time.time()
-
-        # Extract endpoint info
+    async def dispatch(self, request: Request, call_next: Callable[..., Any]) -> Response:
+        start_time = time.perf_counter()
         method = request.method
-        path = request.url.path
-
-        # Normalize path for metrics (remove dynamic segments)
-        normalized_path = self._normalize_path(path)
+        normalized_path = self._normalize_path(request.url.path)
 
         try:
-            response = await call_next(request)
-            status_code = response.status_code
-        except Exception as e:
-            # Record error metrics
-            response_time = time.time() - start_time
+            response: Response = await call_next(request)
+        except Exception:
+            response_time = time.perf_counter() - start_time
             get_metrics_collector().record_request(
                 endpoint=normalized_path,
                 method=method,
                 status_code=500,
                 response_time=response_time,
             )
-            raise e
+            raise
 
-        # Calculate response time
-        response_time = time.time() - start_time
-
-        # Record metrics
+        response_time = time.perf_counter() - start_time
         get_metrics_collector().record_request(
             endpoint=normalized_path,
             method=method,
-            status_code=status_code,
+            status_code=response.status_code,
             response_time=response_time,
         )
-
-        # Add response time and distributed trace headers for observability
         response.headers["X-Response-Time"] = f"{response_time:.3f}s"
         trace_id, _ = get_current_trace_context()
         if trace_id:
             response.headers.setdefault("X-Trace-ID", trace_id)
-
         return response
 
     def _normalize_path(self, path: str) -> str:
-        """Normalize URL path for metrics grouping."""
-        if path.startswith("/batch"):
-            return "/batch"
-        if path == "/render":
-            return "/render"
-        if path == "/health":
-            return "/health"
-        if path in {"/metrics", "/metrics/performance", "/metrics/health-score", "/metrics/live"}:
+        if path in _EXACT_METRIC_PATHS:
             return path
-        if path.startswith("/metrics/"):
-            return "/metrics"
-        if path == "/schedules":
-            return "/schedules"
         if path.startswith("/schedules/"):
             return (
                 "/schedules/{schedule_id}/history"
                 if path.endswith("/history")
                 else "/schedules/{schedule_id}"
             )
-        if path.startswith("/jobs/"):
-            return "/jobs/{job_id}"
-        if path.startswith("/status/"):
-            return "/status/{job_id}"
-        if path.startswith("/results/"):
-            return "/results/{job_id}"
-        if path in {"/docs", "/docs/oauth2-redirect", "/redoc", "/openapi.json"}:
-            return path
-        if path == "/":
-            return "/"
+        for prefix, bucket in _PREFIX_METRIC_PATHS:
+            if path.startswith(prefix):
+                return bucket
         return "/download"
 
 
 class SystemMetricsCollector:
-    """Collects system-level metrics in the background."""
+    """Collects semaphore, Redis, and HTTP pool gauges periodically in the background."""
 
     def __init__(self) -> None:
         self.collector = get_metrics_collector()
@@ -101,19 +99,13 @@ class SystemMetricsCollector:
         self._task: asyncio.Task[None] | None = None
         self.app_state: Any = None
 
-    async def start(self, app_state=None):
-        """Start background metrics collection.
-
-        Args:
-            app_state: FastAPI app.state object containing semaphores and other resources
-        """
+    async def start(self, app_state: Any = None) -> None:
         self.app_state = app_state
         if not self._running:
             self._running = True
             self._task = asyncio.create_task(self._collect_system_metrics())
 
-    async def stop(self):
-        """Stop background metrics collection."""
+    async def stop(self) -> None:
         self._running = False
         if self._task:
             self._task.cancel()
@@ -122,134 +114,76 @@ class SystemMetricsCollector:
             except asyncio.CancelledError:
                 pass
 
-    async def _collect_system_metrics(self):
-        """Collect system metrics periodically."""
+    async def _collect_system_metrics(self) -> None:
         while self._running:
             try:
                 await self._collect_metrics_snapshot()
-                await asyncio.sleep(30)  # Collect every 30 seconds
+                await asyncio.sleep(30)
             except asyncio.CancelledError:
                 break
-            except Exception as e:
-                # Log error but continue
-                import logging
+            except (redis_exc.RedisError, OSError, RuntimeError, ValueError, TypeError) as exc:
+                logger.error(f"Error collecting system metrics: {exc}")
+                await asyncio.sleep(60)
 
-                logging.getLogger(__name__).error(f"Error collecting system metrics: {e}")
-                await asyncio.sleep(60)  # Wait longer on error
+    async def _collect_metrics_snapshot(self) -> None:
+        if self.app_state:
+            pdf_semaphore = getattr(self.app_state, "pdf_semaphore", None)
+            batch_semaphore = getattr(self.app_state, "batch_semaphore", None)
+            settings = getattr(self.app_state, "settings", None)
+            if pdf_semaphore and batch_semaphore and settings:
+                pdf_limit = settings.pdf.concurrency
+                batch_limit = settings.batch.concurrency
+                pdf_in_use = pdf_limit - pdf_semaphore._value
+                batch_in_use = batch_limit - batch_semaphore._value
+                pdf_util = (pdf_in_use / pdf_limit * 100) if pdf_limit > 0 else 0.0
+                batch_util = (batch_in_use / batch_limit * 100) if batch_limit > 0 else 0.0
+                self.collector.set_gauge("pdf_concurrency_utilization", pdf_util)
+                self.collector.set_gauge("batch_concurrency_utilization", batch_util)
+                self.collector.set_gauge("pdf_concurrency_active", pdf_in_use)
+                self.collector.set_gauge("batch_concurrency_active", batch_in_use)
 
-    async def _collect_metrics_snapshot(self):
-        """Collect a snapshot of current system metrics."""
+        await self._collect_redis_metrics()
+        await self._collect_pdf_pool_metrics()
+        await self._collect_http_client_metrics()
+
+    async def _collect_redis_metrics(self) -> None:
         try:
-            # Collect concurrency metrics from semaphores
-            if self.app_state:
-                pdf_semaphore = getattr(self.app_state, "pdf_semaphore", None)
-                batch_semaphore = getattr(self.app_state, "batch_semaphore", None)
-                settings = getattr(self.app_state, "settings", None)
-
-                if pdf_semaphore and batch_semaphore and settings:
-                    # Calculate utilization
-                    pdf_limit = settings.pdf.concurrency
-                    batch_limit = settings.batch.concurrency
-                    pdf_in_use = pdf_limit - pdf_semaphore._value
-                    batch_in_use = batch_limit - batch_semaphore._value
-
-                    pdf_utilization = (pdf_in_use / pdf_limit * 100) if pdf_limit > 0 else 0
-                    batch_utilization = (batch_in_use / batch_limit * 100) if batch_limit > 0 else 0
-
-                    # Set gauge metrics
-                    self.collector.set_gauge("pdf_concurrency_utilization", pdf_utilization)
-                    self.collector.set_gauge("batch_concurrency_utilization", batch_utilization)
-                    self.collector.set_gauge("pdf_concurrency_active", pdf_in_use)
-                    self.collector.set_gauge("batch_concurrency_active", batch_in_use)
-
-            # Collect Redis metrics if available
-            await self._collect_redis_metrics()
-
-            # Collect PDF pool metrics if available
-            await self._collect_pdf_pool_metrics()
-
-            # Collect HTTP client metrics
-            await self._collect_http_client_metrics()
-
-        except Exception as e:
-            import logging
-
-            logging.getLogger(__name__).error(f"Error in metrics snapshot: {e}")
-
-    async def _collect_redis_metrics(self):
-        """Collect Redis-specific metrics."""
-        try:
-            if self.app_state:
-                job_manager = getattr(self.app_state, "job_manager", None)
-                if job_manager:
-                    stats = await job_manager.get_connection_stats()
-                    if stats.get("status") == "healthy":
-                        self.collector.set_gauge("redis_status", 1)
-                        if "created_connections" in stats:
-                            self.collector.set_gauge(
-                                "redis_created_connections",
-                                stats["created_connections"],
-                            )
-                        if "available_connections" in stats:
-                            self.collector.set_gauge(
-                                "redis_available_connections",
-                                stats["available_connections"],
-                            )
-                        if "in_use_connections" in stats:
-                            self.collector.set_gauge(
-                                "redis_in_use_connections",
-                                stats["in_use_connections"],
-                            )
-                    else:
-                        self.collector.set_gauge("redis_status", 0)
-        except Exception:
+            job_manager = getattr(self.app_state, "job_manager", None) if self.app_state else None
+            if job_manager and hasattr(job_manager, "get_connection_stats"):
+                stats = await job_manager.get_connection_stats()
+                if stats.get("status") == "healthy":
+                    self.collector.set_gauge("redis_status", 1)
+                    for key in (
+                        "created_connections",
+                        "available_connections",
+                        "in_use_connections",
+                    ):
+                        if key in stats:
+                            self.collector.set_gauge(f"redis_{key}", stats[key])
+                else:
+                    self.collector.set_gauge("redis_status", 0)
+        except (redis_exc.RedisError, OSError, RuntimeError, TypeError):
             self.collector.set_gauge("redis_status", 0)
 
-    async def _collect_pdf_pool_metrics(self):
-        """Collect PDF browser pool metrics."""
+    async def _collect_pdf_pool_metrics(self) -> None:
+        pdf_gen = getattr(self.app_state, "pdf_generator", None) if self.app_state else None
+        self.collector.set_gauge("pdf_pool_available", 1 if pdf_gen is not None else 0)
+
+    async def _collect_http_client_metrics(self) -> None:
         try:
-            # This would need to be implemented in pdf_generator to expose pool stats
-            # For now, just set a placeholder
-            self.collector.set_gauge("pdf_pool_available", 1)  # Placeholder
-        except Exception:
-            pass
-
-    async def _collect_http_client_metrics(self):
-        """Collect HTTP client metrics."""
-        try:
-            if self.app_state:
-                http_client = getattr(self.app_state, "http_client", None)
-                if http_client:
-                    stats = http_client.get_connection_stats()
-
-                    if stats.get("status") == "healthy":
-                        self.collector.set_gauge("http_client_status", 1)
-
-                        # Extract circuit breaker stats
-                        circuit_breakers = stats.get("circuit_breakers", {})
-                        for url, cb_stats in circuit_breakers.items():
-                            # Normalize URL for metric name
-                            normalized_url = url.replace(".", "_").replace(":", "_")
-                            self.collector.set_gauge(
-                                f"circuit_breaker_{normalized_url}_failures",
-                                cb_stats.get("failure_count", 0),
-                            )
-                            self.collector.set_gauge(
-                                f"circuit_breaker_{normalized_url}_state",
-                                1 if cb_stats.get("state") == "closed" else 0,
-                            )
-                    else:
-                        self.collector.set_gauge("http_client_status", 0)
-        except Exception:
+            http_client = getattr(self.app_state, "http_client", None) if self.app_state else None
+            if http_client and hasattr(http_client, "get_connection_stats"):
+                stats = http_client.get_connection_stats()
+                is_healthy = stats.get("status") == "healthy"
+                self.collector.set_gauge("http_client_status", 1 if is_healthy else 0)
+        except (OSError, RuntimeError, ValueError, TypeError):
             self.collector.set_gauge("http_client_status", 0)
 
 
-# Global system metrics collector
 _system_metrics_collector: SystemMetricsCollector | None = None
 
 
 def get_system_metrics_collector() -> SystemMetricsCollector:
-    """Get the global system metrics collector."""
     global _system_metrics_collector
     if _system_metrics_collector is None:
         _system_metrics_collector = SystemMetricsCollector()

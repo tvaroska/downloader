@@ -7,10 +7,10 @@ import asyncio
 import httpx
 import pytest
 
-from src.downloader.crawling.robots import RobotsChecker, RobotsDisallowedError
-from src.downloader.crawling.throttle import DomainThrottle
-from src.downloader.metrics import get_metrics_collector
-from src.downloader.validation import SSRFProtectionError
+from downloader.crawling.robots import RobotsChecker, RobotsDisallowedError
+from downloader.crawling.throttle import DomainThrottle
+from downloader.metrics import get_metrics_collector
+from downloader.validation import SSRFProtectionError
 
 
 class FakeAsyncRedis:
@@ -50,16 +50,25 @@ class FakeAsyncRedis:
         return True
 
     async def eval(
-        self, _script: str, _numkeys: int, key: str, now_str: str, delay_str: str
+        self,
+        _script: str,
+        _numkeys: int,
+        key: str,
+        now_str: str,
+        delay_str: str,
+        max_wait_str: str | None = None,
     ) -> str:
         if self.fail_get or self.fail_set:
             raise ConnectionError("Redis eval failed")
         now_wall = float(now_str)
         delay = float(delay_str)
+        max_wait = float(max_wait_str) if max_wait_str is not None else None
         entry = self.store.get(key)
         next_wall = float(entry[0]) if entry is not None else 0.0
         if now_wall < next_wall:
             wait_s = next_wall - now_wall
+            if max_wait is not None and wait_s > max_wait:
+                return str(-wait_s)
             new_next = next_wall + delay
         else:
             wait_s = 0.0
@@ -172,7 +181,7 @@ class TestRobotsChecker:
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         now = 1000.0
-        monkeypatch.setattr("src.downloader.crawling.robots.time.monotonic", lambda: now)
+        monkeypatch.setattr("downloader.crawling.robots.time.monotonic", lambda: now)
 
         fetched_origins: list[str] = []
 
@@ -301,7 +310,7 @@ class TestDomainThrottle:
         fake_mono = 500.0
         slept: list[float] = []
 
-        monkeypatch.setattr("src.downloader.crawling.throttle.time.monotonic", lambda: fake_mono)
+        monkeypatch.setattr("downloader.crawling.throttle.time.monotonic", lambda: fake_mono)
 
         async def fake_sleep(seconds: float) -> None:
             nonlocal fake_mono
@@ -342,8 +351,8 @@ class TestDomainThrottle:
         fake_mono = 2000.0
         slept: list[float] = []
 
-        monkeypatch.setattr("src.downloader.crawling.throttle.time.time", lambda: fake_wall)
-        monkeypatch.setattr("src.downloader.crawling.throttle.time.monotonic", lambda: fake_mono)
+        monkeypatch.setattr("downloader.crawling.throttle.time.time", lambda: fake_wall)
+        monkeypatch.setattr("downloader.crawling.throttle.time.monotonic", lambda: fake_mono)
 
         async def fake_sleep(seconds: float) -> None:
             nonlocal fake_wall, fake_mono
@@ -375,3 +384,196 @@ class TestDomainThrottle:
         assert await pod_a.wait_if_needed("fallback.example.com", 0.5) == 0.0
         w_fallback = await pod_a.wait_if_needed("fallback.example.com", 0.5)
         assert w_fallback == pytest.approx(0.5)
+
+
+@pytest.mark.unit
+async def test_failure_sentinel_uses_short_ttl(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Transient 5xx/timeout/DNS failures cache allow-all for ~60s rather than 3600s (`R47`)."""
+    from downloader.config import Settings
+    from downloader.validation import DNSResolutionError, EgressPolicy
+
+    now = 5_000.0
+    monkeypatch.setattr("downloader.crawling.robots.time.monotonic", lambda: now)
+
+    responses: list[tuple[int, str]] = [
+        (503, "Service Unavailable"),
+        (200, "User-agent: *\nDisallow: /private/\n"),
+    ]
+    fetch_calls = 0
+
+    async def fetcher(_url: str) -> tuple[int, str]:
+        nonlocal fetch_calls
+        idx = min(fetch_calls, len(responses) - 1)
+        fetch_calls += 1
+        return responses[idx]
+
+    fake_redis = FakeAsyncRedis()
+    redis_checker = RobotsChecker(
+        robots_cache_ttl=3600,
+        negative_cache_ttl=60,
+        redis_client=fake_redis,
+        fetcher=fetcher,
+    )
+    assert await redis_checker.check_allowed("https://example.com/private/doc") is None
+    assert fetch_calls == 1
+    _, redis_ttl = fake_redis.store["robots:v2:https:example.com"]
+    assert redis_ttl == pytest.approx(60.0)
+
+    # Reset fetcher counter and exercise in-memory negative TTL (~60s vs 3600s positive TTL)
+    fetch_calls = 0
+    mem_checker = RobotsChecker(
+        robots_cache_ttl=3600,
+        negative_cache_ttl=60,
+        redis_client=None,
+        fetcher=fetcher,
+    )
+    assert await mem_checker.check_allowed("https://example.com/private/doc") is None
+    assert fetch_calls == 1
+
+    now += 30.0
+    assert await mem_checker.check_allowed("https://example.com/private/doc") is None
+    assert fetch_calls == 1
+
+    # Past 60s negative TTL (well before 3600s positive TTL), sentinel expires and re-fetches 200 OK
+    now += 31.0
+    with pytest.raises(RobotsDisallowedError):
+        await mem_checker.check_allowed("https://example.com/private/doc")
+    assert fetch_calls == 2
+
+    # Positive 200 OK entry stays cached well beyond 60s (up to 3600s)
+    now += 300.0
+    with pytest.raises(RobotsDisallowedError):
+        await mem_checker.check_allowed("https://example.com/private/doc")
+    assert fetch_calls == 2
+
+    # Typed DNSResolutionError fails open cleanly while SSRFProtectionError still propagates
+    class _DNSFailPolicy(EgressPolicy):
+        async def validate_url(self, url: str) -> str:
+            raise DNSResolutionError(f"NXDOMAIN for {url}")
+
+    dns_checker = RobotsChecker(egress_policy=_DNSFailPolicy(Settings()))
+    assert await dns_checker.check_allowed("https://unresolvable.invalid/path") is None
+
+
+@pytest.mark.unit
+async def test_cache_key_excludes_userinfo(caplog: pytest.LogCaptureFixture) -> None:
+    """Origin keys strip userinfo so credentials never fragment caches or leak to logs (`R47`)."""
+    import logging
+
+    caplog.set_level(logging.DEBUG, logger="downloader.crawling.robots")
+    fetched_urls: list[str] = []
+
+    async def fetcher(url: str) -> tuple[int, str]:
+        fetched_urls.append(url)
+        return 503, "Upstream down"
+
+    fake_redis = FakeAsyncRedis()
+    checker = RobotsChecker(
+        max_cache_bytes=2048,
+        redis_client=fake_redis,
+        fetcher=fetcher,
+    )
+
+    secret_token = "super-secret-pass-987"
+    url_with_creds = f"https://alice:{secret_token}@EXAMPLE.COM.:443/account"
+    assert await checker.check_allowed(url_with_creds) is None
+    assert await checker.check_allowed("https://example.com/other") is None
+
+    assert fetched_urls == ["https://example.com/robots.txt"]
+    assert list(checker._cache.keys()) == [("https", "example.com", 443)]
+    assert "robots:v2:https:example.com" in fake_redis.store
+    assert all(secret_token not in str(k) for k in fake_redis.store)
+    assert secret_token not in caplog.text
+
+    # Byte-bounded LRU evicts older entries when max_cache_bytes is exceeded
+    big_rules = "User-agent: *\n" + ("Disallow: /very-long-disallowed-prefix-\n" * 40)
+
+    async def big_fetcher(_url: str) -> tuple[int, str]:
+        return 200, big_rules
+
+    bounded_checker = RobotsChecker(max_cache_bytes=2048, fetcher=big_fetcher)
+    for idx in range(5):
+        await bounded_checker.check_allowed(f"https://example{idx}.com/page")
+    assert bounded_checker._cached_bytes <= 2048
+
+
+@pytest.mark.unit
+async def test_wildcard_and_longest_match_rules() -> None:
+    """RFC 9309 `*` wildcards, `$` end anchors, longest-match precedence, and cross-origin redirect checks (`R47`)."""
+    from downloader.http_client import HTTPClient
+
+    robots_txt = (
+        "User-agent: *\n"
+        "Disallow: /docs/\n"
+        "Allow: /docs/public/\n"
+        "Disallow: /*.pdf$\n"
+        "Allow: /tie-path\n"
+        "Disallow: /tie-path\n\n"
+        "User-agent: REST-API-Downloader\n"
+        "Disallow: /bot-only/*.json$\n"
+        "Allow: /bot-only/public.json$\n"
+    )
+
+    async def fetcher(url: str) -> tuple[int, str]:
+        if url == "https://test.com/robots.txt":
+            return 200, "User-agent: *\nDisallow: /blocked-target\n"
+        return 200, robots_txt
+
+    checker = RobotsChecker(user_agent="REST-API-Downloader/1.0", fetcher=fetcher)
+
+    # Specific group overrides `*` group for REST-API-Downloader
+    assert await checker.check_allowed("https://example.com/docs/secret.html") is None
+    assert await checker.check_allowed("https://example.com/bot-only/public.json") is None
+    assert await checker.check_allowed("https://example.com/bot-only/data.json?raw=1") is None
+    with pytest.raises(RobotsDisallowedError):
+        await checker.check_allowed("https://example.com/bot-only/private.json")
+
+    # Wildcard `*` group rules for a generic User-Agent
+    assert (
+        await checker.check_allowed(
+            "https://example.com/docs/public/guide.html", user_agent="OtherBot/1.0"
+        )
+        is None
+    )
+    with pytest.raises(RobotsDisallowedError):
+        await checker.check_allowed(
+            "https://example.com/docs/internal/guide.html", user_agent="OtherBot/1.0"
+        )
+
+    # `$` anchor blocks exact `.pdf` suffix but allows `.pdf?dl=0` or `.pdf.html`
+    with pytest.raises(RobotsDisallowedError):
+        await checker.check_allowed(
+            "https://example.com/files/report.pdf", user_agent="OtherBot/1.0"
+        )
+    assert (
+        await checker.check_allowed(
+            "https://example.com/files/report.pdf?preview=1", user_agent="OtherBot/1.0"
+        )
+        is None
+    )
+    # Equal-length Allow/Disallow tie resolves to Allow per RFC 9309 §2.2.2
+    assert (
+        await checker.check_allowed("https://example.com/tie-path/sub", user_agent="OtherBot/1.0")
+        is None
+    )
+
+    # Cross-origin redirect enforces target origin's robots.txt via HTTPClient redirect_policy
+    def redirect_handler(request: httpx.Request) -> httpx.Response:
+        if request.url.host == "example.com":
+            return httpx.Response(
+                302,
+                headers={"Location": "https://test.com/blocked-target"},
+                request=request,
+            )
+        return httpx.Response(200, text="should not reach", request=request)
+
+    async def check_cross_origin(prev_url: str, next_url: str) -> None:
+        if prev_url != next_url:
+            await checker.check_allowed(next_url)
+
+    async with HTTPClient(
+        transport=httpx.MockTransport(redirect_handler),
+        redirect_policy=check_cross_origin,
+    ) as client:
+        with pytest.raises(RobotsDisallowedError):
+            await client.download("https://example.com/start")

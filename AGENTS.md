@@ -23,14 +23,15 @@ just dev              # Uvicorn with hot-reload on port 8000
 just worker           # Run standalone split worker (DEPLOYMENT_MODE=worker)
 just split            # Launch Redis + API + Playwright/scheduler worker via Docker Compose
 
-# Lint, format, and type-check
+# Lint, format, AST rules, and type-check
 just fmt                                                     # ruff check --fix + ruff format
 uv run --no-sync ruff check src/ tests/ examples/
 uv run --no-sync ruff format --check src/ tests/ examples/
-uv run --no-sync mypy src/
+ast-grep scan --rule specs/ast.rules.yaml .
+uv run --no-sync mypy src/ tests/
 
-# Fast offline verification gate (smoke + unit + hygiene, no Redis/Chromium needed)
-uv run --no-sync pytest -m "not (integration or e2e or network or requires_redis or requires_playwright)"
+# Fast offline verification gate (smoke + unit + hygiene + >=83% coverage, no Redis/Chromium needed)
+uv run --no-sync pytest --cov=src/downloader -m "not (integration or e2e or network or requires_redis or requires_playwright)"
 uv run --no-sync pytest -m "smoke or unit" -v
 
 # Verify typed SDK suites (Python, JavaScript/TypeScript, Go)
@@ -59,42 +60,44 @@ just clean
 
 ```
 src/downloader/
-├── main.py                  # FastAPI app, lifespan, drain/OTel/middleware setup
+├── main.py                  # FastAPI app, lifespan, single BrowserRenderer/EgressPolicy wiring
+├── ports.py                 # BrowserRenderer, JobStore, WorkQueue Protocols + local/remote/in-memory adapters
+├── errors.py                # Single classify_domain_error exception-to-HTTP/batch/schedule table
 ├── config.py                # Pydantic Settings (60+ configurable params)
 ├── runtime_config.py        # OCR, Webhook, Shutdown, Worker & OpenTelemetry configs
-├── auth.py                  # API key authentication (Bearer / X-API-Key)
+├── auth.py                  # API key authentication (Bearer / X-API-Key via secrets.compare_digest)
 ├── drain.py                 # DrainCoordinator & DrainMiddleware (503 service_draining)
 ├── telemetry.py             # Opt-in OpenTelemetry SDK, auto-instrumentation & W3C propagation
 ├── worker.py                # Standalone split worker entrypoint (DEPLOYMENT_MODE=worker)
 ├── worker_queue.py          # Reliable Redis BLMOVE batch queue, browser RPC & heartbeats
-├── validation.py            # URL & custom header sanitization + async DNS/IP SSRF protection
+├── validation.py            # EgressPolicy, canonical origin/host helpers & async DNS/IP SSRF protection
 ├── ssrf_transport.py        # DNS-pinned httpcore network backend & httpx transport (trust_env=False)
-├── http_client.py           # Async httpx client, redirect SSRF & streaming size guard
-├── pdf_generator.py         # Lazy Playwright PDF & screenshot generator, idle reaper & SSRF guard
+├── http_client.py           # Async httpx client, injected transport, redirect policy & streaming size guard
+├── pdf_generator.py         # BrowserSession context manager, modal closer, size cap & PDF/screenshot capture
 ├── job_manager.py           # Redis-based batch job tracking, drain wait & post-persist webhooks
 ├── logging_config.py        # Structured JSON logging (path/method/status_code + trace_id/span_id)
 ├── middleware.py             # Metrics collection & X-Trace-ID header middleware
 ├── ratelimit_middleware.py   # Moving-window rate limiting enforcement (HTTP 429)
 ├── crawling/
-│   ├── robots.py            # Stateless-first robots.txt evaluator + TTL/LRU/Redis cache
-│   └── throttle.py          # Per-domain Crawl-delay pacing (in-memory + optional Redis)
+│   ├── robots.py            # RFC 9309 */$ robots.txt evaluator, short negative TTL & byte-bounded cache
+│   └── throttle.py          # Bounded Crawl-delay pacing (429 Retry-After, canonical host, atomic Redis Lua)
 ├── routes/
-│   ├── download.py          # GET /{url} - single/multi-format URL download, screenshot/PDF, OCR, actions
-│   ├── render.py            # POST /render - scripted Playwright capture (markdown/text/html/pdf/screenshot)
-│   ├── batch.py             # POST /batch (actions + webhooks), job status/results/cancel
+│   ├── download.py          # GET /{url} - maps pure convert() results & typed errors to HTTP
+│   ├── render.py            # POST /render - scripted Playwright capture via convert()
+│   ├── batch.py             # POST /batch (actions + webhooks), job status/results/cancel via JobStore/WorkQueue
 │   ├── schedules.py         # Cron schedule CRUD (screenshot + webhooks) & execution history
 │   └── metrics.py           # Prometheus, performance, health-score & live metrics
 ├── services/
-│   ├── content_processor.py # Format handlers (text, markdown, HTML, PDF, screenshot, OCR, JSON)
-│   ├── content_negotiation.py # Accept header parser, screenshot response & remote worker proxy
-│   ├── multi_format.py      # Multi-format Accept JSON response builder
-│   ├── batch_processor.py   # Per-URL & background batch runner + post-persistence webhook trigger
+│   ├── content_processor.py # Pure convert(request, deps) -> ConversionResult (zero FastAPI imports)
+│   ├── content_negotiation.py # Pure FORMAT_MIME_SPECS table & Accept header parsers
+│   ├── multi_format.py      # Pure parallel multi-format conversion (single DOM render, forwards force_ocr)
+│   ├── batch_processor.py   # Per-URL & background batch runner delegating to convert()
 │   └── webhooks.py          # SSRF-safe HMAC-SHA256 webhook delivery with bounded retries
-├── content_converter.py     # HTML parsing, single-pass Playwright settle, actions & OCR integration
-├── scheduler/               # APScheduler for scheduled downloads (paused CRUD in api mode)
-├── browser/                 # Playwright BrowserPool isolation, hardening & allowlisted actions.py
+├── content_converter.py     # HTML heuristics, BrowserSession rendering & single-parse conversion
+├── scheduler/               # APScheduler for scheduled downloads delegating to convert()
+├── browser/                 # Playwright BrowserPool (accept_downloads=False), egress_proxy & actions.py
 ├── models/                  # Pydantic request/response schemas
-└── transformers/            # Format converters (markdown, plaintext, OCR)
+└── transformers/            # common.py single-parse extractor, markdown, plaintext & dedicated-pool OCR
 
 sdks/
 ├── python/                  # Typed sync & async Python client (httpx + Pydantic v2)

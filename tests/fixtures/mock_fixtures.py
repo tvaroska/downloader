@@ -5,15 +5,15 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
-from src.downloader.dependencies import (
+from downloader.dependencies import (
     get_execution_storage_dependency,
     get_http_client,
     get_job_manager_dependency,
     get_pdf_generator_dependency,
     get_scheduler_dependency,
 )
-from src.downloader.main import app
-from src.downloader.models.schedule import ExecutionStatus, ScheduleExecution
+from downloader.main import app
+from downloader.models.schedule import ExecutionStatus, ScheduleExecution
 
 
 @pytest.fixture
@@ -107,7 +107,7 @@ def mock_playwright():
     Creates unique browser mocks for each launch() call to ensure BrowserPool's
     set-based storage works correctly (the set stores unique objects).
     """
-    with patch("src.downloader.browser.manager.async_playwright") as mock:
+    with patch("downloader.browser.manager.async_playwright") as mock:
         playwright_instance = AsyncMock()
         mock.return_value.start = AsyncMock(return_value=playwright_instance)
 
@@ -138,15 +138,19 @@ def mock_playwright():
 def mock_browser_pool():
     """Mock browser pool for PDF generation tests."""
     # Patch both locations for backward compatibility
-    with patch("src.downloader.pdf_generator.BrowserPool") as mock_pool_class:
+    with patch("downloader.pdf_generator.BrowserPool") as mock_pool_class:
         pool_instance = AsyncMock()
         mock_pool_class.return_value = pool_instance
 
         browser = AsyncMock()
         browser.is_connected = MagicMock(return_value=True)
+
+        async def _delegate_create_context(br, **kwargs):
+            return await br.new_context(**kwargs)
+
         pool_instance.get_browser = AsyncMock(return_value=browser)
         pool_instance.release_browser = AsyncMock()
-        pool_instance.create_context = AsyncMock()
+        pool_instance.create_context = AsyncMock(side_effect=_delegate_create_context)
 
         yield pool_instance, browser
 
@@ -174,7 +178,6 @@ def mock_execution_storage():
     """Mock ExecutionStorage for testing routes and executor."""
     mock_storage = AsyncMock()
     mock_storage.store_execution = AsyncMock()
-    mock_storage.get_execution = AsyncMock(return_value=None)
     mock_storage.get_executions = AsyncMock(return_value=[])
     mock_storage.get_execution_count = AsyncMock(return_value=0)
     mock_storage.delete_executions = AsyncMock(return_value=0)
@@ -197,24 +200,14 @@ def mock_apscheduler_job():
     }
     job.trigger = MagicMock()
     # Simulating APScheduler CronTrigger fields (month, day, week, day_of_week, hour, minute, second)
-    minute_field = MagicMock()
-    minute_field.__str__ = lambda self: "0"
-    hour_field = MagicMock()
-    hour_field.__str__ = lambda self: "9"
-    day_field = MagicMock()
-    day_field.__str__ = lambda self: "*"
-    month_field = MagicMock()
-    month_field.__str__ = lambda self: "*"
-    day_of_week_field = MagicMock()
-    day_of_week_field.__str__ = lambda self: "*"
     job.trigger.fields = [
         MagicMock(),
-        day_of_week_field,
+        "*",
         MagicMock(),
-        month_field,
-        day_field,
-        hour_field,
-        minute_field,
+        "*",
+        "*",
+        "9",
+        "0",
     ]
     job.pause = MagicMock()
     return job

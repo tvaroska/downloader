@@ -1,4 +1,4 @@
-"""Origin robots.txt fetcher, bounded TTL/LRU + optional Redis cache, and RFC 9309 evaluator."""
+"""Origin robots.txt fetcher, byte-bounded TTL/LRU + Redis cache, and RFC 9309 evaluator."""
 
 from __future__ import annotations
 
@@ -6,14 +6,16 @@ import asyncio
 import json
 import logging
 import math
+import re
 import time
 from collections import OrderedDict
 from collections.abc import Awaitable, Callable
+from dataclasses import dataclass, field
 from typing import Any
-from urllib.parse import urlparse
-from urllib.robotparser import RobotFileParser
+from urllib.parse import unquote, urlsplit
 
 import httpx
+from redis.exceptions import RedisError
 
 from ..content_encoding import (
     make_stateless_cookies,
@@ -26,13 +28,27 @@ from ..metrics import (
     record_robots_evaluation,
 )
 from ..ssrf_transport import SSRFSafeHTTPTransport
-from ..validation import SSRFProtectionError, sanitize_user_agent, validate_url_async
+from ..validation import (
+    DNSResolutionError,
+    EgressPolicy,
+    SSRFProtectionError,
+    URLValidationError,
+    canonical_origin,
+    format_origin_url,
+    sanitize_user_agent,
+    validate_url_async,
+)
 
 logger = logging.getLogger(__name__)
 
 _VALID_DIRECTIVES = frozenset(
     {"user-agent", "disallow", "allow", "crawl-delay", "request-rate", "sitemap", "host"}
 )
+_DEFAULT_NEGATIVE_CACHE_TTL = 60
+_DEFAULT_MAX_CACHE_BYTES = 8 * 1024 * 1024
+_MAX_ROBOTS_TXT_BYTES = 512 * 1024
+
+OriginTuple = tuple[str, str, int]
 
 
 class RobotsDisallowedError(Exception):
@@ -50,52 +66,54 @@ class RobotsDisallowedError(Exception):
         super().__init__(self.reason)
 
 
+@dataclass
+class _RobotsGroup:
+    agents: list[str] = field(default_factory=list)
+    rules: list[tuple[bool, str]] = field(default_factory=list)
+    crawl_delay: float | None = None
+
+
+def _strip_comment(raw_line: str) -> str:
+    idx = raw_line.find("#")
+    return (raw_line[:idx] if idx >= 0 else raw_line).strip()
+
+
 def _is_malformed_robots_txt(raw_text: str) -> bool:
     """Detect binary payloads, HTML error pages, or non-directive garbage returned as 200 OK."""
     if "\x00" in raw_text:
         return True
-
     stripped_lead = raw_text.lstrip()[:32].lower()
     if stripped_lead.startswith(("<!doctype html", "<html", "<?xml")):
         return True
 
-    non_comment_lines = []
+    has_non_comment = False
     has_known_directive = False
     for raw_line in raw_text.splitlines():
-        comment_idx = raw_line.find("#")
-        line = raw_line[:comment_idx].strip() if comment_idx >= 0 else raw_line.strip()
+        line = _strip_comment(raw_line)
         if not line:
             continue
-        non_comment_lines.append(line)
-        if ":" in line:
-            directive = line.split(":", 1)[0].strip().lower()
-            if directive in _VALID_DIRECTIVES:
-                has_known_directive = True
-
-    if non_comment_lines and not has_known_directive:
-        return True
-    return False
+        has_non_comment = True
+        if ":" in line and line.split(":", 1)[0].strip().lower() in _VALID_DIRECTIVES:
+            has_known_directive = True
+    return has_non_comment and not has_known_directive
 
 
-def _extract_crawl_delay(
-    rp: RobotFileParser,
-    raw_text: str,
-    user_agent: str,
-) -> float | None:
-    """Extract integer or fractional Crawl-delay matching RobotFileParser user-agent precedence."""
-    stdlib_delay = rp.crawl_delay(user_agent)
-    if stdlib_delay is not None:
-        return float(stdlib_delay)
+def _parse_crawl_delay_value(val: str) -> float | None:
+    try:
+        parsed = float(val)
+    except ValueError:
+        return None
+    return parsed if math.isfinite(parsed) and parsed >= 0.0 else None
 
-    # Python's RobotFileParser.parse checks str.isdecimal() and drops float Crawl-delay values.
-    groups: list[tuple[list[str], float | None]] = []
-    state = 0
-    current_agents: list[str] = []
-    current_delay: float | None = None
+
+def _parse_robots_groups(raw_text: str) -> list[_RobotsGroup]:
+    """Parse robots.txt lines into RFC 9309 user-agent rule groups."""
+    groups: list[_RobotsGroup] = []
+    current: _RobotsGroup | None = None
+    in_rules = False
 
     for raw_line in raw_text.splitlines():
-        comment_idx = raw_line.find("#")
-        line = raw_line[:comment_idx].strip() if comment_idx >= 0 else raw_line.strip()
+        line = _strip_comment(raw_line)
         if not line or ":" not in line:
             continue
         key_raw, val_raw = line.split(":", 1)
@@ -103,129 +121,208 @@ def _extract_crawl_delay(
         val = val_raw.strip()
 
         if key == "user-agent":
-            if state == 2:
-                groups.append((current_agents, current_delay))
-                current_agents = []
-                current_delay = None
-            current_agents.append(val)
-            state = 1
-        elif key in ("disallow", "allow", "request-rate"):
-            if state != 0:
-                state = 2
-        elif key == "crawl-delay":
-            if state != 0:
-                state = 2
-                try:
-                    parsed_delay = float(val)
-                    if math.isfinite(parsed_delay) and parsed_delay >= 0.0:
-                        current_delay = parsed_delay
-                except ValueError:
-                    pass
+            if current is None or in_rules:
+                current = _RobotsGroup()
+                groups.append(current)
+                in_rules = False
+            current.agents.append(val)
+        elif current is not None and key in {"allow", "disallow"}:
+            in_rules = True
+            current.rules.append((key == "allow", val))
+        elif current is not None and key == "crawl-delay":
+            in_rules = True
+            delay = _parse_crawl_delay_value(val)
+            if delay is not None:
+                current.crawl_delay = delay
+        elif current is not None and key == "request-rate":
+            in_rules = True
 
-    if state != 0:
-        groups.append((current_agents, current_delay))
+    return groups
 
-    ua_lower = user_agent.lower()
-    ua_product = user_agent.split("/", 1)[0].lower()
 
-    for agents, delay in groups:
-        if any(a.lower() == ua_lower for a in agents):
-            return delay
+def _select_matching_groups(groups: list[_RobotsGroup], user_agent: str) -> list[_RobotsGroup]:
+    """Select the most specific RFC 9309 §2.2.1 group(s) matching `user_agent`."""
+    ua_product = user_agent.split("/", 1)[0].strip().lower()
+    ua_full = user_agent.strip().lower()
 
-    for agents, delay in groups:
-        for agent in agents:
-            if agent != "*" and agent.lower() in ua_product:
-                return delay
+    best_len = 0
+    specific: list[_RobotsGroup] = []
+    wildcard: list[_RobotsGroup] = []
 
-    for agents, delay in groups:
-        if "*" in agents:
-            return delay
+    for grp in groups:
+        matched_len = 0
+        for raw_agent in grp.agents:
+            token = raw_agent.strip().lower()
+            if not token:
+                continue
+            if token == "*":
+                wildcard.append(grp)
+                continue
+            token_product = token.split("/", 1)[0].strip()
+            if token == ua_full or (token_product and token_product in ua_product):
+                matched_len = max(matched_len, len(token_product))
+        if matched_len > best_len:
+            best_len = matched_len
+            specific = [grp]
+        elif matched_len > 0 and matched_len == best_len:
+            specific.append(grp)
 
-    return None
+    return specific if specific else wildcard
+
+
+def _normalize_robots_path(raw: str) -> str:
+    """Normalize percent-encoding case for deterministic RFC 9309 path comparison."""
+    return unquote(raw)
+
+
+def _pattern_matches(pattern: str, target_path: str) -> bool:
+    """Match an RFC 9309 §2.2.2 path pattern supporting `*` wildcards and trailing `$`."""
+    anchored = pattern.endswith("$")
+    core = pattern[:-1] if anchored else pattern
+    norm_core = _normalize_robots_path(core)
+    norm_target = _normalize_robots_path(target_path)
+    regex_body = ".*".join(re.escape(part) for part in norm_core.split("*"))
+    expr = f"^{regex_body}{'$' if anchored else ''}"
+    return re.match(expr, norm_target) is not None
+
+
+def _evaluate_robots_txt(
+    raw_text: str,
+    user_agent: str,
+    url: str,
+) -> tuple[bool, float | None]:
+    """Evaluate `url` against `raw_text` using RFC 9309 longest-match and `*`/`$` rules."""
+    groups = _parse_robots_groups(raw_text)
+    selected = _select_matching_groups(groups, user_agent)
+    if not selected:
+        return True, None
+
+    parsed = urlsplit(url)
+    target = parsed.path or "/"
+    if parsed.query:
+        target = f"{target}?{parsed.query}"
+
+    matched_rules: list[tuple[int, bool]] = []
+    crawl_delay: float | None = None
+    for grp in selected:
+        if crawl_delay is None and grp.crawl_delay is not None:
+            crawl_delay = grp.crawl_delay
+        for is_allow, pattern in grp.rules:
+            if not pattern:
+                continue
+            if _pattern_matches(pattern, target):
+                matched_rules.append((len(pattern), is_allow))
+
+    if not matched_rules:
+        return True, crawl_delay
+
+    # RFC 9309 §2.2.2: longest matching pattern wins; equal-length ties favor Allow.
+    _, allowed = max(matched_rules, key=lambda item: (item[0], item[1]))
+    return allowed, crawl_delay
+
+
+def _format_redis_robots_key(origin: OriginTuple) -> str:
+    scheme, host, port = origin
+    host_part = f"[{host}]" if ":" in host else host
+    is_default = (scheme == "https" and port == 443) or (scheme == "http" and port == 80)
+    return (
+        f"robots:v2:{scheme}:{host_part}"
+        if is_default
+        else f"robots:v2:{scheme}:{host_part}:{port}"
+    )
 
 
 class RobotsChecker:
-    """Stateless-first robots.txt evaluator with bounded LRU+TTL memory cache and optional Redis."""
+    """Stateless-first robots.txt evaluator with byte-bounded LRU+TTL memory cache and Redis."""
 
-    def __init__(
+    def __init__(  # noqa: PLR0913
         self,
         user_agent: str = "REST-API-Downloader/1.0",
         *,
-        robots_cache_ttl: int | None = None,
-        robots_cache_max_size: int | None = None,
-        robots_fetch_timeout: float | None = None,
+        robots_cache_ttl: int = 3600,
+        negative_cache_ttl: int = _DEFAULT_NEGATIVE_CACHE_TTL,
+        robots_cache_max_size: int = 1000,
+        max_cache_bytes: int = _DEFAULT_MAX_CACHE_BYTES,
+        robots_fetch_timeout: float = 5.0,
         max_crawl_delay: float = 30.0,
         redis_client: Any | None = None,
         fetcher: Callable[[str], Awaitable[tuple[int, str]]] | None = None,
-        cache_ttl: int | None = None,
-        cache_max_size: int | None = None,
-        fetch_timeout: float | None = None,
-        ttl: int | None = None,
-        maxsize: int | None = None,
-        timeout: float | None = None,
+        egress_policy: EgressPolicy | None = None,
+        transport: httpx.AsyncBaseTransport | None = None,
     ) -> None:
         self.user_agent = sanitize_user_agent(user_agent)
-        resolved_ttl = next(
-            (v for v in (cache_ttl, robots_cache_ttl, ttl) if v is not None),
-            3600,
-        )
-        resolved_max_size = next(
-            (v for v in (cache_max_size, robots_cache_max_size, maxsize) if v is not None),
-            1000,
-        )
-        resolved_timeout = next(
-            (v for v in (fetch_timeout, robots_fetch_timeout, timeout) if v is not None),
-            5.0,
-        )
-        self.cache_ttl: int = int(resolved_ttl)
-        self.cache_max_size: int = max(1, int(resolved_max_size))
-        self.fetch_timeout: float = float(resolved_timeout)
+        self.cache_ttl: int = max(1, int(robots_cache_ttl))
+        self.negative_cache_ttl: int = max(1, min(int(negative_cache_ttl), self.cache_ttl))
+        self.cache_max_size: int = max(1, int(robots_cache_max_size))
+        self.max_cache_bytes: int = max(1024, int(max_cache_bytes))
+        self.fetch_timeout: float = float(robots_fetch_timeout)
         self.max_crawl_delay: float = float(max_crawl_delay)
         self.redis_client = redis_client
         self._fetcher = fetcher
+        self._egress_policy = egress_policy
+        self._transport = transport
 
-        # (expires_at_monotonic, raw_robots_txt, allow_all)
-        self._cache: OrderedDict[str, tuple[float, str, bool]] = OrderedDict()
-        self._origin_locks: OrderedDict[str, asyncio.Lock] = OrderedDict()
+        # (expires_at_monotonic, raw_robots_txt, allow_all, byte_len)
+        self._cache: OrderedDict[OriginTuple, tuple[float, str, bool, int]] = OrderedDict()
+        self._cached_bytes: int = 0
+        self._origin_locks: OrderedDict[OriginTuple, asyncio.Lock] = OrderedDict()
         self._http_client: httpx.AsyncClient | None = None
 
-    def _get_origin_lock(self, cache_key: str) -> asyncio.Lock:
-        lock = self._origin_locks.get(cache_key)
+    def _get_origin_lock(self, origin: OriginTuple) -> asyncio.Lock:
+        lock = self._origin_locks.get(origin)
         if lock is not None:
-            self._origin_locks.move_to_end(cache_key)
+            self._origin_locks.move_to_end(origin)
             return lock
 
         lock = asyncio.Lock()
-        self._origin_locks[cache_key] = lock
+        self._origin_locks[origin] = lock
         while len(self._origin_locks) > self.cache_max_size:
             oldest_key, oldest_lock = next(iter(self._origin_locks.items()))
-            if oldest_key == cache_key or oldest_lock.locked():
+            if oldest_key == origin or oldest_lock.locked():
                 break
             self._origin_locks.popitem(last=False)
         return lock
 
-    def _get_memory_cache(self, cache_key: str) -> tuple[str, bool] | None:
-        entry = self._cache.get(cache_key)
+    def _evict_entry(self, origin: OriginTuple) -> None:
+        removed = self._cache.pop(origin, None)
+        if removed is not None:
+            self._cached_bytes = max(0, self._cached_bytes - removed[3])
+
+    def _get_memory_cache(self, origin: OriginTuple) -> tuple[str, bool] | None:
+        entry = self._cache.get(origin)
         if entry is None:
             return None
-        expires_at, raw_txt, allow_all = entry
+        expires_at, raw_txt, allow_all, _ = entry
         if time.monotonic() >= expires_at:
-            self._cache.pop(cache_key, None)
+            self._evict_entry(origin)
             return None
-        self._cache.move_to_end(cache_key)
+        self._cache.move_to_end(origin)
         return raw_txt, allow_all
 
-    def _set_memory_cache(self, cache_key: str, raw_txt: str, allow_all: bool) -> None:
-        expires_at = time.monotonic() + self.cache_ttl
-        self._cache[cache_key] = (expires_at, raw_txt, allow_all)
-        self._cache.move_to_end(cache_key)
-        while len(self._cache) > self.cache_max_size:
-            self._cache.popitem(last=False)
+    def _set_memory_cache(
+        self, origin: OriginTuple, raw_txt: str, allow_all: bool, ttl: int
+    ) -> None:
+        encoded_len = len(raw_txt.encode("utf-8"))
+        if encoded_len > self.max_cache_bytes:
+            raw_txt = raw_txt.encode("utf-8")[: self.max_cache_bytes].decode("utf-8", "ignore")
+            encoded_len = len(raw_txt.encode("utf-8"))
 
-    async def _get_cached_entry(self, scheme: str, netloc: str) -> tuple[str, bool] | None:
-        origin_key = f"{scheme}://{netloc}"
+        self._evict_entry(origin)
+        expires_at = time.monotonic() + ttl
+        self._cache[origin] = (expires_at, raw_txt, allow_all, encoded_len)
+        self._cached_bytes += encoded_len
+        self._cache.move_to_end(origin)
+
+        while len(self._cache) > self.cache_max_size or (
+            len(self._cache) > 1 and self._cached_bytes > self.max_cache_bytes
+        ):
+            oldest_key = next(iter(self._cache))
+            self._evict_entry(oldest_key)
+
+    async def _get_cached_entry(self, origin: OriginTuple) -> tuple[str, bool] | None:
         if self.redis_client is not None:
-            redis_key = f"robots:v2:{scheme}:{netloc}"
+            redis_key = _format_redis_robots_key(origin)
+            origin_label = format_origin_url(*origin)
             try:
                 raw_cached = await self.redis_client.get(redis_key)
                 if isinstance(raw_cached, bytes):
@@ -239,40 +336,52 @@ class RobotsChecker:
                         pass
                     return raw_cached, False
                 return None
-            except Exception as exc:
+            except (RedisError, OSError, RuntimeError, ValueError) as exc:
                 logger.warning(
-                    f"Redis robots.txt cache read failed for {origin_key}, using memory cache: {exc}"
+                    f"Redis robots.txt cache read failed for {origin_label}, using memory cache: {exc}"
                 )
 
-        return self._get_memory_cache(origin_key)
+        return self._get_memory_cache(origin)
 
     async def _set_cached_entry(
-        self, scheme: str, netloc: str, raw_txt: str, allow_all: bool
+        self,
+        origin: OriginTuple,
+        raw_txt: str,
+        allow_all: bool,
+        *,
+        ttl: int,
     ) -> None:
-        origin_key = f"{scheme}://{netloc}"
-        self._set_memory_cache(origin_key, raw_txt, allow_all)
+        self._set_memory_cache(origin, raw_txt, allow_all, ttl)
         if self.redis_client is not None:
-            redis_key = f"robots:v2:{scheme}:{netloc}"
+            redis_key = _format_redis_robots_key(origin)
+            origin_label = format_origin_url(*origin)
             payload = json.dumps({"raw": raw_txt, "allow_all": allow_all})
             try:
-                await self.redis_client.set(redis_key, payload, ex=self.cache_ttl)
-            except Exception as exc:
+                await self.redis_client.set(redis_key, payload, ex=ttl)
+            except (RedisError, OSError, RuntimeError, ValueError) as exc:
                 logger.warning(
-                    f"Redis robots.txt cache write failed for {origin_key}, kept in memory cache: {exc}"
+                    f"Redis robots.txt cache write failed for {origin_label}, kept in memory cache: {exc}"
                 )
+
+    async def _validate_candidate_url(self, target_url: str) -> str:
+        if self._egress_policy is not None:
+            return await self._egress_policy.validate_url(target_url)
+        return await validate_url_async(target_url)
 
     async def _on_redirect_hook(self, response: httpx.Response) -> None:
         if response.is_redirect and "location" in response.headers:
             next_url = str(httpx.URL(str(response.url)).join(response.headers["location"]))
-            await validate_url_async(next_url)
+            await self._validate_candidate_url(next_url)
 
     def _ensure_http_client(self) -> httpx.AsyncClient:
         if self._http_client is None:
+            active_transport = self._transport or SSRFSafeHTTPTransport(
+                limits=httpx.Limits(max_connections=20, max_keepalive_connections=10),
+                http2=False,
+                egress_policy=self._egress_policy,
+            )
             self._http_client = httpx.AsyncClient(
-                transport=SSRFSafeHTTPTransport(
-                    limits=httpx.Limits(max_connections=20, max_keepalive_connections=10),
-                    http2=False,
-                ),
+                transport=active_transport,
                 timeout=self.fetch_timeout,
                 follow_redirects=True,
                 max_redirects=5,
@@ -292,126 +401,92 @@ class RobotsChecker:
     async def _default_fetch(self, robots_url: str) -> tuple[int, str]:
         client = self._ensure_http_client()
         async with client.stream("GET", robots_url) as response:
-            # RFC 9309 §2.5 requires crawlers to parse at least 500 KiB of robots.txt
-            max_robots_bytes = 512 * 1024
             raw_bytes = await read_bounded_response_bytes(
                 response,
-                max_bytes=max_robots_bytes,
+                max_bytes=_MAX_ROBOTS_TXT_BYTES,
                 on_too_large=lambda actual: ValueError(
-                    f"robots.txt exceeded {max_robots_bytes} bytes ({actual})"
+                    f"robots.txt exceeded {_MAX_ROBOTS_TXT_BYTES} bytes ({actual})"
                 ),
-                on_decode_error=lambda msg: ValueError(msg),
+                on_decode_error=ValueError,
                 truncate_on_limit=True,
             )
-            body, _ = resolve_charset_and_decode(
-                raw_bytes,
-                response.headers.get("content-type"),
-            )
+            body, _ = resolve_charset_and_decode(raw_bytes, response.headers.get("content-type"))
             return response.status_code, body
 
-    async def _fetch_and_cache(self, scheme: str, netloc: str) -> tuple[str, bool]:
-        robots_url = f"{scheme}://{netloc}/robots.txt"
+    async def _fetch_and_cache(self, origin: OriginTuple) -> tuple[str, bool]:
+        robots_url = f"{format_origin_url(*origin)}/robots.txt"
+        _, host, _ = origin
 
         try:
-            await validate_url_async(robots_url)
-        except SSRFProtectionError as exc:
-            # Fail open when real DNS lookup fails; if an explicit test fetcher is injected,
-            # still block localhost/restricted hostnames while allowing synthetic domain names.
-            host_only = netloc.split(":", 1)[0].strip("[]").lower()
-            if "DNS resolution failed" in str(exc):
-                if self._fetcher is not None and not host_only.endswith("localhost"):
-                    pass
-                else:
-                    logger.warning(
-                        f"DNS resolution failed fetching {robots_url} ({exc}); failing open"
-                    )
-                    await self._set_cached_entry(scheme, netloc, "", True)
-                    return "", True
-            else:
-                raise
-
-        try:
-            if self._fetcher is not None:
-                status_code, raw_text = await self._fetcher(robots_url)
-            else:
-                status_code, raw_text = await self._default_fetch(robots_url)
+            await self._validate_candidate_url(robots_url)
+        except DNSResolutionError as exc:
+            if self._fetcher is None or host.endswith("localhost"):
+                logger.warning(f"DNS resolution failed fetching {robots_url} ({exc}); failing open")
+                await self._set_cached_entry(origin, "", True, ttl=self.negative_cache_ttl)
+                return "", True
         except SSRFProtectionError:
             raise
-        except Exception as exc:
-            if self._fetcher is None and "network is unreachable" in str(exc).lower():
-                logger.debug(f"Offline environment fetching {robots_url} ({exc}); failing open")
-            else:
-                logger.warning(f"Unreachable robots.txt at {robots_url} ({exc}); failing open")
-            await self._set_cached_entry(scheme, netloc, "", True)
+
+        try:
+            status_code, raw_text = (
+                await self._fetcher(robots_url)
+                if self._fetcher is not None
+                else await self._default_fetch(robots_url)
+            )
+        except URLValidationError:
+            raise
+        except (httpx.HTTPError, OSError, TimeoutError, ValueError, RuntimeError) as exc:
+            logger.warning(f"Unreachable robots.txt at {robots_url} ({exc}); failing open")
+            await self._set_cached_entry(origin, "", True, ttl=self.negative_cache_ttl)
             return "", True
 
+        if status_code in {404, 410}:
+            await self._set_cached_entry(origin, "", True, ttl=self.cache_ttl)
+            return "", True
         if status_code >= 400:
             logger.warning(f"robots.txt at {robots_url} returned HTTP {status_code}; failing open")
-            await self._set_cached_entry(scheme, netloc, "", True)
+            await self._set_cached_entry(origin, "", True, ttl=self.negative_cache_ttl)
             return "", True
-
         if _is_malformed_robots_txt(raw_text):
             logger.warning(f"Malformed robots.txt at {robots_url}; failing open")
-            await self._set_cached_entry(scheme, netloc, "", True)
+            await self._set_cached_entry(origin, "", True, ttl=self.negative_cache_ttl)
             return "", True
 
-        await self._set_cached_entry(scheme, netloc, raw_text, False)
+        await self._set_cached_entry(origin, raw_text, False, ttl=self.cache_ttl)
         return raw_text, False
 
     async def check_allowed(self, url: str, user_agent: str | None = None) -> float | None:
-        """
-        Evaluate whether `url` is allowed by origin's `/robots.txt` for `user_agent`.
-
-        Returns:
-            Optional Crawl-delay in seconds (capped at `max_crawl_delay`) when allowed.
-
-        Raises:
-            RobotsDisallowedError: When disallowed by origin's `robots.txt`.
-            URLValidationError: When origin or redirect violates SSRF rules.
-        """
+        """Evaluate whether `url` is allowed by origin's `/robots.txt` for `user_agent`."""
         record_robots_evaluation()
         effective_ua = sanitize_user_agent(user_agent) if user_agent else self.user_agent
 
-        parsed = urlparse(url)
-        scheme = (parsed.scheme or "https").lower()
-        netloc = parsed.netloc.lower()
-        if not netloc:
+        origin = canonical_origin(url)
+        if origin is None:
             return None
 
-        origin_key = f"{scheme}://{netloc}"
-        cached = await self._get_cached_entry(scheme, netloc)
+        cached = await self._get_cached_entry(origin)
         if cached is not None:
             record_robots_cache_hit()
             raw_txt, allow_all = cached
         else:
-            lock = self._get_origin_lock(origin_key)
+            lock = self._get_origin_lock(origin)
             async with lock:
-                cached = await self._get_cached_entry(scheme, netloc)
+                cached = await self._get_cached_entry(origin)
                 if cached is not None:
                     record_robots_cache_hit()
                     raw_txt, allow_all = cached
                 else:
-                    raw_txt, allow_all = await self._fetch_and_cache(scheme, netloc)
+                    raw_txt, allow_all = await self._fetch_and_cache(origin)
 
         if allow_all or not raw_txt.strip():
             return None
 
-        try:
-            rp = RobotFileParser()
-            rp.parse(raw_txt.splitlines())
-            allowed = rp.can_fetch(effective_ua, url)
-        except Exception as exc:
-            logger.warning(f"Error parsing robots.txt for {netloc} ({exc}); failing open")
-            return None
-
+        allowed, delay = _evaluate_robots_txt(raw_txt, effective_ua, url)
         if not allowed:
             record_robots_disallowed()
             raise RobotsDisallowedError(url=url, user_agent=effective_ua)
 
-        delay = _extract_crawl_delay(rp, raw_txt, effective_ua)
-        if delay is None:
-            return None
-        return min(delay, self.max_crawl_delay)
+        return min(delay, self.max_crawl_delay) if delay is not None else None
 
     async def close(self) -> None:
         """Close dedicated HTTP client if initialized."""

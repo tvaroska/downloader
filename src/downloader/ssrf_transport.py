@@ -10,7 +10,7 @@ import httpcore
 import httpx
 
 from .config import Settings, get_settings
-from .validation import SSRFProtectionError, resolve_and_validate_host_async
+from .validation import EgressPolicy, SSRFProtectionError, resolve_and_validate_host_async
 
 
 class SSRFSafeNetworkBackend(httpcore.AsyncNetworkBackend):
@@ -20,11 +20,14 @@ class SSRFSafeNetworkBackend(httpcore.AsyncNetworkBackend):
         self,
         inner: httpcore.AsyncNetworkBackend | None = None,
         settings_getter: Callable[[], Settings] = get_settings,
+        *,
+        egress_policy: EgressPolicy | None = None,
     ) -> None:
         self._inner: httpcore.AsyncNetworkBackend = inner or httpcore.AnyIOBackend()
         self._get_settings = settings_getter
+        self._egress_policy = egress_policy
 
-    async def connect_tcp(
+    async def connect_tcp(  # noqa: PLR0913
         self,
         host: str,
         port: int,
@@ -32,8 +35,10 @@ class SSRFSafeNetworkBackend(httpcore.AsyncNetworkBackend):
         local_address: str | None = None,
         socket_options: Iterable[Any] | None = None,
     ) -> httpcore.AsyncNetworkStream:
-        cfg = self._get_settings()
-        pinned_ips = await resolve_and_validate_host_async(host, port, cfg)
+        if self._egress_policy is not None:
+            pinned_ips = await self._egress_policy.resolve_host(host, port)
+        else:
+            pinned_ips = await resolve_and_validate_host_async(host, port, self._get_settings())
         targets = pinned_ips if pinned_ips else [host]
 
         last_exc: Exception | None = None
@@ -71,7 +76,7 @@ class SSRFSafeNetworkBackend(httpcore.AsyncNetworkBackend):
 class SSRFSafeHTTPTransport(httpx.AsyncHTTPTransport):
     """httpx AsyncHTTPTransport backed by SSRFSafeNetworkBackend with trust_env disabled."""
 
-    def __init__(
+    def __init__(  # noqa: PLR0913
         self,
         *,
         verify: ssl.SSLContext | str | bool = True,
@@ -83,7 +88,9 @@ class SSRFSafeHTTPTransport(httpx.AsyncHTTPTransport):
         retries: int = 0,
         socket_options: Iterable[Any] | None = None,
         backend: httpcore.AsyncNetworkBackend | None = None,
+        egress_policy: EgressPolicy | None = None,
     ) -> None:
+        _ = trust_env
         ssl_context = httpx.create_ssl_context(verify=verify, cert=cert, trust_env=False)
         self._pool = httpcore.AsyncConnectionPool(
             ssl_context=ssl_context,
@@ -94,5 +101,5 @@ class SSRFSafeHTTPTransport(httpx.AsyncHTTPTransport):
             http2=http2,
             retries=retries,
             socket_options=socket_options,
-            network_backend=backend or SSRFSafeNetworkBackend(),
+            network_backend=backend or SSRFSafeNetworkBackend(egress_policy=egress_policy),
         )

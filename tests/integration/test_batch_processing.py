@@ -5,11 +5,11 @@ from unittest.mock import AsyncMock
 
 import pytest
 
-from src.downloader.dependencies import (
+from downloader.dependencies import (
     get_http_client,
     get_job_manager_dependency,
 )
-from src.downloader.main import app
+from downloader.main import app
 
 
 @pytest.mark.unit
@@ -90,7 +90,7 @@ class TestBatchProcessing:
         mock_job_manager,
     ):
         """Test batch processing with mix of successful and failed URLs."""
-        from src.downloader.http_client import HTTPClientError
+        from downloader.http_client import HTTPClientError
 
         def mock_download_side_effect(url, priority=None):
             if "fail.com" in url:
@@ -209,7 +209,7 @@ class TestBatchProcessing:
         mock_job_manager,
     ):
         """Test batch processing with timeout scenarios."""
-        from src.downloader.http_client import HTTPTimeoutError
+        from downloader.http_client import HTTPTimeoutError
 
         mock_client = AsyncMock()
         mock_client.download.side_effect = HTTPTimeoutError("Request timed out")

@@ -14,16 +14,16 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import pytest
 from fastapi.testclient import TestClient
 
-from src.downloader.config import SchedulerConfig
-from src.downloader.dependencies import (
+from downloader.config import SchedulerConfig
+from downloader.dependencies import (
     get_execution_storage_dependency,
     get_scheduler_dependency,
 )
-from src.downloader.main import app
-from src.downloader.models.schedule import ExecutionStatus, ScheduleExecution
-from src.downloader.scheduler.executor import MAX_ATTEMPTS, ScheduledJobExecutor
-from src.downloader.scheduler.service import SchedulerService
-from src.downloader.scheduler.storage import ExecutionStorage
+from downloader.main import app
+from downloader.models.schedule import ExecutionStatus, ScheduleExecution
+from downloader.scheduler.executor import MAX_ATTEMPTS, ScheduledJobExecutor
+from downloader.scheduler.service import SchedulerService
+from downloader.scheduler.storage import ExecutionStorage
 
 # ============= Route Tests =============
 

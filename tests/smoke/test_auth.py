@@ -1,13 +1,16 @@
 """Tests for authentication functionality."""
 
+import ast
 import os
+import secrets
+from pathlib import Path
 from unittest.mock import AsyncMock, patch
 
 import pytest
 from fastapi import HTTPException, Request
 from fastapi.security import HTTPAuthorizationCredentials
 
-from src.downloader.auth import (
+from downloader.auth import (
     get_api_key,
     get_auth_status,
     is_auth_enabled,
@@ -57,6 +60,33 @@ class TestAuthFunctions:
             assert status["auth_enabled"] is True
             assert isinstance(status["auth_methods"], list)
             assert len(status["auth_methods"]) == 2
+
+    def test_verify_api_key_uses_compare_digest(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """Pin constant-time `secrets.compare_digest` usage in `verify_api_key` (`R54`)."""
+        observed_pairs: list[tuple[bytes, bytes]] = []
+        real_compare = secrets.compare_digest
+
+        def _spy_compare_digest(a: bytes, b: bytes) -> bool:
+            observed_pairs.append((a, b))
+            return real_compare(a, b)
+
+        monkeypatch.setattr(secrets, "compare_digest", _spy_compare_digest)
+        with patch.dict(os.environ, {"DOWNLOADER_KEY": "const-time-secret"}, clear=True):
+            assert verify_api_key("const-time-secret") is True
+            assert verify_api_key("wrong-candidate") is False
+
+        assert observed_pairs == [
+            (b"const-time-secret", b"const-time-secret"),
+            (b"wrong-candidate", b"const-time-secret"),
+        ]
+
+        auth_path = Path(__file__).resolve().parents[2] / "src" / "downloader" / "auth.py"
+        calls = [
+            node.func.attr
+            for node in ast.walk(ast.parse(auth_path.read_text(encoding="utf-8")))
+            if isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute)
+        ]
+        assert "compare_digest" in calls
 
 
 @pytest.mark.smoke

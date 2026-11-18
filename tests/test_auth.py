@@ -7,7 +7,7 @@ import pytest
 from fastapi import HTTPException, Request
 from fastapi.security import HTTPAuthorizationCredentials
 
-from src.downloader.auth import (
+from downloader.auth import (
     get_api_key,
     get_auth_status,
     is_auth_enabled,

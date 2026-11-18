@@ -4,8 +4,10 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
-from src.downloader.content_converter import render_html_with_playwright
-from src.downloader.services.content_processor import handle_html_response
+from downloader.content_converter import render_html_with_playwright
+from downloader.models.responses import ResponseMetadata
+from downloader.ports import LocalBrowserRenderer
+from downloader.services.content_processor import ConversionDeps, ConversionRequest, convert
 
 
 @pytest.mark.unit
@@ -117,7 +119,7 @@ class TestPlaywrightHTMLRendering:
     async def test_render_html_browser_not_initialized(self):
         """Test error when browser pool is not initialized."""
         # Mock get_shared_pdf_generator to return None
-        with patch("src.downloader.content_converter.get_shared_pdf_generator", return_value=None):
+        with patch("downloader.content_converter.get_shared_pdf_generator", return_value=None):
             url = "https://example.com/article"
 
             with pytest.raises(Exception, match="PDF generator pool not initialized"):
@@ -139,7 +141,7 @@ class TestPlaywrightHTMLRendering:
 @pytest.mark.unit
 @pytest.mark.asyncio
 class TestHandleHTMLResponse:
-    """Test the handle_html_response function integration."""
+    """Test HTML conversion through pure `convert()` integration."""
 
     async def test_handle_html_response_triggers_playwright_for_substack(
         self, mock_playwright_for_html, substack_minimal_html
@@ -147,7 +149,6 @@ class TestHandleHTMLResponse:
         """Test that Substack URLs trigger Playwright rendering."""
         mock_generator, mock_browser, mock_context, mock_page = mock_playwright_for_html
 
-        # Configure mocks
         rendered_html = """<!DOCTYPE html>
 <html>
 <head>
@@ -159,64 +160,58 @@ class TestHandleHTMLResponse:
         mock_page.content.return_value = rendered_html
         mock_page.goto.return_value = MagicMock(status=200)
 
-        # Clear caches
-        from src.downloader import content_converter
+        from downloader import content_converter
 
         content_converter._js_heavy_cache.clear()
         content_converter._static_html_cache.clear()
 
-        # Prepare input
         url = "https://example.substack.com/p/test-article"
         content = substack_minimal_html
-        metadata = {
+        metadata: ResponseMetadata = {
             "url": url,
             "content_type": "text/html; charset=utf-8",
             "size": len(content),
             "status_code": 200,
             "headers": {},
+            "http_version": "HTTP/1.1",
+            "connection_reused": False,
         }
 
-        # Execute
-        response = await handle_html_response(url, content, metadata)
+        response = await convert(
+            ConversionRequest(url=url, output_format="html", content=content, metadata=metadata),
+            ConversionDeps(renderer=LocalBrowserRenderer()),
+        )
 
-        # Verify response
-        assert response.status_code == 200
         assert b"Rendered Substack" in response.body
         assert b"Complete content" in response.body
-
-        # Verify header indicates JS rendering
         assert response.headers.get("X-Rendered-With-JS") == "true"
-
-        # Verify Playwright was called
         mock_page.goto.assert_called_once()
 
     async def test_handle_html_response_skips_playwright_for_static(self, static_html_complete):
         """Test that static HTML with metadata skips Playwright rendering."""
-        # Clear caches
-        from src.downloader import content_converter
+        from downloader import content_converter
 
         content_converter._js_heavy_cache.clear()
         content_converter._static_html_cache.clear()
 
-        # Prepare input
         url = "https://example.com/blog/static-post"
         content = static_html_complete
-        metadata = {
+        metadata: ResponseMetadata = {
             "url": url,
             "content_type": "text/html; charset=utf-8",
             "size": len(content),
             "status_code": 200,
             "headers": {},
+            "http_version": "HTTP/1.1",
+            "connection_reused": False,
         }
 
-        # Execute
-        response = await handle_html_response(url, content, metadata)
+        response = await convert(
+            ConversionRequest(url=url, output_format="html", content=content, metadata=metadata),
+            ConversionDeps(renderer=LocalBrowserRenderer()),
+        )
 
-        # Verify response uses raw HTML
-        assert response.status_code == 200
         assert b"Static Blog Post" in response.body
-
-        # Verify header indicates NO JS rendering
         assert response.headers.get("X-Rendered-With-JS") == "false"
 
     async def test_handle_html_response_graceful_degradation_on_playwright_failure(
@@ -225,33 +220,31 @@ class TestHandleHTMLResponse:
         """Test graceful degradation when Playwright rendering fails."""
         mock_generator, mock_browser, mock_context, mock_page = mock_playwright_for_html
 
-        # Configure mock to fail
-        mock_page.goto.side_effect = Exception("Playwright failed")
+        mock_page.goto.side_effect = RuntimeError("Playwright failed")
 
-        # Clear caches
-        from src.downloader import content_converter
+        from downloader import content_converter
 
         content_converter._js_heavy_cache.clear()
         content_converter._static_html_cache.clear()
 
-        # Prepare input
         url = "https://example.substack.com/p/test-article"
         content = substack_minimal_html
-        metadata = {
+        metadata: ResponseMetadata = {
             "url": url,
             "content_type": "text/html; charset=utf-8",
             "size": len(content),
             "status_code": 200,
             "headers": {},
+            "http_version": "HTTP/1.1",
+            "connection_reused": False,
         }
 
-        # Execute - should NOT raise exception (graceful degradation)
-        response = await handle_html_response(url, content, metadata)
+        response = await convert(
+            ConversionRequest(url=url, output_format="html", content=content, metadata=metadata),
+            ConversionDeps(renderer=LocalBrowserRenderer()),
+        )
 
-        # Verify response uses raw HTML (fallback)
-        assert response.status_code == 200
         assert response.headers.get("X-Rendered-With-JS") == "false"
-        # Should return original minimal HTML
         assert b"Loading..." in response.body or b"root" in response.body
 
 
@@ -287,7 +280,7 @@ def mock_playwright_for_html():
 
     # Patch get_shared_pdf_generator
     with patch(
-        "src.downloader.content_converter.get_shared_pdf_generator",
+        "downloader.content_converter.get_shared_pdf_generator",
         return_value=mock_generator,
     ):
         yield mock_generator, mock_browser, mock_context, mock_page

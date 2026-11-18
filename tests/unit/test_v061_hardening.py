@@ -11,8 +11,8 @@ import httpx
 import pytest
 from fastapi.testclient import TestClient
 
-from src.downloader.auth import verify_api_key
-from src.downloader.config import (
+from downloader.auth import verify_api_key
+from downloader.config import (
     AuthConfig,
     BatchConfig,
     ContentConfig,
@@ -20,36 +20,39 @@ from src.downloader.config import (
     Settings,
     reload_settings,
 )
-from src.downloader.content_converter import (
+from downloader.content_converter import (
     BoundedCache,
     SelectorTimeoutError,
     _is_js_heavy_domain,
     should_use_playwright_fallback,
     should_use_playwright_for_html,
 )
-from src.downloader.crawling.robots import RobotsChecker, RobotsDisallowedError
-from src.downloader.crawling.throttle import DomainThrottle
-from src.downloader.dependencies import (
+from downloader.crawling.robots import RobotsChecker, RobotsDisallowedError
+from downloader.crawling.throttle import DomainThrottle
+from downloader.dependencies import (
     get_http_client,
     get_job_manager_dependency,
     get_pdf_semaphore,
     get_robots_checker,
     get_scheduler_dependency,
 )
-from src.downloader.http_client import HTTPClient, HTTPClientError
-from src.downloader.main import app
-from src.downloader.middleware import MetricsMiddleware
-from src.downloader.models.responses import BatchRequest, BatchURLRequest
-from src.downloader.pdf_generator import PDFGeneratorError
-from src.downloader.routes.batch import process_background_batch_job, process_single_url_in_batch
-from src.downloader.scheduler.executor import ScheduledJobExecutor
-from src.downloader.ssrf_transport import SSRFSafeNetworkBackend
-from src.downloader.validation import (
+from downloader.http_client import HTTPClient, HTTPClientError
+from downloader.main import app
+from downloader.middleware import MetricsMiddleware
+from downloader.models.responses import BatchRequest, BatchURLRequest
+from downloader.pdf_generator import PDFGeneratorError
+from downloader.scheduler.executor import ScheduledJobExecutor
+from downloader.services.batch_processor import (
+    process_background_batch_job,
+    process_single_url_in_batch,
+)
+from downloader.ssrf_transport import SSRFSafeNetworkBackend
+from downloader.validation import (
     SSRFProtectionError,
     URLValidationError,
     sanitize_custom_headers,
-    validate_url,
 )
+from tests.conftest import validate_url_sync as validate_url
 
 
 @pytest.mark.unit
@@ -80,7 +83,7 @@ class TestTrackASingleFetchAndContentConfig:
         try:
             with (
                 patch(
-                    "src.downloader.services.content_processor.render_html_with_playwright",
+                    "downloader.content_converter.render_html_with_playwright",
                     new_callable=AsyncMock,
                     return_value=rendered_dom,
                 ) as mock_render,
@@ -94,7 +97,8 @@ class TestTrackASingleFetchAndContentConfig:
                 assert expected_ct in resp.headers["content-type"]
                 assert resp.headers["X-Rendered-With-JS"] == "true"
                 assert expected_snippet in resp.text
-                mock_render.assert_called_once_with("https://example.com", "article")
+                mock_render.assert_called_once()
+                assert mock_render.call_args.args == ("https://example.com", "article")
                 mock_http.download.assert_not_called()
         finally:
             app.dependency_overrides.pop(get_http_client, None)
@@ -110,7 +114,7 @@ class TestTrackASingleFetchAndContentConfig:
         try:
             with (
                 patch(
-                    "src.downloader.services.content_processor.render_html_with_playwright",
+                    "downloader.content_converter.render_html_with_playwright",
                     new_callable=AsyncMock,
                     side_effect=SelectorTimeoutError(".missing", 5000),
                 ),
@@ -148,15 +152,15 @@ class TestTrackASingleFetchAndContentConfig:
         try:
             with (
                 patch(
-                    "src.downloader.services.content_processor.render_html_with_playwright",
+                    "downloader.content_converter.render_html_with_playwright",
                     new_callable=AsyncMock,
                     side_effect=RuntimeError("Chromium crashed"),
                 ) as mock_render,
                 patch(
-                    "src.downloader.services.content_processor.should_use_playwright_for_html"
+                    "downloader.services.content_processor.should_use_playwright_for_html"
                 ) as mock_auto_html,
                 patch(
-                    "src.downloader.services.content_processor._playwright_fallback_for_content",
+                    "downloader.content_converter.convert_content_with_playwright_fallback",
                     new_callable=AsyncMock,
                 ) as mock_empty_fb,
                 TestClient(app) as client,
@@ -197,12 +201,12 @@ class TestTrackASingleFetchAndContentConfig:
         try:
             with (
                 patch(
-                    "src.downloader.services.content_processor.render_html_with_playwright",
+                    "downloader.content_converter.render_html_with_playwright",
                     new_callable=AsyncMock,
                     return_value=rendered_dom,
                 ) as mock_render,
                 patch(
-                    "src.downloader.services.content_processor.generate_pdf_from_url",
+                    "downloader.pdf_generator.generate_pdf_from_url",
                     new_callable=AsyncMock,
                     return_value=b"%PDF-1.4 fake",
                 ) as mock_pdf,
@@ -218,8 +222,10 @@ class TestTrackASingleFetchAndContentConfig:
                 assert "Multi Heading" in payload["text/html"]
                 assert "Multi Heading" in payload["text/markdown"]
                 assert payload["application/pdf"]
-                mock_render.assert_called_once_with("https://example.com", None)
-                mock_pdf.assert_called_once_with("https://example.com")
+                mock_render.assert_called_once()
+                assert mock_render.call_args.args == ("https://example.com", None)
+                mock_pdf.assert_called_once()
+                assert mock_pdf.call_args.args == ("https://example.com",)
                 mock_http.download.assert_not_called()
         finally:
             app.dependency_overrides.pop(get_http_client, None)
@@ -236,7 +242,7 @@ class TestTrackASingleFetchAndContentConfig:
         try:
             with (
                 patch(
-                    "src.downloader.services.content_processor.generate_pdf_from_url",
+                    "downloader.pdf_generator.generate_pdf_from_url",
                     new_callable=AsyncMock,
                     side_effect=PDFGeneratorError("HTTP 404: Not Found", status_code=404),
                 ),
@@ -279,7 +285,7 @@ class TestTrackASingleFetchAndContentConfig:
         try:
             with (
                 patch(
-                    "src.downloader.services.content_processor.should_use_playwright_for_html",
+                    "downloader.services.content_processor.should_use_playwright_for_html",
                     return_value=True,
                 ),
                 TestClient(app) as client,
@@ -312,7 +318,7 @@ class TestTrackASingleFetchAndContentConfig:
         assert _is_js_heavy_domain("https://example.com/?ref=medium.com", ["medium.com"]) is False
 
         disabled_settings = Settings(content=ContentConfig(enable_html_js_rendering=False))
-        with patch("src.downloader.content_converter.get_settings", return_value=disabled_settings):
+        with patch("downloader.content_converter.get_settings", return_value=disabled_settings):
             html = b"<html><body><div id='root'>please enable javascript</div></body></html>"
             assert (
                 should_use_playwright_for_html("https://medium.com/x", html, "text/html") is False
@@ -322,7 +328,7 @@ class TestTrackASingleFetchAndContentConfig:
             )
 
         fake_now = 100.0
-        monkeypatch.setattr("src.downloader.content_converter.time.monotonic", lambda: fake_now)
+        monkeypatch.setattr("downloader.content_converter.time.monotonic", lambda: fake_now)
         cache = BoundedCache(maxsize=lambda: 2, ttl=lambda: 10.0)
         cache.add("a")
         fake_now = 105.0
@@ -353,7 +359,7 @@ class TestTrackBAuthDocsRateLimitAndSSRF:
             assert cfg.api_key == "dotenv-secret-key"
 
             settings = Settings(auth=cfg)
-            with patch("src.downloader.auth.get_settings", return_value=settings):
+            with patch("downloader.auth.get_settings", return_value=settings):
                 assert verify_api_key("dotenv-secret-key") is True
                 assert verify_api_key("wrong-key") is False
 
@@ -469,7 +475,7 @@ class TestTrackBAuthDocsRateLimitAndSSRF:
 
         # Public DNS resolution pins connect_tcp to resolved IP and preserves SNI hostname
         with patch(
-            "src.downloader.ssrf_transport.resolve_and_validate_host_async",
+            "downloader.ssrf_transport.resolve_and_validate_host_async",
             new_callable=AsyncMock,
             return_value=["93.184.215.14"],
         ):
@@ -480,7 +486,7 @@ class TestTrackBAuthDocsRateLimitAndSSRF:
 
         # DNS rebinding to cloud metadata IP at connect time raises SSRFProtectionError
         with patch(
-            "src.downloader.ssrf_transport.resolve_and_validate_host_async",
+            "downloader.ssrf_transport.resolve_and_validate_host_async",
             new_callable=AsyncMock,
             side_effect=SSRFProtectionError("Access to cloud metadata endpoints is blocked"),
         ):
@@ -490,7 +496,7 @@ class TestTrackBAuthDocsRateLimitAndSSRF:
         # Raw OSError from socket connect is converted into httpcore.ConnectError (-> HTTPClientError)
         inner.connect_tcp = AsyncMock(side_effect=OSError("Network unreachable"))
         with patch(
-            "src.downloader.ssrf_transport.resolve_and_validate_host_async",
+            "downloader.ssrf_transport.resolve_and_validate_host_async",
             new_callable=AsyncMock,
             return_value=["93.184.215.14"],
         ):
@@ -620,7 +626,7 @@ class TestTrackCSchedulesBatchAndMetrics:
             max_workers=1,
         )
         with patch(
-            "src.downloader.scheduler.executor.generate_pdf_from_url",
+            "downloader.pdf_generator.generate_pdf_from_url",
             new_callable=AsyncMock,
             return_value=b"%PDF-1.4 payload",
         ):
@@ -637,7 +643,7 @@ class TestTrackCSchedulesBatchAndMetrics:
         async def fake_sleep(_delay: float) -> None:
             observed_free_slots_during_sleep.append(pdf_exec_runner._worker_semaphore._value)
 
-        monkeypatch.setattr("src.downloader.scheduler.executor.asyncio.sleep", fake_sleep)
+        monkeypatch.setattr("downloader.scheduler.executor.asyncio.sleep", fake_sleep)
         http_client.download.side_effect = RuntimeError("transient upstream failure")
         failed_exec = await pdf_exec_runner.execute(
             "sched-retry", "https://example.com/flaky", "text", None
@@ -655,7 +661,7 @@ class TestTrackCSchedulesBatchAndMetrics:
         mock_http = AsyncMock()
         sem = asyncio.Semaphore(1)
         with patch(
-            "src.downloader.routes.batch.generate_pdf_from_url",
+            "downloader.pdf_generator.generate_pdf_from_url",
             new_callable=AsyncMock,
             side_effect=PDFGeneratorError("HTTP 404: Not Found", status_code=404),
         ):
@@ -704,8 +710,13 @@ class TestTrackCSchedulesBatchAndMetrics:
         assert summary["successful_requests"] == 2
         assert len(results) == 2
         assert job_manager.update_job_status.call_count == 2
-        first_call_kwargs = mock_http.download.await_args_list[0].kwargs
-        assert first_call_kwargs["headers"] == {"X-Api-Trace": "t1"}
+        example_calls = [
+            call
+            for call in mock_http.download.await_args_list
+            if call.args and call.args[0] == "https://example.com"
+        ]
+        assert len(example_calls) == 1
+        assert example_calls[0].kwargs["headers"] == {"X-Api-Trace": "t1"}
 
         # Configurable BATCH_MAX_URLS_PER_BATCH via app.state.settings + prohibited header 400
         prev_settings = getattr(app.state, "settings", None)

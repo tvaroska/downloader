@@ -1,6 +1,6 @@
 import pytest
 
-from src.downloader import __version__
+from downloader import __version__
 
 
 @pytest.mark.unit

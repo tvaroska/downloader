@@ -6,7 +6,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import pytest
 from playwright.async_api import TimeoutError as PlaywrightTimeoutError
 
-from src.downloader.content_converter import (
+from downloader.content_converter import (
     SelectorTimeoutError,
     render_html_with_playwright,
 )
@@ -40,7 +40,7 @@ def mock_playwright_for_rendering():
     mock_generator.ensure_started = AsyncMock(side_effect=lambda: mock_generator.pool)
 
     with patch(
-        "src.downloader.content_converter.get_shared_pdf_generator",
+        "downloader.content_converter.get_shared_pdf_generator",
         return_value=mock_generator,
     ):
         yield mock_generator, mock_browser, mock_context, mock_page
@@ -355,7 +355,7 @@ class TestBrowserRenderingErrorHandling:
 
     async def test_browser_pool_not_initialized(self):
         """Test error when browser pool is not initialized."""
-        with patch("src.downloader.content_converter.get_shared_pdf_generator", return_value=None):
+        with patch("downloader.content_converter.get_shared_pdf_generator", return_value=None):
             with pytest.raises(Exception, match="PDF generator pool not initialized"):
                 await render_html_with_playwright("https://example.com/article")
 

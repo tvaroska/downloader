@@ -1,37 +1,44 @@
-"""Content conversion utilities with DRY implementation."""
+"""HTML detection, Playwright rendering via BrowserSession, and single-parse format conversion."""
+
+from __future__ import annotations
 
 import logging
 import re
 import time
 from collections import OrderedDict
 from collections.abc import Callable, Sequence
-from typing import Literal
+from typing import Any, Literal
 from urllib.parse import urlparse
 
-from bs4 import BeautifulSoup, Tag
+from bs4 import BeautifulSoup
+from playwright.async_api import Error as PlaywrightError
 from playwright.async_api import TimeoutError as PlaywrightTimeoutError
 
 from .browser.actions import BrowserAction, BrowserActionError, execute_browser_actions
-from .config import get_settings
+from .config import Settings, get_settings
 from .content_encoding import is_text_convertible_content_type, resolve_charset_and_decode
-from .http_client import UnsupportedMediaTypeError
+from .http_client import ContentConversionError, ContentTooLargeError, UnsupportedMediaTypeError
 from .pdf_generator import (
-    PlaywrightPDFGenerator,
+    BrowserSession,
+    PDFGeneratorError,
+    close_page_modals,
+    enforce_rendered_output_size,
     get_shared_pdf_generator,
-    install_ssrf_route_guard,
-    resolve_browser_user_agent,
     validate_browser_navigation,
 )
 from .telemetry import get_tracer
-from .validation import URLValidationError
+from .transformers.common import extract_main_content_node
+from .transformers.markdown import html_to_markdown
+from .transformers.plaintext import html_to_plaintext
+from .validation import EgressPolicy, URLValidationError
 
 logger = logging.getLogger(__name__)
 
 
 class SelectorTimeoutError(Exception):
-    """Raised when wait_for_selector times out."""
+    """Raised when `wait_for_selector` times out."""
 
-    def __init__(self, selector: str, timeout_ms: int):
+    def __init__(self, selector: str, timeout_ms: int) -> None:
         self.selector = selector
         self.timeout_ms = timeout_ms
         super().__init__(f"Timeout waiting for selector '{selector}' after {timeout_ms}ms")
@@ -132,28 +139,34 @@ _JS_REQUIRED_RE = re.compile(
 
 
 async def _navigate_and_settle(
-    page,
+    session: BrowserSession,
     url: str,
     timeout_ms: int,
     *,
     include_status_in_error: bool = False,
-    context=None,
 ) -> None:
     """Navigate once on domcontentloaded, then allow a short non-fatal networkidle settle.
 
     Ad/tracker-heavy origins keep background connections open indefinitely, so gating
     page.goto on networkidle stalls until timeout even after the article DOM is ready.
     """
-    logger.info(f"🌐 Loading page with Playwright: {url}")
+    page = session.page
+    logger.info(f"Loading page with Playwright: {url}")
     response = await page.goto(url, wait_until="domcontentloaded", timeout=timeout_ms)
 
     if not response or response.status >= 400:
+        status_code = response.status if response else None
         if include_status_in_error:
-            status = response.status if response else "no response"
-            raise Exception(f"Failed to load page: {url} (status: {status})")
-        raise Exception(f"Failed to load page: {url}")
+            status_label = status_code if status_code is not None else "no response"
+            raise PDFGeneratorError(
+                f"Failed to load page: {url} (status: {status_label})",
+                status_code=status_code,
+            )
+        raise PDFGeneratorError(f"Failed to load page: {url}", status_code=status_code)
 
-    await validate_browser_navigation(page, response, context)
+    await validate_browser_navigation(
+        page, response, session.context, egress_policy=session._egress_policy
+    )
 
     settle_timeout_ms = min(timeout_ms, _NETWORKIDLE_SETTLE_CAP_MS)
     logger.debug(f"Page loaded, waiting up to {settle_timeout_ms}ms for network idle: {url}")
@@ -165,537 +178,235 @@ async def _navigate_and_settle(
         )
 
 
-async def _close_page_modals(page) -> None:
-    """Attempt to close common signup boxes and modals."""
-    close_selectors = [
-        '[aria-label="close"]',
-        '[title="Close"]',
-        '[aria-label="Close"]',
-        '[title="close"]',
-    ]
-    for selector in close_selectors:
-        try:
-            close_buttons = await page.query_selector_all(selector)
-            for button in close_buttons:
-                try:
-                    await button.click(timeout=1000)
-                    logger.debug(f"Closed modal/popup with selector: {selector}")
-                    await page.wait_for_timeout(500)
-                except Exception:
-                    pass
-        except Exception:
-            pass
+def _evaluate_fallback_soup(url: str, soup: BeautifulSoup, min_text_len: int) -> bool:
+    for ignored in soup(["script", "style", "noscript", "template"]):
+        ignored.decompose()
+
+    body = soup.find("body")
+    if not body or len(body.get_text(strip=True)) < min_text_len:
+        _empty_content_cache.add(url)
+        return False
+
+    if soup.select("main, article, .content, #content, .post, .article-body"):
+        return True
+
+    if soup.select(".error, .not-found, .404, .maintenance, .coming-soon"):
+        _fallback_bypass_cache.add(url)
+        return False
+
+    return True
 
 
 def should_use_playwright_fallback(url: str, content: bytes, content_type: str) -> bool:
-    """
-    Smart content detection to avoid unnecessary Playwright fallbacks.
-
-    Implements fast HTML content detection using CSS selectors and caching.
-    Expected 50-70% reduction in unnecessary Playwright usage.
-    """
+    """Detect whether an empty extraction warrants a Playwright render fallback."""
     settings = get_settings()
-    if not settings.content.enable_html_js_rendering:
+    if (
+        not settings.content.enable_html_js_rendering
+        or url in _empty_content_cache
+        or url in _fallback_bypass_cache
+        or "html" not in content_type.lower()
+    ):
         return False
 
-    # Check if URL is known to produce empty content
-    if url in _empty_content_cache:
-        logger.debug(f"Skipping Playwright fallback for known empty URL: {url}")
-        return False
-
-    # Check if URL is in bypass cache (known to not benefit from fallback)
-    if url in _fallback_bypass_cache:
-        logger.debug(f"Bypassing Playwright fallback for cached URL: {url}")
-        return False
-
-    # Only use fallback for HTML content
-    if "html" not in content_type.lower():
-        return False
-
-    # Fast content detection using BeautifulSoup
     try:
         decoded_html, _ = resolve_charset_and_decode(content, content_type)
         soup = BeautifulSoup(decoded_html, "html.parser")
-        for ignored in soup(["script", "style", "noscript", "template"]):
-            ignored.decompose()
-
-        # Check for meaningful body content
-        body = soup.find("body")
-        if not body:
-            _empty_content_cache.add(url)
-            return False
-
-        # Get text content and check if substantial
-        body_text = body.get_text(strip=True)
-        if len(body_text) < settings.content.min_body_text_threshold:
-            _empty_content_cache.add(url)
-            logger.debug(f"Caching empty content URL (body text: {len(body_text)} chars): {url}")
-            return False
-
-        # Check for common indicators of content-heavy pages
-        content_indicators = soup.select("main, article, .content, #content, .post, .article-body")
-        if content_indicators:
-            return True
-
-        # Check for minimal content patterns that don't benefit from Playwright
-        minimal_indicators = soup.select(".error, .not-found, .404, .maintenance, .coming-soon")
-        if minimal_indicators:
-            _fallback_bypass_cache.add(url)
-            logger.debug(f"Caching bypass for minimal content page: {url}")
-            return False
-
+        return _evaluate_fallback_soup(url, soup, settings.content.min_body_text_threshold)
+    except (RecursionError, ValueError, TypeError, RuntimeError) as exc:
+        logger.warning(f"Content detection failed for {url}: {exc}")
         return True
-
-    except Exception as e:
-        logger.warning(f"Content detection failed for {url}: {e}")
-        return True  # Default to fallback if detection fails
 
 
 def _has_missing_metadata(soup: BeautifulSoup) -> bool:
-    """
-    Check if HTML is missing expected metadata tags.
-
-    Args:
-        soup: BeautifulSoup parsed HTML
-
-    Returns:
-        True if critical metadata tags are missing
-    """
-    # Check for Open Graph tags
+    """Return True if neither Open Graph nor Twitter Card title+description tags are present."""
     og_title = soup.find("meta", property="og:title")
     og_description = soup.find("meta", property="og:description")
-
-    # Check for Twitter Card tags
     twitter_title = soup.find("meta", attrs={"name": "twitter:title"})
     twitter_description = soup.find("meta", attrs={"name": "twitter:description"})
-
-    # Missing metadata if we don't have at least one title and one description tag
     has_title = og_title is not None or twitter_title is not None
     has_description = og_description is not None or twitter_description is not None
-
     return not (has_title and has_description)
 
 
 def _has_js_framework_markers(soup: BeautifulSoup, body_text: str) -> bool:
-    """
-    Check for JS framework indicators with minimal content.
-
-    Args:
-        soup: BeautifulSoup parsed HTML
-        body_text: Extracted body text
-
-    Returns:
-        True if JS framework markers detected with minimal content
-    """
-    # Check for common JS framework root elements
+    """Check for React/Vue/Angular root containers accompanied by minimal static body text."""
     react_root = soup.find(id="root")
     vue_app = soup.find(id="app")
     angular_app = soup.find(attrs={"ng-app": True})
-
-    # If we have framework markers but minimal content, likely needs JS rendering
     has_framework_marker = react_root is not None or vue_app is not None or angular_app is not None
     settings = get_settings()
     has_minimal_content = len(body_text) < settings.content.min_js_framework_content_threshold
-
     return has_framework_marker and has_minimal_content
 
 
+def _classify_parsed_html_for_js(
+    url: str,
+    soup: BeautifulSoup,
+    content_size: int,
+    settings: Settings,
+) -> bool:
+    noscript_text = " ".join(ns.get_text(" ", strip=True) for ns in soup.find_all("noscript"))
+    missing_metadata = _has_missing_metadata(soup)
+
+    for ignored in soup(["noscript", "script", "style", "template"]):
+        ignored.decompose()
+
+    body = soup.find("body")
+    if not body:
+        _static_html_cache.add(url)
+        return False
+
+    body_text = body.get_text(" ", strip=True)
+    # Server-rendered pages that already carry substantial visible body prose do not
+    # need a browser render even if <noscript> contains a generic JS notice or OG tags are absent.
+    if len(body_text) > 500:
+        _static_html_cache.add(url)
+        return False
+
+    visible_text = soup.get_text(" ", strip=True)
+    needs_js = (
+        bool(_JS_REQUIRED_RE.search(visible_text) or _JS_REQUIRED_RE.search(noscript_text))
+        or _has_js_framework_markers(soup, body_text)
+        or (content_size < 50000 and missing_metadata)
+        or _is_js_heavy_domain(url, settings.content.html_js_heavy_domains)
+    )
+    if needs_js:
+        _js_heavy_cache.add(url)
+    return needs_js
+
+
 def should_use_playwright_for_html(url: str, content: bytes, content_type: str) -> bool:
-    """
-    Detect if HTML content needs JavaScript rendering.
-
-    Detection criteria:
-    1. URL in known JS-heavy cache → return True
-    2. URL in static HTML cache → return False
-    3. Parse HTML and check:
-       - Content size < 50KB AND has React/Vue/Angular markers
-       - Missing critical <meta> tags (og:title, og:description)
-       - Has "enable JavaScript" or "loading..." placeholders
-       - Body text < 200 chars but has app containers (#root, #app, etc.)
-    4. Domain-based heuristics (substack.com, medium.com, etc.)
-    5. Cache result for future requests
-
-    Args:
-        url: URL being processed
-        content: Raw HTML content bytes
-        content_type: MIME type
-
-    Returns:
-        True if Playwright rendering recommended, False otherwise
-    """
+    """Detect whether static HTML bytes likely require headless Chromium rendering."""
     settings = get_settings()
     if not settings.content.enable_html_js_rendering:
         return False
-
-    # Check caches first (O(1) lookup)
     if url in _js_heavy_cache:
-        logger.debug(f"Cache hit: {url} known to need JS rendering")
         return True
-    if url in _static_html_cache:
-        logger.debug(f"Cache hit: {url} known to be static HTML")
-        return False
-
-    # Only check HTML content
-    if "html" not in content_type.lower():
+    if url in _static_html_cache or "html" not in content_type.lower():
         return False
 
     try:
         decoded_html, _ = resolve_charset_and_decode(content, content_type)
         soup = BeautifulSoup(decoded_html, "html.parser")
-        content_size = len(content)
-
-        noscript_text = " ".join(ns.get_text(" ", strip=True) for ns in soup.find_all("noscript"))
-        missing_metadata = _has_missing_metadata(soup)
-
-        for ignored in soup(["noscript", "script", "style", "template"]):
-            ignored.decompose()
-
-        body = soup.find("body")
-        if not body:
-            _static_html_cache.add(url)
-            return False
-
-        body_text = body.get_text(" ", strip=True)
-
-        # Server-rendered pages that already carry substantial visible body prose do not
-        # need a browser render even if <noscript> contains a generic JS notice or OG tags are absent.
-        if len(body_text) > 500:
-            logger.debug(
-                f"Caching {url} as static HTML (substantial visible body: {len(body_text)} chars)"
-            )
-            _static_html_cache.add(url)
-            return False
-
-        visible_text = soup.get_text(" ", strip=True)
-        if _JS_REQUIRED_RE.search(visible_text) or _JS_REQUIRED_RE.search(noscript_text):
-            logger.info(f"Detected explicit JS requirement message in {url}")
-            _js_heavy_cache.add(url)
-            return True
-
-        # Check for JS frameworks with minimal content
-        if _has_js_framework_markers(soup, body_text):
-            logger.info(f"Detected JS framework markers with minimal content in {url}")
-            _js_heavy_cache.add(url)
-            return True
-
-        # Check for missing metadata with small content size and minimal static text
-        if content_size < 50000 and missing_metadata:
-            logger.info(
-                f"Detected missing metadata with small content size in {url} ({content_size} bytes)"
-            )
-            _js_heavy_cache.add(url)
-            return True
-
-        # Known JS-heavy domains when static body text is minimal
-        if _is_js_heavy_domain(url, settings.content.html_js_heavy_domains):
-            logger.info(f"Detected known JS-heavy domain in {url}")
-            _js_heavy_cache.add(url)
-            return True
-
-        # Default to static (conservative approach)
+        return _classify_parsed_html_for_js(url, soup, len(content), settings)
+    except (RecursionError, ValueError, TypeError, RuntimeError) as exc:
+        logger.warning(f"HTML detection failed for {url}: {exc}")
         return False
-
-    except Exception as e:
-        logger.warning(f"HTML detection failed for {url}: {e}")
-        return False  # Default to no rendering on error
 
 
 async def convert_content_with_playwright_fallback(
     url: str,
     output_format: Literal["text", "markdown"] = "text",
     *,
-    log_error: bool = True,
+    generator: Any = None,
+    egress_policy: EgressPolicy | None = None,
+    max_output_bytes: int | None = None,
 ) -> str:
-    """
-    Convert content using Playwright to get rendered HTML.
-    This is used as a fallback when BeautifulSoup returns empty content.
+    """Render `url` via `BrowserSession` and extract text or markdown with `max_download_size` cap."""
+    active_gen = generator or get_shared_pdf_generator()
+    cfg = egress_policy.settings if egress_policy is not None else get_settings()
+    timeout_ms = cfg.content.html_js_rendering_timeout
 
-    Args:
-        url: The URL to fetch and convert
-        output_format: Either "text" or "markdown" for the output format
-
-    Returns:
-        Text or markdown representation with article content extracted
-
-    Raises:
-        Exception: If Playwright conversion fails
-    """
     try:
-        logger.info(f"🔄 Starting Playwright {output_format} fallback for {url}")
-        generator = get_shared_pdf_generator()
-        if not generator:
-            raise Exception("PDF generator pool not initialized")
+        session = BrowserSession(active_gen, egress_policy=egress_policy)
+        async with session as (context, page):
+            await _navigate_and_settle(session, url, timeout_ms)
+            await close_page_modals(page)
+            await validate_browser_navigation(page, None, context, egress_policy=egress_policy)
 
-        is_real_generator = isinstance(generator, PlaywrightPDFGenerator)
-        if is_real_generator:
-            generator.mark_context_acquired()
-
-        pool = None
-        browser = None
-        context = None
-
-        try:
-            pool = await generator.ensure_started()
-            if not pool:
-                raise Exception("PDF generator pool not initialized")
-
-            browser = await pool.get_browser()
-            gen_ua = getattr(generator, "user_agent", None)
-            effective_ua = resolve_browser_user_agent(gen_ua if isinstance(gen_ua, str) else None)
-
-            # Create isolated context for this request
-            context = await pool.create_context(browser, user_agent=effective_ua)
-            await install_ssrf_route_guard(context)
-            page = await context.new_page()
-
-            timeout_ms = get_settings().content.html_js_rendering_timeout
-            await _navigate_and_settle(page, url, timeout_ms, context=context)
-
-            # Try to close any signup boxes/modals
-            await _close_page_modals(page)
-            await validate_browser_navigation(page, None, context)
-
-            logger.debug(f"Extracting rendered HTML content for {output_format}: {url}")
-            # Get the rendered HTML content
-            html_content = await page.content()
-
-            emoji = "📄" if output_format == "text" else "📝"
-            logger.info(
-                f"{emoji} Processing rendered HTML content ({len(html_content)} chars) "
-                f"for {output_format} extraction: {url}"
+            html_content: str = await page.content()
+            html_bytes = html_content.encode("utf-8")
+            enforce_rendered_output_size(
+                html_bytes,
+                max_output_bytes=max_output_bytes,
+                egress_policy=egress_policy,
             )
-
-            # Convert HTML using the consolidated function
             return _convert_html_to_format(html_content, output_format)
-
-        finally:
-            # Cleanup in reverse order — guard each step so browser release and
-            # idle activity accounting always run even if Chromium disconnected.
-            if context:
-                try:
-                    await context.close()
-                except Exception as e:
-                    logger.warning(f"Error closing browser context: {e}")
-            active_pool = (generator.pool if is_real_generator else None) or pool
-            if browser is not None and active_pool is not None:
-                try:
-                    await active_pool.release_browser(browser)
-                except Exception as e:
-                    logger.warning(f"Error releasing browser to pool: {e}")
-            if is_real_generator:
-                generator.mark_context_released()
-
-    except URLValidationError:
+    except (URLValidationError, ContentTooLargeError, ContentConversionError):
         raise
-    except Exception as e:
-        logger.debug(f"Playwright {output_format} fallback failed for {url}: {e}")
+    except (PDFGeneratorError, PlaywrightError, TimeoutError, RuntimeError, OSError) as exc:
+        logger.debug(f"Playwright {output_format} fallback failed for {url}: {exc}")
         raise
 
 
-async def render_html_with_playwright(
+async def render_html_with_playwright(  # noqa: PLR0913
     url: str,
     wait_for_selector: str | None = None,
     *,
     actions: Sequence[BrowserAction] | None = None,
+    generator: Any = None,
+    egress_policy: EgressPolicy | None = None,
+    max_output_bytes: int | None = None,
 ) -> bytes:
-    """
-    Fetch and render HTML using Playwright to execute JavaScript.
-
-    Similar to convert_content_with_playwright_fallback() but returns
-    raw HTML bytes instead of extracted text/markdown.
-
-    Args:
-        url: The URL to fetch and render
-        wait_for_selector: Optional CSS selector to wait for after page load
-        actions: Optional declarative browser actions to run before capturing DOM
-
-    Returns:
-        Fully rendered HTML content as bytes
-
-    Raises:
-        SelectorTimeoutError: If wait_for_selector is specified but not found
-        Exception: If Playwright rendering fails
-    """
+    """Render `url` via `BrowserSession` and return UTF-8 HTML bytes within `max_download_size`."""
+    active_gen = generator or get_shared_pdf_generator()
+    cfg = egress_policy.settings if egress_policy is not None else get_settings()
+    timeout_ms = cfg.content.html_js_rendering_timeout
     tracer = get_tracer(__name__)
+
     with tracer.start_as_current_span("playwright.render_html") as span:
         span.set_attribute("http.url", url)
         try:
-            logger.info(f"🔄 Starting Playwright HTML rendering for {url}")
-            generator = get_shared_pdf_generator()
-            if not generator:
-                raise Exception("PDF generator pool not initialized")
-
-            is_real_generator = isinstance(generator, PlaywrightPDFGenerator)
-            if is_real_generator:
-                generator.mark_context_acquired()
-
-            pool = None
-            browser = None
-            context = None
-
-            try:
-                pool = await generator.ensure_started()
-                if not pool:
-                    raise Exception("PDF generator pool not initialized")
-
-                browser = await pool.get_browser()
-                gen_ua = getattr(generator, "user_agent", None)
-                effective_ua = resolve_browser_user_agent(
-                    gen_ua if isinstance(gen_ua, str) else None
-                )
-
-                # Create isolated context
-                context = await pool.create_context(browser, user_agent=effective_ua)
-                await install_ssrf_route_guard(context)
-                page = await context.new_page()
-
-                timeout_ms = get_settings().content.html_js_rendering_timeout
+            session = BrowserSession(active_gen, egress_policy=egress_policy)
+            async with session as (context, page):
                 await _navigate_and_settle(
-                    page,
+                    session,
                     url,
                     timeout_ms,
                     include_status_in_error=True,
-                    context=context,
                 )
 
-                # Wait for specific selector if requested
                 if wait_for_selector:
                     try:
-                        logger.info(f"Waiting for selector '{wait_for_selector}' on {url}")
                         await page.wait_for_selector(
-                            wait_for_selector, timeout=timeout_ms, state="visible"
+                            wait_for_selector,
+                            timeout=timeout_ms,
+                            state="visible",
                         )
-                        logger.info(f"Selector '{wait_for_selector}' found on {url}")
-                    except PlaywrightTimeoutError:
+                    except (PlaywrightTimeoutError, TimeoutError) as exc:
                         logger.warning(
                             f"Selector '{wait_for_selector}' not found within {timeout_ms}ms on {url}"
                         )
-                        raise SelectorTimeoutError(wait_for_selector, timeout_ms)
+                        raise SelectorTimeoutError(wait_for_selector, timeout_ms) from exc
 
                 if actions:
                     await execute_browser_actions(page, actions, default_timeout_ms=timeout_ms)
 
-                # Close modals
-                await _close_page_modals(page)
-                await validate_browser_navigation(page, None, context)
+                await close_page_modals(page)
+                await validate_browser_navigation(page, None, context, egress_policy=egress_policy)
 
-                logger.debug(f"Extracting rendered HTML content: {url}")
-                # Get rendered HTML
-                html_content = await page.content()
-
-                logger.info(f"📄 Rendered HTML extracted ({len(html_content)} bytes) from {url}")
-                span.set_attribute("html.bytes", len(html_content))
-
-                # Return as bytes (UTF-8 encoded)
-                return html_content.encode("utf-8")
-
-            finally:
-                # Cleanup in reverse order — guard each step so browser release and
-                # idle activity accounting always run even if Chromium disconnected.
-                if context:
-                    try:
-                        await context.close()
-                    except Exception as e:
-                        logger.warning(f"Error closing browser context: {e}")
-                active_pool = (generator.pool if is_real_generator else None) or pool
-                if browser is not None and active_pool is not None:
-                    try:
-                        await active_pool.release_browser(browser)
-                    except Exception as e:
-                        logger.warning(f"Error releasing browser to pool: {e}")
-                if is_real_generator:
-                    generator.mark_context_released()
-
-        except (SelectorTimeoutError, BrowserActionError, URLValidationError):
+                html_content: str = await page.content()
+                html_bytes = html_content.encode("utf-8")
+                enforce_rendered_output_size(
+                    html_bytes,
+                    max_output_bytes=max_output_bytes,
+                    egress_policy=egress_policy,
+                )
+                span.set_attribute("html.bytes", len(html_bytes))
+                logger.info(f"Rendered HTML extracted ({len(html_bytes)} bytes) from {url}")
+                return html_bytes
+        except (
+            SelectorTimeoutError,
+            BrowserActionError,
+            URLValidationError,
+            ContentTooLargeError,
+        ):
             raise
-        except Exception as e:
-            logger.debug(f"Playwright HTML rendering failed for {url}: {e}")
+        except (PDFGeneratorError, PlaywrightError, TimeoutError, RuntimeError, OSError) as exc:
+            logger.debug(f"Playwright HTML rendering failed for {url}: {exc}")
             raise
 
 
 def _convert_html_to_format(html_content: str, output_format: Literal["text", "markdown"]) -> str:
-    """
-    Convert HTML content to specified format.
-
-    Args:
-        html_content: HTML content to convert
-        output_format: Either "text" or "markdown"
-
-    Returns:
-        Converted content in the specified format
-    """
-    soup = BeautifulSoup(html_content, "lxml")
-
-    # Remove unwanted elements
-    for element in soup(
-        [
-            "script",
-            "style",
-            "nav",
-            "header",
-            "footer",
-            "aside",
-            "menu",
-            "form",
-            "iframe",
-            "noscript",
-        ]
-    ):
-        element.decompose()
-
-    # Try to find main content in common article containers
-    main_content = None
-    for selector in [
-        "article",
-        "main",
-        '[role="main"]',
-        ".content",
-        ".post-content",
-        ".entry-content",
-        ".article-content",
-    ]:
-        main_content = soup.select_one(selector)
-        if main_content:
-            break
-
-    # If no main content container found, use body or entire document
-    if not main_content:
-        main_content = soup.find("body") or soup
-
+    """Parse HTML once and convert the extracted main content node to `text` or `markdown`."""
+    main_content = extract_main_content_node(html_content)
     if output_format == "markdown":
-        return _convert_to_markdown(main_content)
-    else:
-        return _convert_to_text(main_content)
-
-
-def _convert_to_markdown(main_content: BeautifulSoup | Tag) -> str:
-    """Convert soup element to markdown format using markdownify."""
-    from .transformers.markdown import html_to_markdown
-
-    # Convert soup back to HTML string for markdownify
-    html_str = str(main_content)
-
-    # Use the new transformer (extract_main_content=False since already extracted)
-    markdown = html_to_markdown(html_str, extract_main_content=False)
-
-    # If no structured content found, fall back to simple text extraction
-    if not markdown.strip():
-        text = main_content.get_text(separator="\n", strip=True)
-        text = re.sub(r"\n\s*\n+", "\n\n", text)
-        return text.strip()
-
-    return markdown
-
-
-def _convert_to_text(main_content: BeautifulSoup | Tag) -> str:
-    """Convert soup element to plain text format."""
-    from .transformers.plaintext import html_to_plaintext
-
-    # Convert soup back to HTML string for the transformer
-    html_str = str(main_content)
-
-    # Use the transformer (extract_main_content=False since already extracted)
-    return html_to_plaintext(html_str, extract_main_content=False)
+        markdown = html_to_markdown(main_content)
+        if not markdown:
+            text = main_content.get_text(separator="\n", strip=True)
+            return re.sub(r"\n\s*\n+", "\n\n", text).strip()
+        return markdown
+    return html_to_plaintext(main_content)
 
 
 def convert_content(
@@ -703,17 +414,7 @@ def convert_content(
     content_type: str,
     output_format: Literal["text", "markdown"] = "text",
 ) -> str:
-    """
-    Convert content to specified format, extracting main article content from HTML.
-
-    Args:
-        content: Raw content bytes
-        content_type: Original content type
-        output_format: Either "text" or "markdown"
-
-    Returns:
-        Content in the specified format with article content extracted
-    """
+    """Convert raw upstream bytes to `text` or `markdown`, raising `ContentConversionError` on DOM failure."""
     if not is_text_convertible_content_type(
         content_type,
         allow_ocr_images=False,
@@ -727,18 +428,13 @@ def convert_content(
     if "html" in ct_lower or "xhtml" in ct_lower:
         try:
             return _convert_html_to_format(text, output_format)
-        except Exception:
-            return text
+        except ContentConversionError:
+            raise
+        except Exception as exc:  # noqa: BLE001
+            # BeautifulSoup/lxml/markdownify can raise RecursionError or parser errors on pathological DOMs.
+            logger.error(f"HTML {output_format} conversion failed: {exc}")
+            raise ContentConversionError(
+                f"Failed to convert HTML content to {output_format}: {exc}"
+            ) from exc
 
     return text
-
-
-# Backward compatibility functions
-def convert_content_to_text(content: bytes, content_type: str) -> str:
-    """Convert content to plain text format."""
-    return convert_content(content, content_type, "text")
-
-
-def convert_content_to_markdown(content: bytes, content_type: str) -> str:
-    """Convert content to markdown format."""
-    return convert_content(content, content_type, "markdown")

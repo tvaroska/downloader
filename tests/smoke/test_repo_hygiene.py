@@ -16,8 +16,11 @@ SKIP_DIRS = {
     ".mypy_cache",
     ".ruff_cache",
     "__pycache__",
+    "build",
+    "dist",
     "htmlcov",
     "logs",
+    "node_modules",
 }
 
 _MONOREPO_PREFIX = "//depot/" + "google3"
@@ -141,3 +144,59 @@ def test_uv_lock_uses_public_pypi_only() -> None:
     assert registries == {"https://pypi.org/simple"}, (
         f"Non-public registry URLs found in uv.lock (run `uv lock --no-config --default-index https://pypi.org/simple`): {registries}"
     )
+
+
+@pytest.mark.smoke
+def test_hygiene_patterns_positive_control(tmp_path: Path) -> None:
+    """Positive control verifying every `FORBIDDEN_PATTERNS` regex catches synthetic leaks (`R56`)."""
+    synthetic_probes: dict[str, str] = {
+        "Hardcoded home directory path": "/usr/local/" + "google/home/alice/project",
+        "Local file URI scheme": "file://" + "/workspace/notes/secret.md",
+        "Internal Buganizer ID": "See " + "b" + "/123456789 for details",
+        "Internal shortlink": "Visit " + "go" + "/internal-design-doc",
+        "Internal monorepo path": "//depot/" + "google3/pkg/BUILD",
+        "Customer or personal vault workspace path": "~/cust" + "omers/acme/notes.md",
+        "Internal codename": "Powered by " + "Con" + "cord telemetry",
+    }
+    assert set(synthetic_probes) == {label for label, _ in FORBIDDEN_PATTERNS}
+
+    for label, pattern in FORBIDDEN_PATTERNS:
+        probe_file = tmp_path / f"{label.lower().replace(' ', '_')}.txt"
+        probe_file.write_text(synthetic_probes[label], encoding="utf-8")
+        content = probe_file.read_text(encoding="utf-8")
+        assert pattern.search(content) is not None, f"Pattern {label!r} missed synthetic leak"
+
+    clean_file = tmp_path / "clean.md"
+    clean_file.write_text(
+        "Standard public doc referencing file:///etc/passwd, go/mod, and https://pypi.org/simple.\n",
+        encoding="utf-8",
+    )
+    clean_text = clean_file.read_text(encoding="utf-8")
+    for label, pattern in FORBIDDEN_PATTERNS:
+        assert pattern.search(clean_text) is None, f"Pattern {label!r} false-positived on clean doc"
+
+
+@pytest.mark.smoke
+def test_governance_spine_and_claude_symlink() -> None:
+    """Enforce governance file size ceilings, `CLAUDE.md -> AGENTS.md` symlink, and AST rules (`R56`)."""
+    agents_md = REPO_ROOT / "AGENTS.md"
+    claude_md = REPO_ROOT / "CLAUDE.md"
+    critical_md = REPO_ROOT / "CRITICAL.md"
+    decisions_md = REPO_ROOT / "DECISIONS.md"
+    ast_rules = REPO_ROOT / "specs" / "ast.rules.yaml"
+
+    assert agents_md.is_file(), "AGENTS.md must exist"
+    assert agents_md.stat().st_size <= 24_000, "AGENTS.md must stay <= 24,000 bytes"
+
+    assert claude_md.is_symlink(), "CLAUDE.md must be a symlink to AGENTS.md"
+    assert os.readlink(claude_md) == "AGENTS.md", (
+        "CLAUDE.md must be a relative symlink to AGENTS.md"
+    )
+
+    assert critical_md.is_file(), "CRITICAL.md must exist"
+    assert critical_md.stat().st_size <= 5_120, "CRITICAL.md must stay <= 5 KB"
+
+    assert decisions_md.is_file(), "DECISIONS.md must exist"
+    assert decisions_md.stat().st_size <= 25_600, "DECISIONS.md must stay <= 25 KB"
+
+    assert ast_rules.is_file() and ast_rules.stat().st_size > 0, "specs/ast.rules.yaml must exist"

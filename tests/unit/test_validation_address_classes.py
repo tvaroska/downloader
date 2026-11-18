@@ -4,8 +4,9 @@ from __future__ import annotations
 
 import pytest
 
-from src.downloader.config import Settings
-from src.downloader.validation import SSRFProtectionError, validate_url
+from downloader.config import Settings
+from downloader.validation import SSRFProtectionError
+from tests.conftest import validate_url_sync as validate_url
 
 
 @pytest.mark.unit

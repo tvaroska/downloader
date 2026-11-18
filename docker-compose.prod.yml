@@ -3,11 +3,10 @@
 
 services:
   downloader:
-    # Production-specific overrides
     restart: unless-stopped
     ports:
       - "8000:8000"
-    volumes: []  # Remove volume mount for production
+    volumes: []
     environment:
       - PYTHONPATH=/app/src
       - REDIS_URI=redis://redis:6379
@@ -15,9 +14,7 @@ services:
       - LOG_LEVEL=INFO
       - LOG_JSON_LOGS=true
       - ENVIRONMENT=production
-    # Use production CMD from Dockerfile (no --reload) with graceful drain timeout
-    command: ["python", "-m", "uvicorn", "src.downloader.main:app", "--host", "0.0.0.0", "--port", "8000", "--timeout-graceful-shutdown", "35"]
-    # Resource limits
+    command: ["python", "-m", "uvicorn", "downloader.main:app", "--host", "0.0.0.0", "--port", "8000", "--timeout-graceful-shutdown", "35"]
     deploy:
       resources:
         limits:
@@ -37,7 +34,7 @@ services:
       - LOG_LEVEL=INFO
       - LOG_JSON_LOGS=true
       - ENVIRONMENT=production
-    command: ["python", "-m", "src.downloader.worker"]
+    command: ["python", "-m", "downloader.worker"]
     deploy:
       resources:
         limits:
@@ -49,7 +46,6 @@ services:
 
   redis:
     restart: unless-stopped
-    # Redis resource limits
     deploy:
       resources:
         limits:

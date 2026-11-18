@@ -3,7 +3,7 @@
 import pytest
 from fastapi.testclient import TestClient
 
-from src.downloader.main import app
+from downloader.main import app
 
 
 @pytest.fixture
@@ -19,7 +19,7 @@ def api_client(request):
     state before starting the app lifespan.
     """
     # Reload settings to ensure test isolation
-    from src.downloader.config import reload_settings
+    from downloader.config import reload_settings
 
     reload_settings()
 

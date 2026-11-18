@@ -2,7 +2,7 @@
 
 import pytest
 
-from src.downloader.transformers import html_to_plaintext
+from downloader.transformers import html_to_plaintext
 
 
 @pytest.mark.unit
@@ -155,20 +155,6 @@ class TestContentExtraction:
         assert "Page Title" in result
         assert "Some body content" in result
 
-    def test_extract_main_content_false(self):
-        """Test extract_main_content=False uses full document."""
-        html = """
-        <html><body>
-            <div class="wrapper">
-                <h1>Full Page</h1>
-                <p>All content included.</p>
-            </div>
-        </body></html>
-        """
-        result = html_to_plaintext(html, extract_main_content=False)
-        assert "Full Page" in result
-        assert "All content included" in result
-
 
 @pytest.mark.unit
 class TestTagStripping:
@@ -235,25 +221,6 @@ class TestTagStripping:
         assert "background" not in result
         assert "display" not in result
 
-    def test_custom_tag_stripping(self):
-        """Test additional tags can be stripped via strip_tags parameter."""
-        html = """
-        <html><body>
-            <div class="advertisement">Buy now!</div>
-            <main>
-                <h1>Article</h1>
-                <p>Real content.</p>
-            </main>
-        </body></html>
-        """
-        # Without custom stripping, advertisement div would appear
-        result_default = html_to_plaintext(html, extract_main_content=False)
-        assert "Buy now" in result_default
-
-        # With custom stripping of div tags
-        result_stripped = html_to_plaintext(html, strip_tags=["div"], extract_main_content=False)
-        assert "Buy now" not in result_stripped
-
 
 @pytest.mark.unit
 class TestWhitespaceHandling:
@@ -263,15 +230,8 @@ class TestWhitespaceHandling:
         """Test default space separator between text nodes."""
         html = "<html><body><p>First</p><p>Second</p></body></html>"
         result = html_to_plaintext(html)
-        # Should be joined with spaces
         assert "First" in result
         assert "Second" in result
-
-    def test_custom_separator(self):
-        """Test custom separator character."""
-        html = "<html><body><span>One</span><span>Two</span><span>Three</span></body></html>"
-        result = html_to_plaintext(html, separator="|", extract_main_content=False)
-        assert "|" in result
 
     def test_multiple_whitespace_normalization(self):
         """Test multiple whitespace characters are normalized to single space."""
@@ -293,60 +253,6 @@ class TestWhitespaceHandling:
         result = html_to_plaintext(html)
         assert "Line one" in result
         assert "Line two" in result
-        # Should be normalized when preserve_paragraphs is False
-        assert "\n\n\n" not in result
-
-
-@pytest.mark.unit
-class TestParagraphPreservation:
-    """Test preserve_paragraphs=True behavior.
-
-    Note: The current implementation attempts to preserve paragraphs by inserting
-    newlines after block elements, but get_text(separator=" ") normalizes these.
-    These tests document the current behavior.
-    """
-
-    def test_paragraph_preservation_enabled(self):
-        """Test preserve_paragraphs=True processes paragraph content."""
-        html = "<html><body><p>First paragraph.</p><p>Second paragraph.</p></body></html>"
-        result = html_to_plaintext(html, preserve_paragraphs=True)
-        assert "First paragraph." in result
-        assert "Second paragraph." in result
-        # Note: Current implementation normalizes whitespace via get_text()
-
-    def test_br_tag_handling(self):
-        """Test BR tags are replaced with newline character."""
-        html = "<html><body><p>Line one.<br>Line two.</p></body></html>"
-        result = html_to_plaintext(html, preserve_paragraphs=True)
-        assert "Line one" in result
-        assert "Line two" in result
-        # BR is replaced with \n but may be normalized by get_text()
-
-    def test_block_elements_processing(self):
-        """Test block elements (div, h1-h6, li) are processed for newlines."""
-        html = """
-        <html><body>
-            <h1>Title</h1>
-            <div>First block</div>
-            <div>Second block</div>
-        </body></html>
-        """
-        result = html_to_plaintext(html, preserve_paragraphs=True)
-        assert "Title" in result
-        assert "First block" in result
-        assert "Second block" in result
-
-    def test_newline_normalization_with_preserve(self):
-        """Test multiple newlines are normalized to double newlines."""
-        html = """
-        <html><body>
-            <p>Para one.</p>
-            <p>Para two.</p>
-            <p>Para three.</p>
-        </body></html>
-        """
-        result = html_to_plaintext(html, preserve_paragraphs=True)
-        # Should not have more than double newlines
         assert "\n\n\n" not in result
 
 

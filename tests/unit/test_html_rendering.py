@@ -3,7 +3,7 @@
 import pytest
 from bs4 import BeautifulSoup
 
-from src.downloader.content_converter import (
+from downloader.content_converter import (
     _has_js_framework_markers,
     _has_missing_metadata,
     should_use_playwright_for_html,
@@ -82,7 +82,9 @@ class TestJSFrameworkMarkers:
             <div id="root"></div>
         </body></html>"""
         soup = BeautifulSoup(html, "html.parser")
-        body_text = soup.find("body").get_text(strip=True)
+        body = soup.find("body")
+        assert body is not None
+        body_text = body.get_text(strip=True)
 
         assert _has_js_framework_markers(soup, body_text), "Should detect React marker"
 
@@ -92,7 +94,9 @@ class TestJSFrameworkMarkers:
             <div id="app"></div>
         </body></html>"""
         soup = BeautifulSoup(html, "html.parser")
-        body_text = soup.find("body").get_text(strip=True)
+        body = soup.find("body")
+        assert body is not None
+        body_text = body.get_text(strip=True)
 
         assert _has_js_framework_markers(soup, body_text), "Should detect Vue marker"
 
@@ -102,7 +106,9 @@ class TestJSFrameworkMarkers:
             <div ng-view></div>
         </body></html>"""
         soup = BeautifulSoup(html, "html.parser")
-        body_text = soup.find("body").get_text(strip=True)
+        body = soup.find("body")
+        assert body is not None
+        body_text = body.get_text(strip=True)
 
         assert _has_js_framework_markers(soup, body_text), "Should detect Angular marker"
 
@@ -118,7 +124,9 @@ class TestJSFrameworkMarkers:
         </body></html>"""
         )
         soup = BeautifulSoup(html, "html.parser")
-        body_text = soup.find("body").get_text(strip=True)
+        body = soup.find("body")
+        assert body is not None
+        body_text = body.get_text(strip=True)
 
         assert not _has_js_framework_markers(soup, body_text), (
             "Substantial content should not trigger"
@@ -132,7 +140,9 @@ class TestJSFrameworkMarkers:
             </div>
         </body></html>"""
         soup = BeautifulSoup(html, "html.parser")
-        body_text = soup.find("body").get_text(strip=True)
+        body = soup.find("body")
+        assert body is not None
+        body_text = body.get_text(strip=True)
 
         assert not _has_js_framework_markers(soup, body_text), "No markers should not trigger"
 
@@ -147,7 +157,7 @@ class TestPlaywrightDetection:
         content_type = "text/html; charset=utf-8"
 
         # Clear any caches that might interfere
-        from src.downloader import content_converter
+        from downloader import content_converter
 
         content_converter._js_heavy_cache.clear()
         content_converter._static_html_cache.clear()
@@ -161,7 +171,7 @@ class TestPlaywrightDetection:
         url = "https://medium.com/@author/test-article"
         content_type = "text/html; charset=utf-8"
 
-        from src.downloader import content_converter
+        from downloader import content_converter
 
         content_converter._js_heavy_cache.clear()
         content_converter._static_html_cache.clear()
@@ -175,7 +185,7 @@ class TestPlaywrightDetection:
         url = "https://example.com/article"
         content_type = "text/html; charset=utf-8"
 
-        from src.downloader import content_converter
+        from downloader import content_converter
 
         content_converter._js_heavy_cache.clear()
         content_converter._static_html_cache.clear()
@@ -192,7 +202,7 @@ class TestPlaywrightDetection:
         url = "https://example.com/app"
         content_type = "text/html; charset=utf-8"
 
-        from src.downloader import content_converter
+        from downloader import content_converter
 
         content_converter._js_heavy_cache.clear()
         content_converter._static_html_cache.clear()
@@ -206,7 +216,7 @@ class TestPlaywrightDetection:
         url = "https://example.com/app"
         content_type = "text/html; charset=utf-8"
 
-        from src.downloader import content_converter
+        from downloader import content_converter
 
         content_converter._js_heavy_cache.clear()
         content_converter._static_html_cache.clear()
@@ -220,7 +230,7 @@ class TestPlaywrightDetection:
         url = "https://example.com/app"
         content_type = "text/html; charset=utf-8"
 
-        from src.downloader import content_converter
+        from downloader import content_converter
 
         content_converter._js_heavy_cache.clear()
         content_converter._static_html_cache.clear()
@@ -234,7 +244,7 @@ class TestPlaywrightDetection:
         url = "https://example.com/page"
         content_type = "text/html; charset=utf-8"
 
-        from src.downloader import content_converter
+        from downloader import content_converter
 
         content_converter._js_heavy_cache.clear()
         content_converter._static_html_cache.clear()
@@ -248,7 +258,7 @@ class TestPlaywrightDetection:
         url = "https://example.com/blog/post"
         content_type = "text/html; charset=utf-8"
 
-        from src.downloader import content_converter
+        from downloader import content_converter
 
         content_converter._js_heavy_cache.clear()
         content_converter._static_html_cache.clear()
@@ -262,7 +272,7 @@ class TestPlaywrightDetection:
         url = "https://example.com/large-article"
         content_type = "text/html; charset=utf-8"
 
-        from src.downloader import content_converter
+        from downloader import content_converter
 
         content_converter._js_heavy_cache.clear()
         content_converter._static_html_cache.clear()
@@ -280,7 +290,7 @@ class TestPlaywrightDetection:
         content = b'{"key": "value"}'
         content_type = "application/json"
 
-        from src.downloader import content_converter
+        from downloader import content_converter
 
         content_converter._js_heavy_cache.clear()
         content_converter._static_html_cache.clear()
@@ -299,7 +309,7 @@ class TestPlaywrightDetection:
         url = "https://example.com/empty"
         content_type = "text/html; charset=utf-8"
 
-        from src.downloader import content_converter
+        from downloader import content_converter
 
         content_converter._js_heavy_cache.clear()
         content_converter._static_html_cache.clear()
@@ -315,7 +325,7 @@ class TestPlaywrightDetection:
         url = "https://test.substack.com/p/article"
         content_type = "text/html; charset=utf-8"
 
-        from src.downloader import content_converter
+        from downloader import content_converter
 
         content_converter._js_heavy_cache.clear()
         content_converter._static_html_cache.clear()
@@ -336,7 +346,7 @@ class TestPlaywrightDetection:
         url = "https://example.com/static-article"
         content_type = "text/html; charset=utf-8"
 
-        from src.downloader import content_converter
+        from downloader import content_converter
 
         content_converter._js_heavy_cache.clear()
         content_converter._static_html_cache.clear()
@@ -357,18 +367,13 @@ class TestPlaywrightDetection:
         url = "https://example.com/malformed"
         content_type = "text/html; charset=utf-8"
 
-        from src.downloader import content_converter
+        from downloader import content_converter
 
         content_converter._js_heavy_cache.clear()
         content_converter._static_html_cache.clear()
 
-        # Should not raise exception
-        try:
-            result = should_use_playwright_for_html(url, malformed_html, content_type)
-            # Should default to False on parsing errors
-            assert isinstance(result, bool)
-        except Exception as e:
-            pytest.fail(f"Malformed HTML should be handled gracefully, but raised: {e}")
+        result = should_use_playwright_for_html(url, malformed_html, content_type)
+        assert isinstance(result, bool)
 
 
 @pytest.mark.unit
@@ -377,14 +382,14 @@ class TestConfigurableThresholds:
 
     def test_default_body_text_threshold_is_100(self):
         """Test that default min_body_text_threshold is 100."""
-        from src.downloader.config import ContentConfig
+        from downloader.config import ContentConfig
 
         config = ContentConfig()
         assert config.min_body_text_threshold == 100
 
     def test_default_js_framework_threshold_is_200(self):
         """Test that default min_js_framework_content_threshold is 200."""
-        from src.downloader.config import ContentConfig
+        from downloader.config import ContentConfig
 
         config = ContentConfig()
         assert config.min_js_framework_content_threshold == 200
@@ -395,7 +400,7 @@ class TestConfigurableThresholds:
         monkeypatch.setenv("CONTENT_MIN_JS_FRAMEWORK_CONTENT_THRESHOLD", "150")
 
         # Reload settings to pick up new env var
-        from src.downloader import config
+        from downloader import config
 
         config._settings = None  # Reset singleton
 
@@ -407,7 +412,9 @@ class TestConfigurableThresholds:
             </div>
         </body></html>"""
         soup = BeautifulSoup(html, "html.parser")
-        body_text = soup.find("body").get_text(strip=True)
+        body = soup.find("body")
+        assert body is not None
+        body_text = body.get_text(strip=True)
 
         # With default threshold (200): 175 < 200 = True (would trigger)
         # With custom threshold (150): 175 >= 150 = False (should NOT trigger)
@@ -420,7 +427,7 @@ class TestConfigurableThresholds:
 
     def test_playwright_fallback_uses_config_threshold(self, monkeypatch):
         """Test that should_use_playwright_fallback respects config threshold."""
-        from src.downloader import config, content_converter
+        from downloader import config, content_converter
 
         # Set a custom threshold via environment variable
         monkeypatch.setenv("CONTENT_MIN_BODY_TEXT_THRESHOLD", "50")
@@ -443,7 +450,7 @@ class TestConfigurableThresholds:
 
         # With default threshold (100): 75 < 100 = False (caches as empty)
         # With custom threshold (50): 75 >= 50 = True (allows fallback)
-        from src.downloader.content_converter import should_use_playwright_fallback
+        from downloader.content_converter import should_use_playwright_fallback
 
         result = should_use_playwright_fallback(url, html, content_type)
 

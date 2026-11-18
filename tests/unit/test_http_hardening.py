@@ -15,15 +15,15 @@ from fastapi.testclient import TestClient
 from slowapi import Limiter
 from slowapi.util import get_remote_address
 
-from src.downloader.config import reload_settings
-from src.downloader.dependencies import get_http_client, get_robots_checker
-from src.downloader.http_client import ContentTooLargeError, HTTPClient
-from src.downloader.logging_config import CustomJsonFormatter
-from src.downloader.main import app
-from src.downloader.models.responses import BatchURLRequest
-from src.downloader.ratelimit_middleware import RateLimitMiddleware
-from src.downloader.routes.batch import process_single_url_in_batch
-from src.downloader.validation import SSRFProtectionError
+from downloader.config import reload_settings
+from downloader.dependencies import get_http_client, get_robots_checker
+from downloader.http_client import ContentTooLargeError, HTTPClient
+from downloader.logging_config import CustomJsonFormatter
+from downloader.main import app
+from downloader.models.responses import BatchURLRequest
+from downloader.ratelimit_middleware import RateLimitMiddleware
+from downloader.services.batch_processor import process_single_url_in_batch
+from downloader.validation import SSRFProtectionError
 
 
 class _CountingByteStream(httpx.AsyncByteStream):

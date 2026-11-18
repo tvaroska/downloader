@@ -1,10 +1,10 @@
 import pytest
 
-from src.downloader.validation import (
+from downloader.validation import (
     URLValidationError,
     sanitize_user_agent,
-    validate_url,
 )
+from tests.conftest import validate_url_sync as validate_url
 
 
 class TestValidateUrl:

@@ -1,10 +1,10 @@
-"""Runtime, feature, and operations configuration schemas added in v0.7.0."""
+"""Runtime, feature, and operations configuration schemas."""
 
 from __future__ import annotations
 
 from typing import Literal
 
-from pydantic import Field
+from pydantic import Field, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -116,6 +116,15 @@ class WorkerConfig(BaseSettings):
     )
 
     model_config = SettingsConfigDict(env_prefix="WORKER_", populate_by_name=True)
+
+    @model_validator(mode="after")
+    def validate_heartbeat_ttl_exceeds_interval(self) -> WorkerConfig:
+        if self.heartbeat_ttl <= self.heartbeat_interval:
+            raise ValueError(
+                f"heartbeat_ttl ({self.heartbeat_ttl}s) must be greater than "
+                f"heartbeat_interval ({self.heartbeat_interval}s)"
+            )
+        return self
 
 
 class TelemetryConfig(BaseSettings):

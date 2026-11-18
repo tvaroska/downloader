@@ -5,7 +5,7 @@ from unittest.mock import AsyncMock, patch
 
 import pytest
 
-from src.downloader.pdf_generator import PDFGeneratorError, PlaywrightPDFGenerator
+from downloader.pdf_generator import PDFGeneratorError, PlaywrightPDFGenerator
 
 
 class TestPDFGeneratorBrowserPool:
@@ -148,7 +148,7 @@ class TestPDFGeneratorBrowserPool:
             assert started_done, "ensure_started() returned before BrowserPool.start() completed"
             return pool
 
-        with patch("src.downloader.pdf_generator.BrowserPool", return_value=pool_instance):
+        with patch("downloader.pdf_generator.BrowserPool", return_value=pool_instance):
             generator = PlaywrightPDFGenerator()
             first_pool, second_pool = await asyncio.gather(
                 call_ensure_started(generator),

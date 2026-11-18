@@ -5,8 +5,8 @@ from __future__ import annotations
 import pytest
 from fastapi.testclient import TestClient
 
-from src.downloader.config import AuthConfig, Settings
-from src.downloader.main import app
+from downloader.config import AuthConfig, Settings
+from downloader.main import app
 
 _PUBLIC_PATHS = frozenset(
     {

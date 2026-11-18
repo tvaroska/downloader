@@ -3,7 +3,7 @@
 
 def test_rate_limiting_config():
     """Test rate limiting configuration."""
-    from src.downloader.config import get_settings
+    from downloader.config import get_settings
 
     settings = get_settings()
 
@@ -27,8 +27,8 @@ def test_rate_limiting_middleware_initialization():
     from slowapi import Limiter
     from slowapi.util import get_remote_address
 
-    from src.downloader.config import get_settings
-    from src.downloader.ratelimit_middleware import RateLimitMiddleware
+    from downloader.config import get_settings
+    from downloader.ratelimit_middleware import RateLimitMiddleware
 
     get_settings()
 
@@ -54,7 +54,7 @@ def test_rate_limiting_patterns():
     from slowapi import Limiter
     from slowapi.util import get_remote_address
 
-    from src.downloader.ratelimit_middleware import RateLimitMiddleware
+    from downloader.ratelimit_middleware import RateLimitMiddleware
 
     app = FastAPI()
     limiter = Limiter(key_func=get_remote_address, storage_uri="memory://")
@@ -84,7 +84,7 @@ def test_rate_limiting_patterns():
 
 def test_main_app_has_rate_limiter():
     """Test that main app has rate limiter configured."""
-    from src.downloader.main import app
+    from downloader.main import app
 
     # App should have limiter in state
     assert hasattr(app.state, "limiter")
@@ -93,7 +93,7 @@ def test_main_app_has_rate_limiter():
 
 def test_rate_limiting_enabled_in_config():
     """Test that rate limiting is enabled by default."""
-    from src.downloader.config import get_settings
+    from downloader.config import get_settings
 
     settings = get_settings()
 
@@ -103,7 +103,7 @@ def test_rate_limiting_enabled_in_config():
 
 def test_rate_limiting_limits_are_valid():
     """Test that all configured rate limits have valid format."""
-    from src.downloader.config import get_settings
+    from downloader.config import get_settings
 
     settings = get_settings()
 

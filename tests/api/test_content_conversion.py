@@ -2,11 +2,8 @@
 
 import pytest
 
-from src.downloader.content_converter import (
-    convert_content_to_markdown,
-    convert_content_to_text,
-)
-from src.downloader.services.content_processor import parse_accept_header
+from downloader.content_converter import convert_content
+from downloader.services.content_negotiation import parse_accept_header
 
 
 @pytest.mark.smoke
@@ -36,7 +33,7 @@ class TestContentConversion:
             b"<html><head><style>p {color: red;}</style></head>"
             b"<body><h1>Title</h1><p>Some text.</p></body></html>"
         )
-        text = convert_content_to_text(html, "text/html")
+        text = convert_content(html, "text/html", "text")
         assert "Title" in text
         assert "Some text" in text
         assert "{color: red;}" not in text
@@ -44,6 +41,6 @@ class TestContentConversion:
     def test_convert_content_to_markdown(self):
         """Test HTML to markdown conversion."""
         html = b"<html><body><h1>Title</h1><p>A link: <a href='https://example.com'>Example</a></p></body></html>"
-        markdown = convert_content_to_markdown(html, "text/html")
+        markdown = convert_content(html, "text/html", "markdown")
         assert "# Title" in markdown
         assert "[Example](https://example.com)" in markdown

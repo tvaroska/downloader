@@ -11,18 +11,18 @@ import httpx
 import pytest
 from fastapi.testclient import TestClient
 
-from src.downloader import content_converter
-from src.downloader.content_converter import (
-    convert_content_to_markdown,
-    convert_content_to_text,
+from downloader import content_converter
+from downloader.content_converter import (
+    convert_content,
     should_use_playwright_for_html,
 )
-from src.downloader.dependencies import get_domain_throttle, get_http_client, get_robots_checker
-from src.downloader.http_client import HTTPClient, HTTPClientError, UnsupportedMediaTypeError
-from src.downloader.main import app
-from src.downloader.models.responses import BatchURLRequest
-from src.downloader.services.batch_processor import process_single_url_in_batch
-from src.downloader.services.content_processor import handle_html_response
+from downloader.dependencies import get_domain_throttle, get_http_client, get_robots_checker
+from downloader.http_client import HTTPClient, HTTPClientError, UnsupportedMediaTypeError
+from downloader.main import app
+from downloader.models.responses import BatchURLRequest, ResponseMetadata
+from downloader.ports import LocalBrowserRenderer
+from downloader.services.batch_processor import process_single_url_in_batch
+from downloader.services.content_processor import ConversionDeps, ConversionRequest, convert
 
 
 class _CountingBinaryStream(httpx.AsyncByteStream):
@@ -124,9 +124,9 @@ class TestBinaryContentTypeGuardF20261116002:
     @pytest.mark.asyncio
     async def test_convert_content_and_batch_reject_binary_payloads(self) -> None:
         with pytest.raises(UnsupportedMediaTypeError):
-            convert_content_to_text(b"\x00\x01\x02\x03", "application/octet-stream")
+            convert_content(b"\x00\x01\x02\x03", "application/octet-stream", "text")
         with pytest.raises(UnsupportedMediaTypeError):
-            convert_content_to_markdown(b"ID3\x04\x00", "audio/mpeg")
+            convert_content(b"ID3\x04\x00", "audio/mpeg", "markdown")
 
         mock_http = AsyncMock()
         mock_http.download.return_value = (
@@ -211,7 +211,7 @@ class TestAutoRenderHeuristicsAndLogLevelsF20261117002:
         content_converter._js_heavy_cache.clear()
         content_converter._static_html_cache.clear()
         spa_html = b"<html><head><title>App</title></head><body><div id='root'></div></body></html>"
-        metadata = {
+        metadata: ResponseMetadata = {
             "status_code": 200,
             "headers": {"content-type": "text/html; charset=utf-8"},
             "url": "https://example.com/spa-timeout",
@@ -223,20 +223,20 @@ class TestAutoRenderHeuristicsAndLogLevelsF20261117002:
 
         caplog.set_level(logging.WARNING)
         with patch(
-            "src.downloader.services.content_processor.render_html_with_playwright",
+            "downloader.content_converter.render_html_with_playwright",
             new=AsyncMock(side_effect=RuntimeError("Page.goto: Timeout 10000ms exceeded")),
         ):
-            resp = await handle_html_response(
-                "https://example.com/spa-timeout",
-                spa_html,
-                metadata,
-                False,
-                None,
-                pdf_semaphore=asyncio.Semaphore(1),
+            resp = await convert(
+                ConversionRequest(
+                    url="https://example.com/spa-timeout",
+                    output_format="html",
+                    content=spa_html,
+                    metadata=metadata,
+                ),
+                ConversionDeps(renderer=LocalBrowserRenderer(asyncio.Semaphore(1))),
             )
 
-        assert resp.status_code == 200
-        assert resp.headers["x-rendered-with-js"] == "false"
+        assert resp.headers["X-Rendered-With-JS"] == "false"
         errors = [r for r in caplog.records if r.levelno >= logging.ERROR]
         warnings = [r for r in caplog.records if r.levelno == logging.WARNING]
         assert len(errors) == 0
@@ -257,12 +257,12 @@ def test_upstream_4xx_logs_warning_while_5xx_logs_error_f20261118001(
     app.dependency_overrides[get_domain_throttle] = lambda: mock_throttle
     try:
         with TestClient(app) as client:
-            caplog.set_level(logging.WARNING, logger="src.downloader.routes.download")
+            caplog.set_level(logging.WARNING, logger="downloader.routes.download")
 
             mock_http.download.side_effect = HTTPClientError("HTTP 404: Not Found", status_code=404)
             r404 = client.get("/https://example.com/missing")
             assert r404.status_code == 404
-            dl_records_404 = [r for r in caplog.records if r.name.startswith("src.downloader")]
+            dl_records_404 = [r for r in caplog.records if r.name.startswith("downloader")]
             assert [r for r in dl_records_404 if r.levelno >= logging.ERROR] == []
             assert len([r for r in dl_records_404 if r.levelno == logging.WARNING]) == 1
 
@@ -272,7 +272,7 @@ def test_upstream_4xx_logs_warning_while_5xx_logs_error_f20261118001(
             )
             r503 = client.get("/https://example.com/down")
             assert r503.status_code == 503
-            dl_records_503 = [r for r in caplog.records if r.name.startswith("src.downloader")]
+            dl_records_503 = [r for r in caplog.records if r.name.startswith("downloader")]
             assert len([r for r in dl_records_503 if r.levelno >= logging.ERROR]) == 1
     finally:
         app.dependency_overrides.pop(get_http_client, None)

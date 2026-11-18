@@ -5,9 +5,9 @@ from unittest.mock import AsyncMock, MagicMock
 import pytest
 from httpx import ASGITransport, AsyncClient
 
-from src.downloader.config import AuthConfig, BatchConfig, PDFConfig, Settings
-from src.downloader.dependencies import get_batch_semaphore, get_pdf_semaphore
-from src.downloader.main import app
+from downloader.config import AuthConfig, BatchConfig, PDFConfig, Settings
+from downloader.dependencies import get_batch_semaphore, get_pdf_semaphore
+from downloader.main import app
 
 
 @pytest.fixture
@@ -267,7 +267,7 @@ class TestLiveMetricsErrorHandling:
         # Create a job manager that raises an exception
         mock_job_manager = AsyncMock()
         mock_job_manager.get_connection_stats = AsyncMock(
-            side_effect=Exception("Redis connection failed")
+            side_effect=RuntimeError("Redis connection failed")
         )
 
         async def mock_get_pdf_semaphore():
@@ -307,7 +307,7 @@ class TestLiveMetricsErrorHandling:
         # Create an http_client that raises an exception
         mock_http_client = MagicMock()
         mock_http_client.get_connection_stats = MagicMock(
-            side_effect=Exception("HTTP client error")
+            side_effect=RuntimeError("HTTP client error")
         )
 
         async def mock_get_pdf_semaphore():

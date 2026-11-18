@@ -4,7 +4,7 @@ from unittest.mock import AsyncMock
 
 import pytest
 
-from src.downloader.pdf_generator import PDFGeneratorError, PlaywrightPDFGenerator
+from downloader.pdf_generator import PDFGeneratorError, PlaywrightPDFGenerator
 
 
 class TestPlaywrightPDFGenerator:
@@ -83,6 +83,7 @@ class TestPlaywrightPDFGenerator:
 
         assert result == b"%PDF-1.4 lazy"
         assert generator.pool is pool_instance
+        assert pool_instance is not None
         pool_instance.start.assert_called_once()
 
     @pytest.mark.asyncio

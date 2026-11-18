@@ -1,4 +1,4 @@
-"""Multi-format parallel content conversion extracted from content_processor."""
+"""Pure multi-format parallel content conversion built on top of `convert()`."""
 
 from __future__ import annotations
 
@@ -7,340 +7,283 @@ import base64
 import json
 import logging
 from collections.abc import Sequence
-from typing import TYPE_CHECKING, Any, Literal
-
-from fastapi import HTTPException, Response
+from dataclasses import dataclass
+from typing import Any, Literal, cast
 
 from ..browser.actions import BrowserAction, BrowserActionError
-from ..content_converter import (
-    SelectorTimeoutError,
-    convert_content_to_markdown,
-    convert_content_to_text,
-)
-from ..content_encoding import is_text_convertible_content_type, resolve_charset_and_decode
-from ..http_client import UnsupportedMediaTypeError
+from ..content_converter import SelectorTimeoutError, should_use_playwright_for_html
+from ..content_encoding import resolve_charset_and_decode
+from ..http_client import ContentTooLargeError
 from ..metrics import record_html_rendering_failure
 from ..models.responses import ResponseMetadata
+from ..pdf_generator import PDFGeneratorError
+from ..ports import BrowserCapacityError
 from ..validation import URLValidationError
-from .content_negotiation import _format_to_mime_type
-
-if TYPE_CHECKING:
-    from ..worker_queue import WorkerQueue
-    from .content_processor import HTTPFallbackFetcher
+from .content_negotiation import format_to_mime_type
+from .content_processor import (
+    ConversionDeps,
+    ConversionRequest,
+    ConversionResult,
+    OutputFormat,
+    convert,
+    render_html_with_metrics,
+)
 
 logger = logging.getLogger(__name__)
 
+_HTML_DERIVED_FORMATS = frozenset({"html", "text", "markdown"})
+_BINARY_FORMATS = frozenset({"pdf", "screenshot", "screenshot_jpeg"})
 
-async def _process_single_format_for_multi(
+
+@dataclass(frozen=True)
+class MultiFormatRequest:
+    """Input contract for parallel multi-format `Accept` negotiation."""
+
+    url: str
+    formats: list[str]
+    force_render: bool = False
+    wait_for_selector: str | None = None
+    actions: Sequence[BrowserAction] | None = None
+    full_page: bool = False
+    screenshot_format: Literal["png", "jpeg"] = "png"
+    force_ocr: bool = False
+    ocr_language: str | None = None
+    content: bytes | None = None
+    metadata: ResponseMetadata | None = None
+
+
+def _encode_result_for_json_map(format_type: str, result: ConversionResult) -> tuple[str, str]:
+    mime = format_to_mime_type(format_type)
+    if format_type in _BINARY_FORMATS:
+        return mime, base64.b64encode(result.body).decode("utf-8")
+    if format_type == "html":
+        decoded, _ = resolve_charset_and_decode(result.body, result.media_type)
+        return mime, decoded
+    return mime, result.body.decode("utf-8")
+
+
+@dataclass(slots=True, frozen=True)
+class _PreparedPayload:
+    content: bytes | None
+    metadata: ResponseMetadata | None
+    rendered_dom: bytes | None
+    rendered_meta: ResponseMetadata | None
+    degraded_force_render: bool
+
+
+async def _convert_one_format(
     format_type: str,
-    url: str,
-    content: bytes | None,
-    metadata: ResponseMetadata | None,
-    pdf_semaphore: asyncio.Semaphore,
-    force_render: bool = False,
-    wait_for_selector: str | None = None,
-    *,
-    already_rendered: bool = False,
-    degraded_force_render: bool = False,
-    actions: Sequence[BrowserAction] | None = None,
-    full_page: bool = False,
-    ocr_language: str | None = None,
-    worker_queue: WorkerQueue | None = None,
-    remote_timeout: float = 45.0,
+    multi_req: MultiFormatRequest,
+    deps: ConversionDeps,
+    prepared: _PreparedPayload,
 ) -> tuple[str, str]:
-    """Process a single format for multi-format response."""
-    from . import content_processor as cp
+    if format_type not in {
+        "text",
+        "markdown",
+        "html",
+        "pdf",
+        "screenshot",
+        "screenshot_jpeg",
+        "json",
+    }:
+        raise ValueError(f"Unsupported format: {format_type}")
 
+    use_rendered = format_type in _HTML_DERIVED_FORMATS and prepared.rendered_dom is not None
+    use_degraded = (
+        format_type in _HTML_DERIVED_FORMATS and not use_rendered and prepared.degraded_force_render
+    )
+    skip_browser = use_rendered or use_degraded
+
+    single_req = ConversionRequest(
+        url=multi_req.url,
+        output_format=cast(OutputFormat, format_type),
+        force_render=multi_req.force_render
+        and not skip_browser
+        and format_type in _HTML_DERIVED_FORMATS,
+        wait_for_selector=None if skip_browser else multi_req.wait_for_selector,
+        actions=None if skip_browser else multi_req.actions,
+        full_page=multi_req.full_page,
+        screenshot_format=multi_req.screenshot_format,
+        force_ocr=multi_req.force_ocr,
+        ocr_language=multi_req.ocr_language,
+        content=prepared.rendered_dom if use_rendered else prepared.content,
+        metadata=prepared.rendered_meta if use_rendered else prepared.metadata,
+        already_rendered=use_rendered,
+        degraded_force_render=use_degraded,
+    )
     try:
-        if format_type == "json":
-            if content is None or metadata is None:
-                raise Exception("Raw content required for JSON format")
-            response = await cp.handle_json_response(content, metadata)
-            return ("application/json", bytes(response.body).decode("utf-8"))
-
-        elif format_type == "text":
-            if degraded_force_render:
-                if content is None or metadata is None:
-                    raise Exception("Raw content required for degraded text extraction")
-                return ("text/plain", convert_content_to_text(content, metadata["content_type"]))
-            response = await cp.handle_text_response(
-                url,
-                content,
-                metadata,
-                force_render,
-                wait_for_selector,
-                pdf_semaphore=pdf_semaphore,
-                already_rendered=already_rendered,
-                actions=actions,
-                ocr_language=ocr_language,
-                worker_queue=worker_queue,
-                remote_timeout=remote_timeout,
-            )
-            return ("text/plain", bytes(response.body).decode("utf-8"))
-
-        elif format_type == "markdown":
-            if degraded_force_render:
-                if content is None or metadata is None:
-                    raise Exception("Raw content required for degraded markdown extraction")
-                return (
-                    "text/markdown",
-                    convert_content_to_markdown(content, metadata["content_type"]),
-                )
-            response = await cp.handle_markdown_response(
-                url,
-                content,
-                metadata,
-                force_render,
-                wait_for_selector,
-                pdf_semaphore=pdf_semaphore,
-                already_rendered=already_rendered,
-                actions=actions,
-                ocr_language=ocr_language,
-                worker_queue=worker_queue,
-                remote_timeout=remote_timeout,
-            )
-            return ("text/markdown", bytes(response.body).decode("utf-8"))
-
-        elif format_type == "pdf":
-            if worker_queue is None and pdf_semaphore.locked():
-                raise Exception("PDF service at capacity")
-            response = await cp.handle_pdf_response(
-                url,
-                metadata,
-                pdf_semaphore,
-                actions=actions,
-                wait_for_selector=wait_for_selector,
-                worker_queue=worker_queue,
-                remote_timeout=remote_timeout,
-            )
-            return ("application/pdf", base64.b64encode(bytes(response.body)).decode("utf-8"))
-
-        elif format_type in {"screenshot", "screenshot_jpeg"}:
-            if worker_queue is None and pdf_semaphore.locked():
-                raise Exception("Screenshot service at capacity")
-            shot_fmt: Literal["png", "jpeg"] = "jpeg" if format_type == "screenshot_jpeg" else "png"
-            response = await cp.handle_screenshot_response(
-                url,
-                metadata,
-                pdf_semaphore,
-                screenshot_format=shot_fmt,
-                full_page=full_page,
-                wait_for_selector=wait_for_selector,
-                actions=actions,
-                worker_queue=worker_queue,
-                remote_timeout=remote_timeout,
-            )
-            mime = "image/jpeg" if shot_fmt == "jpeg" else "image/png"
-            return (mime, base64.b64encode(bytes(response.body)).decode("utf-8"))
-
-        elif format_type == "html":
-            if degraded_force_render:
-                if content is None or metadata is None:
-                    raise Exception("Raw content required for degraded HTML response")
-                if not is_text_convertible_content_type(
-                    metadata["content_type"],
-                    allow_ocr_images=False,
-                    sample_bytes=content,
-                ):
-                    raise UnsupportedMediaTypeError(metadata["content_type"], target_format="html")
-                decoded_html, _ = resolve_charset_and_decode(content, metadata["content_type"])
-                return ("text/html", decoded_html)
-            response = await cp.handle_html_response(
-                url,
-                content,
-                metadata,
-                force_render,
-                wait_for_selector,
-                pdf_semaphore=pdf_semaphore,
-                already_rendered=already_rendered,
-                actions=actions,
-                worker_queue=worker_queue,
-                remote_timeout=remote_timeout,
-            )
-            decoded_body, _ = resolve_charset_and_decode(
-                bytes(response.body),
-                response.headers.get("content-type"),
-            )
-            return ("text/html", decoded_body)
-
-        else:
-            raise Exception(f"Unsupported format: {format_type}")
-
-    except Exception as e:
-        raise Exception(f"{format_type} processing failed: {e}")
+        res = await convert(single_req, deps)
+        return _encode_result_for_json_map(format_type, res)
+    except Exception as exc:  # noqa: BLE001
+        # Partial-failure contract: capture per-format errors into the JSON `errors` map.
+        raise RuntimeError(f"{format_type} processing failed: {exc}") from exc
 
 
-async def process_multiple_formats(
-    url: str,
+async def _force_render_shared_dom(
+    multi_req: MultiFormatRequest,
+    deps: ConversionDeps,
     content: bytes | None,
     metadata: ResponseMetadata | None,
-    formats: list[str],
-    pdf_semaphore: asyncio.Semaphore,
-    force_render: bool = False,
-    wait_for_selector: str | None = None,
-    *,
-    http_fallback: HTTPFallbackFetcher | None = None,
-    actions: Sequence[BrowserAction] | None = None,
-    full_page: bool = False,
-    ocr_language: str | None = None,
-    worker_queue: WorkerQueue | None = None,
-    remote_timeout: float = 45.0,
-) -> dict[str, Any]:
-    """Process content into multiple formats in parallel."""
-    from . import content_processor as cp
-
-    rendered_dom: bytes | None = None
-    rendered_meta: ResponseMetadata | None = None
-    degraded_force_render = False
-
-    can_render = content is None or (
-        metadata is not None and "html" in metadata["content_type"].lower()
-    )
-    if force_render and can_render and any(fmt in {"html", "text", "markdown"} for fmt in formats):
-        try:
-            rendered_dom = await cp._render_html_once_with_semaphore(
-                url,
-                wait_for_selector,
-                pdf_semaphore,
-                len(content) if content is not None else None,
-                actions=actions,
-                worker_queue=worker_queue,
-                remote_timeout=remote_timeout,
-            )
+) -> tuple[bytes | None, ResponseMetadata | None, bytes | None, ResponseMetadata | None, bool]:
+    try:
+        rendered_dom = await render_html_with_metrics(
+            deps.renderer,
+            multi_req.url,
+            wait_for_selector=multi_req.wait_for_selector,
+            actions=multi_req.actions,
+            raw_size_hint=len(content) if content is not None else None,
+            fail_fast=True,
+        )
+        rendered_meta: ResponseMetadata | None = None
+        if rendered_dom is not None:
             rendered_meta = metadata or {
                 "status_code": 200,
                 "headers": {"content-type": "text/html; charset=utf-8"},
-                "url": url,
+                "url": multi_req.url,
                 "size": len(rendered_dom),
                 "content_type": "text/html; charset=utf-8",
                 "http_version": "HTTP/1.1",
                 "connection_reused": False,
             }
-        except (SelectorTimeoutError, BrowserActionError, URLValidationError, HTTPException):
-            raise
-        except Exception as e:
-            logger.error(f"❌ Multi-format Playwright rendering failed for {url}: {e}")
-            record_html_rendering_failure()
-            degraded_force_render = True
-            if (content is None or metadata is None) and http_fallback is not None:
-                content, metadata = await http_fallback()
+        return content, metadata, rendered_dom, rendered_meta, False
+    except (
+        SelectorTimeoutError,
+        BrowserActionError,
+        URLValidationError,
+        BrowserCapacityError,
+        ContentTooLargeError,
+    ):
+        raise
+    except (PDFGeneratorError, RuntimeError, OSError, TimeoutError) as exc:
+        logger.error(f"Multi-format Playwright rendering failed for {multi_req.url}: {exc}")
+        record_html_rendering_failure()
+        if (content is None or metadata is None) and deps.http_fetcher is not None:
+            content, metadata = await deps.http_fetcher()
+        return content, metadata, None, None, True
 
-    browser_only = {"pdf", "screenshot", "screenshot_jpeg"}
-    needs_http_fetch = any(fmt == "json" for fmt in formats) or (
-        not force_render and any(fmt not in browser_only for fmt in formats)
+
+async def _auto_render_shared_dom_if_needed(
+    multi_req: MultiFormatRequest,
+    deps: ConversionDeps,
+    content: bytes | None,
+    metadata: ResponseMetadata | None,
+) -> tuple[bytes | None, ResponseMetadata | None]:
+    html_format_count = sum(1 for fmt in multi_req.formats if fmt in _HTML_DERIVED_FORMATS)
+    if (
+        multi_req.force_ocr
+        or html_format_count <= 1
+        or content is None
+        or metadata is None
+        or "html" not in metadata["content_type"].lower()
+        or not should_use_playwright_for_html(multi_req.url, content, metadata["content_type"])
+    ):
+        return None, None
+    try:
+        rendered_dom = await render_html_with_metrics(
+            deps.renderer,
+            multi_req.url,
+            wait_for_selector=multi_req.wait_for_selector,
+            raw_size_hint=len(content),
+            fail_fast=False,
+        )
+        return rendered_dom, metadata if rendered_dom is not None else None
+    except (SelectorTimeoutError, URLValidationError, ContentTooLargeError):
+        raise
+    except (PDFGeneratorError, RuntimeError, OSError, TimeoutError) as exc:
+        logger.warning(f"Auto-detected multi-format HTML render failed for {multi_req.url}: {exc}")
+        record_html_rendering_failure()
+        return None, None
+
+
+async def _prepare_shared_dom(
+    multi_req: MultiFormatRequest,
+    deps: ConversionDeps,
+) -> _PreparedPayload:
+    """Fetch HTTP and/or render HTML at most once across all requested formats."""
+    content = multi_req.content
+    metadata = multi_req.metadata
+    rendered_dom: bytes | None = None
+    rendered_meta: ResponseMetadata | None = None
+    degraded_force_render = False
+
+    has_html_formats = any(fmt in _HTML_DERIVED_FORMATS for fmt in multi_req.formats)
+    can_render = content is None or (
+        metadata is not None and "html" in metadata["content_type"].lower()
     )
-    if needs_http_fetch and (content is None or metadata is None) and http_fallback is not None:
-        content, metadata = await http_fallback()
 
-    tasks = []
-    format_types = []
+    if multi_req.force_render and can_render and has_html_formats:
+        (
+            content,
+            metadata,
+            rendered_dom,
+            rendered_meta,
+            degraded_force_render,
+        ) = await _force_render_shared_dom(multi_req, deps, content, metadata)
 
-    for format_type in formats:
-        if format_type in {"html", "text", "markdown"} and rendered_dom is not None:
-            task = asyncio.create_task(
-                _process_single_format_for_multi(
-                    format_type,
-                    url,
-                    rendered_dom,
-                    rendered_meta,
-                    pdf_semaphore,
-                    False,
-                    None,
-                    already_rendered=True,
-                )
-            )
-        elif format_type in {"html", "text", "markdown"} and degraded_force_render:
-            task = asyncio.create_task(
-                _process_single_format_for_multi(
-                    format_type,
-                    url,
-                    content,
-                    metadata,
-                    pdf_semaphore,
-                    False,
-                    None,
-                    degraded_force_render=True,
-                )
-            )
-        else:
-            task = asyncio.create_task(
-                _process_single_format_for_multi(
-                    format_type,
-                    url,
-                    content,
-                    metadata,
-                    pdf_semaphore,
-                    force_render,
-                    wait_for_selector,
-                    actions=actions,
-                    full_page=full_page,
-                    ocr_language=ocr_language,
-                    worker_queue=worker_queue,
-                    remote_timeout=remote_timeout,
-                )
-            )
-        tasks.append(task)
-        format_types.append(format_type)
+    needs_http = any(fmt == "json" for fmt in multi_req.formats) or (
+        not multi_req.force_render and any(fmt not in _BINARY_FORMATS for fmt in multi_req.formats)
+    )
+    if needs_http and (content is None or metadata is None) and deps.http_fetcher is not None:
+        content, metadata = await deps.http_fetcher()
+
+    if not multi_req.force_render and rendered_dom is None:
+        rendered_dom, rendered_meta = await _auto_render_shared_dom_if_needed(
+            multi_req, deps, content, metadata
+        )
+
+    return _PreparedPayload(
+        content=content,
+        metadata=metadata,
+        rendered_dom=rendered_dom,
+        rendered_meta=rendered_meta,
+        degraded_force_render=degraded_force_render,
+    )
+
+
+async def process_multiple_formats(
+    multi_req: MultiFormatRequest,
+    deps: ConversionDeps,
+) -> dict[str, Any]:
+    """Convert a single URL into multiple requested formats in parallel, rendering DOM at most once."""
+    prepared = await _prepare_shared_dom(multi_req, deps)
+    tasks = [
+        asyncio.create_task(_convert_one_format(fmt, multi_req, deps, prepared))
+        for fmt in multi_req.formats
+    ]
 
     results = await asyncio.gather(*tasks, return_exceptions=True)
 
     response_dict: dict[str, Any] = {}
     errors: dict[str, str] = {}
-
-    for format_type, result in zip(format_types, results, strict=False):
-        if isinstance(result, Exception):
-            errors[_format_to_mime_type(format_type)] = str(result)
-        elif isinstance(result, BaseException):
-            raise result
+    for fmt, item in zip(multi_req.formats, results, strict=False):
+        if isinstance(item, Exception):
+            errors[format_to_mime_type(fmt)] = str(item)
+        elif isinstance(item, BaseException):
+            raise item
         else:
-            mime_type, content_str = result
+            mime_type, content_str = item
             response_dict[mime_type] = content_str
 
     if errors:
         response_dict["errors"] = errors
-
     return response_dict
 
 
-async def handle_multi_format_response(
-    url: str,
-    content: bytes | None,
-    metadata: ResponseMetadata | None,
-    formats: list[str],
-    pdf_semaphore: asyncio.Semaphore,
-    force_render: bool = False,
-    wait_for_selector: str | None = None,
-    *,
-    http_fallback: HTTPFallbackFetcher | None = None,
-    actions: Sequence[BrowserAction] | None = None,
-    full_page: bool = False,
-    ocr_language: str | None = None,
-    worker_queue: WorkerQueue | None = None,
-    remote_timeout: float = 45.0,
-) -> Response:
-    """Create multi-format JSON response."""
-    results_dict = await process_multiple_formats(
-        url,
-        content,
-        metadata,
-        formats,
-        pdf_semaphore,
-        force_render,
-        wait_for_selector,
-        http_fallback=http_fallback,
-        actions=actions,
-        full_page=full_page,
-        ocr_language=ocr_language,
-        worker_queue=worker_queue,
-        remote_timeout=remote_timeout,
-    )
-
-    return Response(
-        content=json.dumps(results_dict),
+async def convert_multiple_formats(
+    multi_req: MultiFormatRequest,
+    deps: ConversionDeps,
+) -> ConversionResult:
+    """Return a serialized `application/json` `ConversionResult` for multi-format `Accept` requests."""
+    results_dict = await process_multiple_formats(multi_req, deps)
+    orig_url = multi_req.metadata["url"] if multi_req.metadata is not None else multi_req.url
+    body = json.dumps(results_dict).encode("utf-8")
+    return ConversionResult(
+        body=body,
         media_type="application/json",
         headers={
-            "X-Original-URL": metadata["url"] if metadata is not None else url,
+            "X-Original-URL": orig_url,
             "X-Multi-Format": "true",
-            "X-Requested-Formats": ",".join(formats),
+            "X-Requested-Formats": ",".join(multi_req.formats),
         },
+        original_content_type="application/json",
     )

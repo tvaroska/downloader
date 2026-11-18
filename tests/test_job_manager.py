@@ -7,7 +7,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import pytest
 import redis.asyncio as redis
 
-from src.downloader.job_manager import (
+from downloader.job_manager import (
     JobInfo,
     JobManager,
     JobResult,
@@ -45,11 +45,13 @@ class MockPipelineWithWatchError(MockPipeline):
         self.fail_count = fail_count
         self.attempt = 0
 
-    async def execute(self):
-        self.attempt += 1
-        if self.attempt <= self.fail_count:
-            raise redis.WatchError("Concurrent modification")
-        return [True, True]
+        async def _execute():
+            self.attempt += 1
+            if self.attempt <= self.fail_count:
+                raise redis.WatchError("Concurrent modification")
+            return [True, True]
+
+        self.execute = AsyncMock(side_effect=_execute)
 
 
 # =============================================================================
@@ -713,7 +715,7 @@ class TestJobManagerHealthMonitoring:
         """Test health check returns True on successful ping."""
         job_manager_with_pool._last_health_check = 0  # Force health check
 
-        with patch("asyncio.get_event_loop") as mock_loop:
+        with patch("asyncio.get_running_loop") as mock_loop:
             mock_loop.return_value.time.return_value = 1000.0
 
             result = await job_manager_with_pool._check_redis_health()
@@ -726,7 +728,7 @@ class TestJobManagerHealthMonitoring:
         self, job_manager_with_pool, mock_redis_client
     ):
         """Test health check is throttled to 60s interval."""
-        with patch("asyncio.get_event_loop") as mock_loop:
+        with patch("asyncio.get_running_loop") as mock_loop:
             mock_loop.return_value.time.return_value = 1000.0
             job_manager_with_pool._last_health_check = 990.0  # 10 seconds ago
 
@@ -742,7 +744,7 @@ class TestJobManagerHealthMonitoring:
         manager.redis_client = None
         manager._last_health_check = 0
 
-        with patch("asyncio.get_event_loop") as mock_loop:
+        with patch("asyncio.get_running_loop") as mock_loop:
             mock_loop.return_value.time.return_value = 1000.0
 
             result = await manager._check_redis_health()
@@ -757,7 +759,7 @@ class TestJobManagerHealthMonitoring:
         job_manager_with_pool._last_health_check = 0
         mock_redis_client.ping.side_effect = redis.ConnectionError("Connection lost")
 
-        with patch("asyncio.get_event_loop") as mock_loop:
+        with patch("asyncio.get_running_loop") as mock_loop:
             mock_loop.return_value.time.return_value = 1000.0
 
             result = await job_manager_with_pool._check_redis_health()
@@ -852,7 +854,7 @@ class TestJobManagerSingleton:
     @pytest.mark.asyncio
     async def test_get_job_manager_creates_instance(self):
         """Test get_job_manager creates and connects instance."""
-        import src.downloader.job_manager as jm
+        import downloader.job_manager as jm
 
         original = jm._job_manager
         jm._job_manager = None
@@ -872,7 +874,7 @@ class TestJobManagerSingleton:
     @pytest.mark.asyncio
     async def test_get_job_manager_returns_existing(self):
         """Test get_job_manager returns existing instance."""
-        import src.downloader.job_manager as jm
+        import downloader.job_manager as jm
 
         original = jm._job_manager
         mock_manager = MagicMock()
@@ -887,7 +889,7 @@ class TestJobManagerSingleton:
     @pytest.mark.asyncio
     async def test_cleanup_job_manager_disconnects(self):
         """Test cleanup_job_manager disconnects and clears global."""
-        import src.downloader.job_manager as jm
+        import downloader.job_manager as jm
 
         original = jm._job_manager
         mock_manager = AsyncMock()

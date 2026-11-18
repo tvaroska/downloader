@@ -8,17 +8,17 @@ from unittest.mock import AsyncMock
 import pytest
 from fastapi.testclient import TestClient
 
-from src.downloader.config import reload_settings
-from src.downloader.crawling import DomainThrottle, RobotsChecker
-from src.downloader.dependencies import (
+from downloader.config import reload_settings
+from downloader.crawling import DomainThrottle, RobotsChecker
+from downloader.dependencies import (
     get_domain_throttle,
     get_http_client,
     get_job_manager_dependency,
     get_robots_checker,
 )
-from src.downloader.main import app
-from src.downloader.models.responses import BatchRequest, BatchURLRequest
-from src.downloader.routes.batch import process_background_batch_job
+from downloader.main import app
+from downloader.models.responses import BatchRequest, BatchURLRequest
+from downloader.services.batch_processor import process_background_batch_job
 
 
 def _make_mock_http_client() -> AsyncMock:

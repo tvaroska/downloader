@@ -2,13 +2,13 @@
 
 import pytest
 
-from src.downloader.config import Settings, SSRFConfig
-from src.downloader.validation import (
+from downloader.config import Settings, SSRFConfig
+from downloader.validation import (
     SSRFProtectionError,
     URLValidationError,
     sanitize_user_agent,
-    validate_url,
 )
+from tests.conftest import validate_url_sync as validate_url
 
 
 @pytest.mark.smoke
