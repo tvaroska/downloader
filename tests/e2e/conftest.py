@@ -21,7 +21,7 @@ def docker_services():
             timeout=60,
         )
     except subprocess.TimeoutExpired:
-        pytest.skip("Docker services failed to start within timeout")
+        pytest.fail("Docker services failed to start within timeout")
 
     # Wait for services to be healthy (check healthcheck status)
     max_attempts = 30  # 30 attempts * 1s = 30 seconds max wait

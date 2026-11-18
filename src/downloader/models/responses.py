@@ -2,9 +2,11 @@
 
 from typing import Literal, TypedDict
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field
 
 from ..browser.actions import BrowserAction
+
+BatchFormat = Literal["text", "html", "markdown", "pdf", "screenshot", "json", "raw"]
 
 
 class ResponseMetadata(TypedDict):
@@ -36,8 +38,10 @@ class HTTPErrorResponse(BaseModel):
 class BatchURLRequest(BaseModel):
     """Individual URL request within a batch."""
 
-    url: str = Field(..., description="URL to download")
-    format: str | None = Field(
+    model_config = ConfigDict(extra="forbid")
+
+    url: str = Field(..., min_length=1, max_length=2048, description="URL to download")
+    format: BatchFormat | None = Field(
         None,
         description="Desired output format (text, html, markdown, pdf, screenshot, json, raw)",
     )
@@ -65,10 +69,12 @@ class BatchURLRequest(BaseModel):
 class BatchRequest(BaseModel):
     """Request model for batch processing."""
 
+    model_config = ConfigDict(extra="forbid")
+
     urls: list[BatchURLRequest] = Field(
         ..., min_length=1, max_length=1000, description="List of URLs to process"
     )
-    default_format: str = Field(
+    default_format: BatchFormat = Field(
         "text", description="Default format for URLs without explicit format"
     )
     concurrency_limit: int | None = Field(
@@ -92,6 +98,8 @@ class BatchRequest(BaseModel):
 class RenderRequest(BaseModel):
     """Structured browser render request supporting scripted interactions and capture toggles."""
 
+    model_config = ConfigDict(extra="forbid")
+
     url: str = Field(..., min_length=1, max_length=2048, description="Target URL to render")
     output: Literal["html", "text", "markdown", "pdf", "screenshot"] = Field(
         default="html",
@@ -114,6 +122,12 @@ class RenderRequest(BaseModel):
     screenshot_format: Literal["png", "jpeg"] = Field(
         default="png",
         description="Image format when output='screenshot'",
+    )
+    timeout_ms: int | None = Field(
+        default=None,
+        ge=1000,
+        le=120000,
+        description="Optional render timeout override in milliseconds",
     )
 
 

@@ -191,3 +191,49 @@ class TestPlaywrightSSRFRouteGuard:
         finally:
             monkeypatch.delenv("USER_AGENT", raising=False)
             reload_settings()
+
+
+@pytest.mark.unit
+async def test_cancel_during_context_close_still_releases_browser() -> None:
+    """R28: Cancelling during ctx.close() must still release the browser and decrement active count."""
+    from downloader.pdf_generator import BrowserSession
+
+    close_started = asyncio.Event()
+    close_finish = asyncio.Event()
+
+    async def _slow_close() -> None:
+        close_started.set()
+        await close_finish.wait()
+
+    mock_page = AsyncMock()
+    mock_context = AsyncMock()
+    mock_context.new_page = AsyncMock(return_value=mock_page)
+    mock_context.route = AsyncMock()
+    mock_context.close = AsyncMock(side_effect=_slow_close)
+
+    mock_browser = MagicMock()
+    mock_pool = MagicMock()
+    mock_pool.get_browser = AsyncMock(return_value=mock_browser)
+    mock_pool.create_context = AsyncMock(return_value=mock_context)
+    mock_pool.release_browser = AsyncMock()
+
+    gen = PlaywrightPDFGenerator(pool_size=1, idle_timeout=0.0)
+    gen.pool = mock_pool
+    gen.ensure_started = AsyncMock(return_value=mock_pool)  # type: ignore[method-assign]
+
+    async def _run_session() -> None:
+        async with BrowserSession(gen):
+            pass
+
+    task = asyncio.create_task(_run_session())
+    await close_started.wait()
+    task.cancel()
+
+    with pytest.raises(asyncio.CancelledError):
+        await task
+
+    close_finish.set()
+    await asyncio.sleep(0)
+
+    mock_pool.release_browser.assert_awaited_once_with(mock_browser)
+    assert gen._active_contexts == 0

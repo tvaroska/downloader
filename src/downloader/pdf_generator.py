@@ -43,6 +43,9 @@ _MODAL_CLOSE_SELECTORS: tuple[str, ...] = (
     ".modal-close",
     ".close-button",
 )
+_MODAL_MAX_CLICKS = 5
+_MODAL_TOTAL_BUDGET_SECONDS = 3.0
+_DEFAULT_SESSION_TIMEOUT_SECONDS = 60.0
 
 
 async def _maybe_await(value: Any) -> Any:
@@ -243,21 +246,38 @@ async def validate_browser_navigation(
         await _validate_browser_url_candidate(url_str, egress_policy)
 
 
-async def close_page_modals(page: Any) -> None:
-    """Best-effort dismissal of common signup/cookie modal overlays."""
-    for selector in _MODAL_CLOSE_SELECTORS:
-        try:
-            close_buttons = await page.query_selector_all(selector)
-        except (PlaywrightError, TimeoutError, RuntimeError, OSError) as exc:
-            logger.debug(f"Modal selector lookup skipped for {selector}: {exc}")
-            continue
-        for button in close_buttons:
-            try:
-                await button.click(timeout=1000)
-                logger.debug(f"Closed modal/popup with selector: {selector}")
-                await page.wait_for_timeout(500)
-            except (PlaywrightError, TimeoutError, RuntimeError, OSError) as exc:
-                logger.debug(f"Modal close click ignored for {selector}: {exc}")
+async def close_page_modals(
+    page: Any,
+    *,
+    max_clicks: int = _MODAL_MAX_CLICKS,
+    timeout_seconds: float = _MODAL_TOTAL_BUDGET_SECONDS,
+) -> None:
+    """Best-effort, bounded dismissal of common signup/cookie modal overlays."""
+    if max_clicks <= 0 or timeout_seconds <= 0:
+        return
+    clicks = 0
+    try:
+        async with asyncio.timeout(timeout_seconds):
+            for selector in _MODAL_CLOSE_SELECTORS:
+                if clicks >= max_clicks:
+                    return
+                try:
+                    close_buttons = await page.query_selector_all(selector)
+                except (PlaywrightError, TimeoutError, RuntimeError, OSError) as exc:
+                    logger.debug(f"Modal selector lookup skipped for {selector}: {exc}")
+                    continue
+                for button in close_buttons:
+                    if clicks >= max_clicks:
+                        return
+                    clicks += 1
+                    try:
+                        await button.click(timeout=1000)
+                        logger.debug(f"Closed modal/popup with selector: {selector}")
+                        await page.wait_for_timeout(200)
+                    except (PlaywrightError, TimeoutError, RuntimeError, OSError) as exc:
+                        logger.debug(f"Modal close click ignored for {selector}: {exc}")
+    except TimeoutError:
+        logger.debug(f"Modal closer reached {timeout_seconds}s budget after {clicks} attempts")
 
 
 def enforce_rendered_output_size(
@@ -298,15 +318,26 @@ class BrowserSession:
         *,
         user_agent: str | None = None,
         egress_policy: EgressPolicy | None = None,
+        timeout_seconds: float | None = None,
     ) -> None:
         self._generator = generator
         self._user_agent = user_agent
         self._egress_policy = egress_policy
+        self._timeout_seconds = timeout_seconds
+        self._timeout_cm: asyncio.Timeout | None = None
         self._pool: Any = None
         self.browser: Any = None
         self.context: Any = None
         self.page: Any = None
         self._acquired_mark = False
+
+    def _resolve_timeout_budget(self) -> float:
+        if self._timeout_seconds is not None:
+            return self._timeout_seconds
+        page_load_ms = getattr(self._generator, "page_load_timeout", None)
+        if isinstance(page_load_ms, (int, float)) and page_load_ms > 0:
+            return (float(page_load_ms) / 1000.0) * 2.0 + 10.0
+        return _DEFAULT_SESSION_TIMEOUT_SECONDS
 
     async def __aenter__(self) -> tuple[Any, Any]:
         if self._generator is None:
@@ -319,6 +350,11 @@ class BrowserSession:
         ):
             mark_acq()
             self._acquired_mark = True
+
+        budget = self._resolve_timeout_budget()
+        if budget > 0:
+            self._timeout_cm = asyncio.timeout(budget)
+            await self._timeout_cm.__aenter__()
 
         try:
             self._pool = await self._generator.ensure_started()
@@ -354,39 +390,73 @@ class BrowserSession:
             await install_ssrf_route_guard(self.context, egress_policy=self._egress_policy)
             self.page = await self.context.new_page()
             return self.context, self.page
-        except BaseException:
-            await self._cleanup()
+        except BaseException as exc:
+            if self._timeout_cm is not None:
+                cm = self._timeout_cm
+                self._timeout_cm = None
+                try:
+                    await cm.__aexit__(type(exc), exc, exc.__traceback__)
+                finally:
+                    await self._cleanup()
+            else:
+                await self._cleanup()
             raise
 
+    async def _run_shielded_cleanup_step(
+        self,
+        awaitable: Any,
+        error_label: str,
+    ) -> asyncio.CancelledError | None:
+        try:
+            await asyncio.shield(awaitable)
+        except asyncio.CancelledError as exc:
+            return exc
+        except (PlaywrightError, RuntimeError, OSError) as exc:
+            logger.warning(f"{error_label}: {exc}")
+        return None
+
     async def _cleanup(self) -> None:
-        if self.context is not None:
-            ctx = self.context
-            self.context = None
-            try:
-                await ctx.close()
-            except (PlaywrightError, RuntimeError, OSError) as exc:
-                logger.warning(f"Error closing browser context: {exc}")
+        cancelled: asyncio.CancelledError | None = None
+        try:
+            if self.context is not None:
+                ctx = self.context
+                self.context = None
+                cancelled = await self._run_shielded_cleanup_step(
+                    ctx.close(), "Error closing browser context"
+                )
 
-        gen_pool = (
-            self._generator.pool if isinstance(self._generator, PlaywrightPDFGenerator) else None
-        )
-        active_pool = gen_pool or self._pool
-        if self.browser is not None and active_pool is not None:
-            br = self.browser
-            self.browser = None
-            try:
-                await active_pool.release_browser(br)
-            except (PlaywrightError, RuntimeError, OSError) as exc:
-                logger.warning(f"Error releasing browser to pool: {exc}")
+            gen_pool = (
+                self._generator.pool
+                if isinstance(self._generator, PlaywrightPDFGenerator)
+                else None
+            )
+            active_pool = gen_pool or self._pool
+            if self.browser is not None and active_pool is not None:
+                br = self.browser
+                self.browser = None
+                rel_cancelled = await self._run_shielded_cleanup_step(
+                    active_pool.release_browser(br), "Error releasing browser to pool"
+                )
+                if cancelled is None:
+                    cancelled = rel_cancelled
+        finally:
+            if self._acquired_mark:
+                self._acquired_mark = False
+                mark_rel = getattr(self._generator, "mark_context_released", None)
+                if callable(mark_rel):
+                    mark_rel()
 
-        if self._acquired_mark:
-            self._acquired_mark = False
-            mark_rel = getattr(self._generator, "mark_context_released", None)
-            if callable(mark_rel):
-                mark_rel()
+        if cancelled is not None:
+            raise cancelled
 
     async def __aexit__(self, exc_type: Any, exc_val: Any, exc_tb: Any) -> None:
-        await self._cleanup()
+        try:
+            if self._timeout_cm is not None:
+                cm = self._timeout_cm
+                self._timeout_cm = None
+                await cm.__aexit__(exc_type, exc_val, exc_tb)
+        finally:
+            await self._cleanup()
 
 
 class PlaywrightPDFGenerator:
@@ -536,7 +606,6 @@ class PlaywrightPDFGenerator:
         *,
         wait_until: Any,
         timeouts_ms: tuple[int, int],
-        strict_settle: bool = False,
     ) -> None:
         page = session.page
         timeout_ms, settle_timeout_ms = timeouts_ms
@@ -556,12 +625,11 @@ class PlaywrightPDFGenerator:
         await validate_browser_navigation(
             page, response, session.context, egress_policy=self._egress_policy
         )
-        try:
-            await page.wait_for_load_state("networkidle", timeout=settle_timeout_ms)
-        except (PlaywrightTimeoutError, TimeoutError) as exc:
-            if strict_settle:
-                raise PDFGeneratorError(f"Timeout loading page: {url}") from exc
-            logger.debug(f"Proceeding after {settle_timeout_ms}ms settle: {url}")
+        if wait_until != "networkidle":
+            try:
+                await page.wait_for_load_state("networkidle", timeout=settle_timeout_ms)
+            except (PlaywrightTimeoutError, TimeoutError):
+                logger.debug(f"Proceeding after {settle_timeout_ms}ms settle: {url}")
 
     async def _run_pre_capture_steps(
         self,
@@ -573,10 +641,17 @@ class PlaywrightPDFGenerator:
         timeout_ms: int,
     ) -> None:
         if wait_for_selector:
-            await page.wait_for_selector(wait_for_selector, timeout=timeout_ms, state="visible")
+            try:
+                await page.wait_for_selector(wait_for_selector, timeout=timeout_ms, state="visible")
+            except (PlaywrightTimeoutError, TimeoutError) as exc:
+                from .content_converter import SelectorTimeoutError
+
+                logger.warning(f"Selector '{wait_for_selector}' not found within {timeout_ms}ms")
+                raise SelectorTimeoutError(wait_for_selector, timeout_ms) from exc
         if actions:
             await execute_browser_actions(page, actions, default_timeout_ms=timeout_ms)
-        await close_page_modals(page)
+        else:
+            await close_page_modals(page)
         await validate_browser_navigation(page, None, context, egress_policy=self._egress_policy)
 
     async def generate_pdf(
@@ -611,8 +686,7 @@ class PlaywrightPDFGenerator:
                         session,
                         url,
                         wait_until=pdf_options.get("wait_for", "networkidle"),
-                        timeouts_ms=(timeout_ms, timeout_ms),
-                        strict_settle=True,
+                        timeouts_ms=(timeout_ms, min(timeout_ms, 2500)),
                     )
                     await self._run_pre_capture_steps(
                         page,

@@ -32,7 +32,7 @@ cp .env.example .env
 docker-compose -f docker-compose.yml -f docker-compose.prod.yml up -d
 ```
 
-Access the API at `http://localhost:80`.
+Access the API at `http://localhost:8000` (or via a reverse proxy on port 80/443).
 
 ## Configuration
 
@@ -209,10 +209,10 @@ When `DOWNLOADER_KEY` is set, all API requests require authentication:
 
 ```bash
 # Using Bearer token
-curl -H "Authorization: Bearer your-api-key" http://localhost:80/https://example.com
+curl -H "Authorization: Bearer your-api-key" http://localhost:8000/https://example.com
 
 # Using X-API-Key header
-curl -H "X-API-Key: your-api-key" http://localhost:80/https://example.com
+curl -H "X-API-Key: your-api-key" http://localhost:8000/https://example.com
 ```
 
 ### SSRF & Egress Protection
@@ -228,8 +228,8 @@ Enabled by default across initial DNS pre-flight, every `3xx` HTTP redirect hop,
 Active moving-window limits (configurable; emits `X-RateLimit-{Limit,Remaining,Reset}` and `HTTP 429` + `Retry-After`):
 - General endpoints: 100/minute
 - Download endpoints (`/{url}`): 60/minute
-- Batch creation (`/batch`, `/jobs/*`): 20/minute
-- Status/metrics (`/health`, `/metrics*`): 200/minute
+- Batch creation (`/batch`): 20/minute
+- Status/metrics (`/health`, `/metrics*`, `/jobs/*`): 200/minute
 
 ## Reverse Proxy Setup
 
@@ -244,7 +244,7 @@ server {
     ssl_certificate_key /etc/letsencrypt/live/api.yourdomain.com/privkey.pem;
 
     location / {
-        proxy_pass http://localhost:80;
+        proxy_pass http://localhost:8000;
         proxy_set_header Host $host;
         proxy_set_header X-Real-IP $remote_addr;
         proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;

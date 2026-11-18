@@ -112,8 +112,7 @@ func encodeTargetURLPath(targetURL string) string {
 	return r.Replace(trimmed)
 }
 
-// Download fetches a URL with optional content negotiation, screenshot/PDF toggle, actions, or OCR.
-func (c *Client) Download(ctx context.Context, targetURL string, opts *DownloadOptions) (*DownloadResult, error) {
+func (c *Client) buildDownloadEndpoint(targetURL string, opts *DownloadOptions) (string, error) {
 	if opts == nil {
 		opts = &DownloadOptions{}
 	}
@@ -136,7 +135,7 @@ func (c *Client) Download(ctx context.Context, targetURL string, opts *DownloadO
 	if len(opts.Actions) > 0 {
 		encoded, err := json.Marshal(opts.Actions)
 		if err != nil {
-			return nil, err
+			return "", err
 		}
 		q.Set("actions", string(encoded))
 	}
@@ -150,6 +149,47 @@ func (c *Client) Download(ctx context.Context, targetURL string, opts *DownloadO
 	endpoint := c.BaseURL + "/" + encodeTargetURLPath(targetURL)
 	if encoded := q.Encode(); encoded != "" {
 		endpoint += "?" + encoded
+	}
+	return endpoint, nil
+}
+
+func (c *Client) doJSON(ctx context.Context, method string, endpoint string, reqBody []byte, out any) error {
+	var bodyReader io.Reader
+	if reqBody != nil {
+		bodyReader = bytes.NewReader(reqBody)
+	}
+	req, err := http.NewRequestWithContext(ctx, method, endpoint, bodyReader)
+	if err != nil {
+		return err
+	}
+	if reqBody != nil {
+		req.Header.Set("Content-Type", "application/json")
+	}
+	c.setAuth(req)
+
+	resp, err := c.httpClient().Do(req)
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return err
+	}
+	if resp.StatusCode >= 400 {
+		return decodeAPIError(resp, body)
+	}
+	return json.Unmarshal(body, out)
+}
+
+// Download fetches a URL with optional content negotiation, screenshot/PDF toggle, actions, or OCR.
+func (c *Client) Download(ctx context.Context, targetURL string, opts *DownloadOptions) (*DownloadResult, error) {
+	if opts == nil {
+		opts = &DownloadOptions{}
+	}
+	endpoint, err := c.buildDownloadEndpoint(targetURL, opts)
+	if err != nil {
+		return nil, err
 	}
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, endpoint, nil)
 	if err != nil {
@@ -188,6 +228,58 @@ func (c *Client) Download(ctx context.Context, targetURL string, opts *DownloadO
 		OCRApplied:     strings.EqualFold(resp.Header.Get("X-OCR-Applied"), "true"),
 		TraceID:        resp.Header.Get("X-Trace-ID"),
 	}, nil
+}
+
+// DownloadMulti fetches a URL in multiple formats using comma-separated Accept content negotiation.
+func (c *Client) DownloadMulti(ctx context.Context, targetURL string, formats []string, opts *DownloadOptions) (map[string]any, error) {
+	endpoint, err := c.buildDownloadEndpoint(targetURL, opts)
+	if err != nil {
+		return nil, err
+	}
+	acceptParts := make([]string, 0, len(formats))
+	for _, f := range formats {
+		if mapped, ok := formatToAccept[f]; ok {
+			acceptParts = append(acceptParts, mapped)
+		} else {
+			acceptParts = append(acceptParts, f)
+		}
+	}
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, endpoint, nil)
+	if err != nil {
+		return nil, err
+	}
+	req.Header.Set("Accept", strings.Join(acceptParts, ", "))
+	c.setAuth(req)
+
+	resp, err := c.httpClient().Do(req)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return nil, err
+	}
+	if resp.StatusCode >= 400 {
+		return nil, decodeAPIError(resp, body)
+	}
+	ct := strings.ToLower(strings.TrimSpace(strings.Split(resp.Header.Get("Content-Type"), ";")[0]))
+	if ct != "" && ct != "application/json" && !strings.HasSuffix(ct, "+json") {
+		return nil, &APIError{
+			StatusCode: resp.StatusCode,
+			ErrorType:  "unexpected_content_type",
+			Message:    fmt.Sprintf("expected JSON multi-format response, got %s", ct),
+		}
+	}
+	var out map[string]any
+	if err := json.Unmarshal(body, &out); err != nil {
+		return nil, &APIError{
+			StatusCode: resp.StatusCode,
+			ErrorType:  "invalid_json_response",
+			Message:    fmt.Sprintf("expected JSON multi-format response: %v", err),
+		}
+	}
+	return out, nil
 }
 
 // Screenshot captures a PNG or JPEG screenshot of targetURL.
@@ -327,33 +419,74 @@ func (c *Client) GetJobResults(ctx context.Context, jobID string) (*BatchJobResu
 	return &out, nil
 }
 
+// CancelJob calls DELETE /jobs/{job_id}.
+func (c *Client) CancelJob(ctx context.Context, jobID string) (*JobCancelResult, error) {
+	var out JobCancelResult
+	endpoint := c.BaseURL + "/jobs/" + url.PathEscape(jobID)
+	if err := c.doJSON(ctx, http.MethodDelete, endpoint, nil, &out); err != nil {
+		return nil, err
+	}
+	return &out, nil
+}
+
 // CreateSchedule calls POST /schedules.
 func (c *Client) CreateSchedule(ctx context.Context, payload ScheduleCreateRequest) (*ScheduleInfo, error) {
 	raw, err := json.Marshal(payload)
 	if err != nil {
 		return nil, err
 	}
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, c.BaseURL+"/schedules", bytes.NewReader(raw))
-	if err != nil {
-		return nil, err
-	}
-	req.Header.Set("Content-Type", "application/json")
-	c.setAuth(req)
-
-	resp, err := c.httpClient().Do(req)
-	if err != nil {
-		return nil, err
-	}
-	defer resp.Body.Close()
-	body, err := io.ReadAll(resp.Body)
-	if err != nil {
-		return nil, err
-	}
-	if resp.StatusCode >= 400 {
-		return nil, decodeAPIError(resp, body)
-	}
 	var out ScheduleInfo
-	if err := json.Unmarshal(body, &out); err != nil {
+	if err := c.doJSON(ctx, http.MethodPost, c.BaseURL+"/schedules", raw, &out); err != nil {
+		return nil, err
+	}
+	return &out, nil
+}
+
+// ListSchedules calls GET /schedules.
+func (c *Client) ListSchedules(ctx context.Context) ([]ScheduleInfo, error) {
+	var wrapper struct {
+		Schedules []ScheduleInfo `json:"schedules"`
+	}
+	if err := c.doJSON(ctx, http.MethodGet, c.BaseURL+"/schedules", nil, &wrapper); err != nil {
+		return nil, err
+	}
+	return wrapper.Schedules, nil
+}
+
+// GetSchedule calls GET /schedules/{id}.
+func (c *Client) GetSchedule(ctx context.Context, scheduleID string) (*ScheduleInfo, error) {
+	var out ScheduleInfo
+	endpoint := c.BaseURL + "/schedules/" + url.PathEscape(scheduleID)
+	if err := c.doJSON(ctx, http.MethodGet, endpoint, nil, &out); err != nil {
+		return nil, err
+	}
+	return &out, nil
+}
+
+// GetScheduleHistory calls GET /schedules/{id}/history.
+func (c *Client) GetScheduleHistory(ctx context.Context, scheduleID string, limit int, offset int) (*ScheduleHistory, error) {
+	if limit <= 0 {
+		limit = 20
+	}
+	if offset < 0 {
+		offset = 0
+	}
+	q := url.Values{}
+	q.Set("limit", fmt.Sprintf("%d", limit))
+	q.Set("offset", fmt.Sprintf("%d", offset))
+	endpoint := c.BaseURL + "/schedules/" + url.PathEscape(scheduleID) + "/history?" + q.Encode()
+	var out ScheduleHistory
+	if err := c.doJSON(ctx, http.MethodGet, endpoint, nil, &out); err != nil {
+		return nil, err
+	}
+	return &out, nil
+}
+
+// DeleteSchedule calls DELETE /schedules/{id}.
+func (c *Client) DeleteSchedule(ctx context.Context, scheduleID string) (*ScheduleDeleteResult, error) {
+	var out ScheduleDeleteResult
+	endpoint := c.BaseURL + "/schedules/" + url.PathEscape(scheduleID)
+	if err := c.doJSON(ctx, http.MethodDelete, endpoint, nil, &out); err != nil {
 		return nil, err
 	}
 	return &out, nil

@@ -18,6 +18,12 @@ scrape_configs:
     metrics_path: '/metrics'
     scrape_interval: 10s
     scrape_timeout: 5s
+    # /metrics requires API key authentication when DOWNLOADER_KEY is configured.
+    # Mount the token file (never commit secrets) and uncomment one of the options below:
+    # authorization:
+    #   type: Bearer
+    #   credentials_file: /etc/prometheus/downloader_bearer_token
+    # bearer_token_file: /etc/prometheus/downloader_bearer_token
 
   # Prometheus self-monitoring
   - job_name: 'prometheus'

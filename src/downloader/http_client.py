@@ -2,10 +2,12 @@
 
 from __future__ import annotations
 
+import contextvars
 import logging
 from collections.abc import Awaitable, Callable, Mapping
 from typing import Any
 
+import httpcore
 import httpx
 
 from .content_encoding import (
@@ -14,7 +16,7 @@ from .content_encoding import (
     read_bounded_response_bytes,
 )
 from .models.responses import ResponseMetadata
-from .ssrf_transport import SSRFSafeHTTPTransport
+from .ssrf_transport import SSRFSafeHTTPTransport, SSRFSafeNetworkBackend
 from .validation import (
     EgressPolicy,
     URLValidationError,
@@ -28,6 +30,10 @@ from .validation import (
 logger = logging.getLogger(__name__)
 
 RedirectPolicyHook = Callable[[str, str], Awaitable[None]]
+
+_CUSTOM_HEADER_GUARD: contextvars.ContextVar[
+    tuple[tuple[str, str, int] | None, frozenset[str]] | None
+] = contextvars.ContextVar("http_client_custom_header_guard", default=None)
 
 
 class DownloadError(Exception):
@@ -148,6 +154,7 @@ class HTTPClient:
         http2: bool = True,
         *,
         transport: httpx.AsyncBaseTransport | None = None,
+        network_backend: httpcore.AsyncNetworkBackend | None = None,
         egress_policy: EgressPolicy | None = None,
         redirect_policy: RedirectPolicyHook | None = None,
     ) -> None:
@@ -165,9 +172,19 @@ class HTTPClient:
             keepalive_expiry=keepalive_expiry,
         )
 
+        backend: httpcore.AsyncNetworkBackend | None = None
+        if network_backend is not None:
+            backend = (
+                network_backend
+                if isinstance(network_backend, SSRFSafeNetworkBackend)
+                else SSRFSafeNetworkBackend(inner=network_backend, egress_policy=egress_policy)
+            )
+
         active_transport = transport or SSRFSafeHTTPTransport(
             limits=self._limits,
             http2=http2,
+            trust_env=False,
+            backend=backend,
             egress_policy=egress_policy,
         )
 
@@ -178,7 +195,10 @@ class HTTPClient:
             transport=active_transport,
             trust_env=False,
             cookies=make_stateless_cookies(),
-            event_hooks={"response": [self._on_response_hook]},
+            event_hooks={
+                "request": [self._on_request_hook],
+                "response": [self._on_response_hook],
+            },
             headers={
                 "User-Agent": self.user_agent,
                 "Accept": "*/*",
@@ -205,6 +225,21 @@ class HTTPClient:
         ):
             await self._redirect_policy(source_url, validated_next)
 
+    async def _on_request_hook(self, request: httpx.Request) -> None:
+        """Drop caller-supplied custom headers when scheme, host, or port changes on redirect."""
+        guard = _CUSTOM_HEADER_GUARD.get()
+        if guard is None:
+            return
+        initial_origin, custom_keys = guard
+        if not custom_keys or initial_origin is None:
+            return
+        if canonical_origin(str(request.url)) != initial_origin:
+            for key in custom_keys:
+                if key in self._client.headers:
+                    request.headers[key] = self._client.headers[key]
+                else:
+                    request.headers.pop(key, None)
+
     async def _on_response_hook(self, response: httpx.Response) -> None:
         """Validate every redirect hop against SSRF/robots and reject oversized Content-Length."""
         if response.is_redirect:
@@ -224,6 +259,9 @@ class HTTPClient:
                 )
 
     def _ensure_client_invariants(self) -> None:
+        req_hooks = self._client.event_hooks.setdefault("request", [])
+        if self._on_request_hook not in req_hooks:
+            req_hooks.append(self._on_request_hook)
         hooks = self._client.event_hooks.setdefault("response", [])
         if self._on_response_hook not in hooks:
             hooks.append(self._on_response_hook)
@@ -244,42 +282,53 @@ class HTTPClient:
             if req_headers is not None
             else self._client.stream("GET", url)
         )
-        async with stream_cm as response:
-            if response.status_code >= 400:
-                raise HTTPClientError(
-                    f"HTTP {response.status_code}: {response.reason_phrase}",
-                    status_code=response.status_code,
+        guard_token: (
+            contextvars.Token[tuple[tuple[str, str, int] | None, frozenset[str]] | None] | None
+        ) = None
+        if req_headers:
+            guard_token = _CUSTOM_HEADER_GUARD.set(
+                (canonical_origin(url), frozenset(k.lower() for k in req_headers))
+            )
+        try:
+            async with stream_cm as response:
+                if response.status_code >= 400:
+                    raise HTTPClientError(
+                        f"HTTP {response.status_code}: {response.reason_phrase}",
+                        status_code=response.status_code,
+                    )
+
+                cl_val = _parse_content_length(response.headers)
+                if cl_val is not None and cl_val > self.max_download_size:
+                    raise ContentTooLargeError(max_size=self.max_download_size, actual_size=cl_val)
+
+                resp_ct = (
+                    _extract_header_case_insensitive(response.headers, "content-type") or "unknown"
+                )
+                if require_text_convertible and not is_text_convertible_content_type(
+                    resp_ct,
+                    allow_ocr_images=allow_ocr_images,
+                ):
+                    raise UnsupportedMediaTypeError(resp_ct, target_format=target_format)
+
+                content = await read_bounded_response_bytes(
+                    response,
+                    max_bytes=self.max_download_size,
+                    on_too_large=lambda actual: ContentTooLargeError(
+                        max_size=self.max_download_size,
+                        actual_size=actual,
+                    ),
+                    on_decode_error=HTTPClientError,
                 )
 
-            cl_val = _parse_content_length(response.headers)
-            if cl_val is not None and cl_val > self.max_download_size:
-                raise ContentTooLargeError(max_size=self.max_download_size, actual_size=cl_val)
-
-            resp_ct = (
-                _extract_header_case_insensitive(response.headers, "content-type") or "unknown"
-            )
-            if require_text_convertible and not is_text_convertible_content_type(
-                resp_ct,
-                allow_ocr_images=allow_ocr_images,
-            ):
-                raise UnsupportedMediaTypeError(resp_ct, target_format=target_format)
-
-            content = await read_bounded_response_bytes(
-                response,
-                max_bytes=self.max_download_size,
-                on_too_large=lambda actual: ContentTooLargeError(
-                    max_size=self.max_download_size,
-                    actual_size=actual,
-                ),
-                on_decode_error=HTTPClientError,
-            )
-
-            if require_text_convertible and not is_text_convertible_content_type(
-                resp_ct,
-                allow_ocr_images=allow_ocr_images,
-                sample_bytes=content,
-            ):
-                raise UnsupportedMediaTypeError(resp_ct, target_format=target_format)
+                if require_text_convertible and not is_text_convertible_content_type(
+                    resp_ct,
+                    allow_ocr_images=allow_ocr_images,
+                    sample_bytes=content,
+                ):
+                    raise UnsupportedMediaTypeError(resp_ct, target_format=target_format)
+        finally:
+            if guard_token is not None:
+                _CUSTOM_HEADER_GUARD.reset(guard_token)
 
         metadata: ResponseMetadata = {
             "status_code": response.status_code,

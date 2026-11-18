@@ -4,10 +4,10 @@ from __future__ import annotations
 
 import multiprocessing
 import os
-from typing import Any, Literal
+from typing import Annotated, Any, Literal
 
-from pydantic import Field, PrivateAttr, field_validator
-from pydantic_settings import BaseSettings, SettingsConfigDict
+from pydantic import Field, PrivateAttr, field_validator, model_validator
+from pydantic_settings import BaseSettings, NoDecode, SettingsConfigDict
 
 from .runtime_config import (
     OCRConfig,
@@ -68,7 +68,7 @@ class HTTPClientConfig(BaseSettings):
         description="Enable HTTP/2 support for better multiplexing",
     )
 
-    model_config = SettingsConfigDict(env_prefix="HTTP_")
+    model_config = SettingsConfigDict(env_prefix="HTTP_", extra="ignore")
 
     @field_validator("max_connections")
     @classmethod
@@ -83,10 +83,6 @@ class HTTPClientConfig(BaseSettings):
         return v
 
 
-def _default_pdf_concurrency() -> int:
-    return min(multiprocessing.cpu_count() * 2, 12)
-
-
 def _default_batch_concurrency() -> int:
     return min(multiprocessing.cpu_count() * 8, 50)
 
@@ -95,10 +91,10 @@ class PDFConfig(BaseSettings):
     """Playwright browser pool and PDF/screenshot concurrency settings."""
 
     concurrency: int = Field(
-        default_factory=_default_pdf_concurrency,
+        default=3,
         ge=1,
         le=50,
-        description="Max concurrent browser sessions (default: 2x CPU cores, max 12)",
+        description="Max concurrent browser sessions (defaults to pool_size)",
     )
     page_load_timeout: int = Field(
         default=30000,
@@ -134,7 +130,13 @@ class PDFConfig(BaseSettings):
         description="Seconds of inactivity before closing idle browser pool (0 disables scale-to-zero)",
     )
 
-    model_config = SettingsConfigDict(env_prefix="PDF_")
+    model_config = SettingsConfigDict(env_prefix="PDF_", extra="ignore")
+
+    @model_validator(mode="after")
+    def _sync_concurrency_with_pool_size(self) -> PDFConfig:
+        if "concurrency" not in self.model_fields_set:
+            self.concurrency = self.pool_size
+        return self
 
 
 class BatchConfig(BaseSettings):
@@ -159,7 +161,7 @@ class BatchConfig(BaseSettings):
         description="Default timeout per URL in batch processing (seconds)",
     )
 
-    model_config = SettingsConfigDict(env_prefix="BATCH_")
+    model_config = SettingsConfigDict(env_prefix="BATCH_", extra="ignore")
 
 
 class ContentConfig(BaseSettings):
@@ -193,7 +195,7 @@ class ContentConfig(BaseSettings):
         le=86400,
         description="TTL for HTML rendering detection cache in seconds (default: 1 hour)",
     )
-    html_js_heavy_domains: list[str] = Field(
+    html_js_heavy_domains: Annotated[list[str], NoDecode] = Field(
         default=["substack.com", "medium.com", "notion.so", "ghost.io"],
         description="Known JS-heavy domains that always need rendering",
     )
@@ -210,13 +212,13 @@ class ContentConfig(BaseSettings):
         description="Minimum body text chars for JS framework detection (default: 200)",
     )
 
-    model_config = SettingsConfigDict(env_prefix="CONTENT_")
+    model_config = SettingsConfigDict(env_prefix="CONTENT_", extra="ignore")
 
     @field_validator("html_js_heavy_domains", mode="before")
     @classmethod
     def parse_domains(cls, v: Any) -> Any:
         if isinstance(v, str):
-            return [domain.strip() for domain in v.split(",")]
+            return [domain.strip() for domain in v.split(",") if domain.strip()]
         return v
 
 
@@ -236,7 +238,7 @@ class RedisConfig(BaseSettings):
         description="Maximum Redis connections in pool",
     )
 
-    model_config = SettingsConfigDict(env_prefix="REDIS_", populate_by_name=True)
+    model_config = SettingsConfigDict(env_prefix="REDIS_", populate_by_name=True, extra="ignore")
 
 
 class SchedulerConfig(BaseSettings):
@@ -263,7 +265,7 @@ class SchedulerConfig(BaseSettings):
         description="Combine multiple missed runs into a single execution",
     )
 
-    model_config = SettingsConfigDict(env_prefix="SCHEDULER_")
+    model_config = SettingsConfigDict(env_prefix="SCHEDULER_", extra="ignore")
 
 
 class AuthConfig(BaseSettings):
@@ -276,6 +278,11 @@ class AuthConfig(BaseSettings):
         default=None,
         alias="DOWNLOADER_KEY",
         description="API key for authentication (if None, auth is disabled)",
+    )
+    allow_unauthenticated_production: bool = Field(
+        default=False,
+        alias="AUTH_ALLOW_UNAUTHENTICATED_PRODUCTION",
+        description="Explicitly allow running in production without DOWNLOADER_KEY (unsafe)",
     )
 
     model_config = SettingsConfigDict(
@@ -325,7 +332,7 @@ class LoggingConfig(BaseSettings):
         description="Number of rotated log files to keep",
     )
 
-    model_config = SettingsConfigDict(env_prefix="LOG_")
+    model_config = SettingsConfigDict(env_prefix="LOG_", extra="ignore")
 
 
 class SSRFConfig(BaseSettings):
@@ -343,13 +350,13 @@ class SSRFConfig(BaseSettings):
         description="Resolve DNS and check IPs before making requests",
     )
 
-    model_config = SettingsConfigDict(env_prefix="SSRF_")
+    model_config = SettingsConfigDict(env_prefix="SSRF_", extra="ignore")
 
 
 class CORSConfig(BaseSettings):
     """CORS configuration defaulting to localhost origins."""
 
-    allowed_origins: list[str] = Field(
+    allowed_origins: Annotated[list[str], NoDecode] = Field(
         default=[
             "http://localhost:3000",
             "http://localhost:8080",
@@ -359,13 +366,13 @@ class CORSConfig(BaseSettings):
         description="Allowed CORS origins. Default: localhost only. Set explicitly in production.",
     )
 
-    model_config = SettingsConfigDict(env_prefix="CORS_")
+    model_config = SettingsConfigDict(env_prefix="CORS_", extra="ignore")
 
     @field_validator("allowed_origins", mode="before")
     @classmethod
     def parse_origins(cls, v: Any) -> Any:
         if isinstance(v, str):
-            return [origin.strip() for origin in v.split(",")]
+            return [origin.strip() for origin in v.split(",") if origin.strip()]
         return v
 
 
@@ -400,7 +407,7 @@ class RateLimitConfig(BaseSettings):
         default=True,
         description="Include rate limit headers in responses (X-RateLimit-*)",
     )
-    trusted_proxies: list[str] = Field(
+    trusted_proxies: Annotated[list[str], NoDecode] = Field(
         default=[
             "127.0.0.1",
             "::1",
@@ -411,7 +418,7 @@ class RateLimitConfig(BaseSettings):
         description="Trusted reverse-proxy IPs or CIDRs allowed to supply X-Forwarded-For",
     )
 
-    model_config = SettingsConfigDict(env_prefix="RATELIMIT_")
+    model_config = SettingsConfigDict(env_prefix="RATELIMIT_", extra="ignore")
 
     @field_validator("trusted_proxies", mode="before")
     @classmethod
@@ -470,6 +477,9 @@ class CrawlingConfig(BaseSettings):
     )
 
 
+_ENV_FILE_UNSET: Any = object()
+
+
 class Settings(BaseSettings):
     """Main application settings combining all configuration sections."""
 
@@ -503,9 +513,50 @@ class Settings(BaseSettings):
         extra="ignore",
     )
 
+    def __init__(
+        self,
+        _env_file: Any = _ENV_FILE_UNSET,
+        _env_file_encoding: str | None = None,
+        **values: Any,
+    ) -> None:
+        effective_env_file = (
+            self.model_config.get("env_file") if _env_file is _ENV_FILE_UNSET else _env_file
+        )
+        effective_encoding = (
+            _env_file_encoding
+            if _env_file_encoding is not None
+            else self.model_config.get("env_file_encoding", "utf-8")
+        )
+        for field_name, field_info in type(self).model_fields.items():
+            if field_name in values:
+                continue
+            ann = field_info.annotation
+            if isinstance(ann, type) and issubclass(ann, BaseSettings):
+                values[field_name] = ann(
+                    _env_file=effective_env_file,
+                    _env_file_encoding=effective_encoding,
+                )
+        super().__init__(
+            _env_file=effective_env_file,
+            _env_file_encoding=effective_encoding,
+            **values,
+        )
+
+    @model_validator(mode="after")
+    def validate_production_auth(self) -> Settings:
+        """Refuse to start in production without a non-empty API key unless explicitly opted out."""
+        if self.environment == "production":
+            has_key = bool(self.auth.api_key and self.auth.api_key.strip())
+            if not has_key and not self.auth.allow_unauthenticated_production:
+                raise ValueError(
+                    "DOWNLOADER_KEY must be set to a non-empty value when ENVIRONMENT=production "
+                    "(or set AUTH_ALLOW_UNAUTHENTICATED_PRODUCTION=true to explicitly opt out)."
+                )
+        return self
+
     def _production_warnings(self) -> list[str]:
         warnings: list[str] = []
-        if not self.auth.api_key:
+        if not (self.auth.api_key and self.auth.api_key.strip()):
             warnings.append("WARNING: No API key configured in production")
         if "*" in self.cors.allowed_origins:
             warnings.append("WARNING: CORS allows all origins in production - security risk!")

@@ -1,9 +1,13 @@
 """Mock fixtures for external dependencies."""
 
+from collections.abc import Callable
 from datetime import UTC, datetime, timedelta
+from typing import Any
 from unittest.mock import AsyncMock, MagicMock, patch
 
+import httpx
 import pytest
+import redis.asyncio as redis
 
 from downloader.dependencies import (
     get_execution_storage_dependency,
@@ -12,8 +16,246 @@ from downloader.dependencies import (
     get_pdf_generator_dependency,
     get_scheduler_dependency,
 )
+from downloader.http_client import HTTPClient
 from downloader.main import app
+from downloader.models.responses import ResponseMetadata
 from downloader.models.schedule import ExecutionStatus, ScheduleExecution
+
+
+class FakeRedis:
+    """Unified in-memory async Redis fake for robots, throttle, and worker queue tests."""
+
+    def __init__(self) -> None:
+        self.store: dict[str, tuple[str, float | None]] = {}
+        self.lists: dict[str, list[str]] = {}
+        self.fail_get: bool = False
+        self.fail_set: bool = False
+
+    async def get(self, key: str) -> bytes | None:
+        if self.fail_get:
+            raise ConnectionError("simulated redis read failure")
+        entry = self.store.get(key)
+        if entry is None:
+            return None
+        return entry[0].encode("utf-8")
+
+    async def set(
+        self,
+        key: str,
+        value: str,
+        *,
+        ex: int | None = None,
+        px: int | None = None,
+    ) -> bool:
+        if self.fail_set:
+            raise ConnectionError("simulated redis write failure")
+        ttl_s = float(ex) if ex is not None else (float(px) / 1000.0 if px is not None else None)
+        self.store[key] = (value, ttl_s)
+        return True
+
+    async def psetex(self, key: str, time_ms: int, value: str) -> bool:
+        if self.fail_set:
+            raise ConnectionError("simulated redis psetex failure")
+        self.store[key] = (value, float(time_ms) / 1000.0)
+        return True
+
+    async def setex(self, key: str, ttl: int, value: str) -> bool:
+        if self.fail_set:
+            raise ConnectionError("simulated redis setex failure")
+        self.store[key] = (value, float(ttl))
+        return True
+
+    async def delete(self, key: str) -> int:
+        return 1 if self.store.pop(key, None) is not None else 0
+
+    async def scan(
+        self, cursor: int = 0, match: str = "*", count: int = 100
+    ) -> tuple[int, list[str]]:
+        prefix = match.rstrip("*")
+        keys = [k for k in self.store if k.startswith(prefix)]
+        return 0, keys
+
+    async def mget(self, keys: list[str]) -> list[str | None]:
+        return [self.store[k][0] if k in self.store else None for k in keys]
+
+    async def eval(
+        self,
+        _script: str,
+        _numkeys: int,
+        key: str,
+        now_str: str,
+        delay_str: str,
+        max_wait_str: str | None = None,
+    ) -> str:
+        if self.fail_get or self.fail_set:
+            raise ConnectionError("Redis eval failed")
+        now_wall = float(now_str)
+        delay = float(delay_str)
+        max_wait = float(max_wait_str) if max_wait_str is not None else None
+        entry = self.store.get(key)
+        next_wall = float(entry[0]) if entry is not None else 0.0
+        if now_wall < next_wall:
+            wait_s = next_wall - now_wall
+            if max_wait is not None and wait_s > max_wait:
+                return str(-wait_s)
+            new_next = next_wall + delay
+        else:
+            wait_s = 0.0
+            new_next = now_wall + delay
+        ttl_ms = max(1, int((new_next - now_wall) * 1000 + 0.5))
+        self.store[key] = (str(new_next), ttl_ms / 1000.0)
+        return str(wait_s)
+
+    async def lpush(self, key: str, value: str) -> int:
+        bucket = self.lists.setdefault(key, [])
+        bucket.insert(0, value)
+        return len(bucket)
+
+    async def rpush(self, key: str, value: str) -> int:
+        bucket = self.lists.setdefault(key, [])
+        bucket.append(value)
+        return len(bucket)
+
+    async def blmove(
+        self,
+        first_list: str,
+        second_list: str,
+        timeout: int = 0,
+        src: str = "RIGHT",
+        dest: str = "LEFT",
+    ) -> str | None:
+        src_bucket = self.lists.get(first_list) or []
+        if not src_bucket:
+            return None
+        item = src_bucket.pop() if src == "RIGHT" else src_bucket.pop(0)
+        dst_bucket = self.lists.setdefault(second_list, [])
+        if dest == "LEFT":
+            dst_bucket.insert(0, item)
+        else:
+            dst_bucket.append(item)
+        return item
+
+    async def lmove(
+        self,
+        first_list: str,
+        second_list: str,
+        src: str = "RIGHT",
+        dest: str = "LEFT",
+    ) -> str | None:
+        return await self.blmove(first_list, second_list, timeout=0, src=src, dest=dest)
+
+    async def lrem(self, key: str, count: int, value: str) -> int:
+        bucket = self.lists.get(key) or []
+        removed = 0
+        while value in bucket and (count == 0 or removed < count):
+            bucket.remove(value)
+            removed += 1
+        return removed
+
+    async def blpop(self, keys: list[str], timeout: float = 0) -> tuple[str, str] | None:
+        for key in keys:
+            bucket = self.lists.get(key) or []
+            if bucket:
+                return key, bucket.pop(0)
+        return None
+
+    async def brpop(self, keys: list[str], timeout: float = 0) -> tuple[str, str] | None:
+        for key in keys:
+            bucket = self.lists.get(key) or []
+            if bucket:
+                return key, bucket.pop()
+        return None
+
+    async def llen(self, key: str) -> int:
+        return len(self.lists.get(key) or [])
+
+    def pipeline(self, transaction: bool = True) -> Any:
+        parent = self
+
+        class _Pipe:
+            def __init__(self) -> None:
+                self._ops: list[tuple[str, tuple[object, ...]]] = []
+
+            async def __aenter__(self) -> "_Pipe":
+                return self
+
+            async def __aexit__(self, *args: object) -> None:
+                return None
+
+            def rpush(self, key: str, value: str) -> None:
+                self._ops.append(("rpush", (key, value)))
+
+            def expire(self, key: str, ttl: int) -> None:
+                self._ops.append(("expire", (key, ttl)))
+
+            async def execute(self) -> list[bool]:
+                for op, args in self._ops:
+                    if op == "rpush":
+                        await parent.rpush(str(args[0]), str(args[1]))
+                return [True] * len(self._ops)
+
+        return _Pipe()
+
+
+class MockPipeline:
+    """Mock Redis pipeline for transaction testing."""
+
+    def __init__(self) -> None:
+        self.watch = AsyncMock()
+        self.multi = MagicMock()  # multi() is not async
+        self.execute = AsyncMock(return_value=[True, True])
+        self.setex = AsyncMock()
+
+    async def __aenter__(self) -> "MockPipeline":
+        return self
+
+    async def __aexit__(self, exc_type: object, exc_val: object, exc_tb: object) -> None:
+        pass
+
+
+class MockPipelineWithWatchError(MockPipeline):
+    """Pipeline that raises WatchError for retry testing."""
+
+    def __init__(self, fail_count: int = 1) -> None:
+        super().__init__()
+        self.fail_count = fail_count
+        self.attempt = 0
+
+        async def _execute() -> list[bool]:
+            self.attempt += 1
+            if self.attempt <= self.fail_count:
+                raise redis.WatchError("Concurrent modification")
+            return [True, True]
+
+        self.execute = AsyncMock(side_effect=_execute)
+
+
+def make_response_metadata(**overrides: Any) -> ResponseMetadata:
+    """Build a complete ResponseMetadata dictionary for tests."""
+    metadata: ResponseMetadata = {
+        "status_code": 200,
+        "headers": {"content-type": "text/html"},
+        "url": "https://example.com",
+        "size": 17,
+        "content_type": "text/html",
+        "http_version": "HTTP/1.1",
+        "connection_reused": False,
+    }
+    metadata.update(overrides)  # type: ignore[typeddict-item]
+    return metadata
+
+
+def attach_mock_transport(
+    http_client: HTTPClient,
+    handler: Callable[[httpx.Request], httpx.Response],
+) -> None:
+    """Attach an httpx.MockTransport to an HTTPClient while preserving redirect hooks."""
+    http_client._client = httpx.AsyncClient(
+        transport=httpx.MockTransport(handler),
+        follow_redirects=True,
+        max_redirects=http_client.max_redirects,
+        event_hooks={"response": [http_client._on_response_hook]},
+    )
 
 
 @pytest.fixture
@@ -33,13 +275,7 @@ def mock_http_client():
     mock_client = AsyncMock()
     mock_client.download.return_value = (
         b"<html>test</html>",
-        {
-            "url": "https://example.com",
-            "status_code": 200,
-            "content_type": "text/html",
-            "size": 17,
-            "headers": {"content-type": "text/html"},
-        },
+        make_response_metadata(),
     )
     return mock_client
 

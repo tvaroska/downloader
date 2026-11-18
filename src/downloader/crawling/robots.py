@@ -14,6 +14,7 @@ from dataclasses import dataclass, field
 from typing import Any
 from urllib.parse import unquote, urlsplit
 
+import httpcore
 import httpx
 from redis.exceptions import RedisError
 
@@ -27,7 +28,7 @@ from ..metrics import (
     record_robots_disallowed,
     record_robots_evaluation,
 )
-from ..ssrf_transport import SSRFSafeHTTPTransport
+from ..ssrf_transport import SSRFSafeHTTPTransport, SSRFSafeNetworkBackend
 from ..validation import (
     DNSResolutionError,
     EgressPolicy,
@@ -35,6 +36,7 @@ from ..validation import (
     URLValidationError,
     canonical_origin,
     format_origin_url,
+    redact_url_for_log,
     sanitize_user_agent,
     validate_url_async,
 )
@@ -186,13 +188,12 @@ def _pattern_matches(pattern: str, target_path: str) -> bool:
     return re.match(expr, norm_target) is not None
 
 
-def _evaluate_robots_txt(
-    raw_text: str,
+def _evaluate_robots_groups(
+    groups: list[_RobotsGroup],
     user_agent: str,
     url: str,
 ) -> tuple[bool, float | None]:
-    """Evaluate `url` against `raw_text` using RFC 9309 longest-match and `*`/`$` rules."""
-    groups = _parse_robots_groups(raw_text)
+    """Evaluate `url` against pre-parsed `_RobotsGroup`s using RFC 9309 rules."""
     selected = _select_matching_groups(groups, user_agent)
     if not selected:
         return True, None
@@ -219,6 +220,16 @@ def _evaluate_robots_txt(
     # RFC 9309 §2.2.2: longest matching pattern wins; equal-length ties favor Allow.
     _, allowed = max(matched_rules, key=lambda item: (item[0], item[1]))
     return allowed, crawl_delay
+
+
+def _evaluate_robots_txt(
+    raw_text: str,
+    user_agent: str,
+    url: str,
+) -> tuple[bool, float | None]:
+    """Evaluate `url` against `raw_text` using RFC 9309 longest-match and `*`/`$` rules."""
+    groups = _parse_robots_groups(raw_text)
+    return _evaluate_robots_groups(groups, user_agent, url)
 
 
 def _format_redis_robots_key(origin: OriginTuple) -> str:
@@ -249,6 +260,7 @@ class RobotsChecker:
         fetcher: Callable[[str], Awaitable[tuple[int, str]]] | None = None,
         egress_policy: EgressPolicy | None = None,
         transport: httpx.AsyncBaseTransport | None = None,
+        network_backend: httpcore.AsyncNetworkBackend | None = None,
     ) -> None:
         self.user_agent = sanitize_user_agent(user_agent)
         self.cache_ttl: int = max(1, int(robots_cache_ttl))
@@ -261,9 +273,12 @@ class RobotsChecker:
         self._fetcher = fetcher
         self._egress_policy = egress_policy
         self._transport = transport
+        self._network_backend = network_backend
 
-        # (expires_at_monotonic, raw_robots_txt, allow_all, byte_len)
-        self._cache: OrderedDict[OriginTuple, tuple[float, str, bool, int]] = OrderedDict()
+        # (expires_at_monotonic, raw_robots_txt, allow_all, byte_len, parsed_groups)
+        self._cache: OrderedDict[OriginTuple, tuple[float, str, bool, int, list[_RobotsGroup]]] = (
+            OrderedDict()
+        )
         self._cached_bytes: int = 0
         self._origin_locks: OrderedDict[OriginTuple, asyncio.Lock] = OrderedDict()
         self._http_client: httpx.AsyncClient | None = None
@@ -288,28 +303,39 @@ class RobotsChecker:
         if removed is not None:
             self._cached_bytes = max(0, self._cached_bytes - removed[3])
 
-    def _get_memory_cache(self, origin: OriginTuple) -> tuple[str, bool] | None:
+    def _get_memory_cache(self, origin: OriginTuple) -> tuple[str, bool, list[_RobotsGroup]] | None:
         entry = self._cache.get(origin)
         if entry is None:
             return None
-        expires_at, raw_txt, allow_all, _ = entry
+        expires_at, raw_txt, allow_all, _, parsed_groups = entry
         if time.monotonic() >= expires_at:
             self._evict_entry(origin)
             return None
         self._cache.move_to_end(origin)
-        return raw_txt, allow_all
+        return raw_txt, allow_all, parsed_groups
 
     def _set_memory_cache(
-        self, origin: OriginTuple, raw_txt: str, allow_all: bool, ttl: int
-    ) -> None:
+        self,
+        origin: OriginTuple,
+        raw_txt: str,
+        allow_all: bool,
+        ttl: int,
+        parsed_groups: list[_RobotsGroup] | None = None,
+    ) -> list[_RobotsGroup]:
         encoded_len = len(raw_txt.encode("utf-8"))
         if encoded_len > self.max_cache_bytes:
             raw_txt = raw_txt.encode("utf-8")[: self.max_cache_bytes].decode("utf-8", "ignore")
             encoded_len = len(raw_txt.encode("utf-8"))
+            parsed_groups = None
+
+        if parsed_groups is None:
+            parsed_groups = (
+                [] if allow_all or not raw_txt.strip() else _parse_robots_groups(raw_txt)
+            )
 
         self._evict_entry(origin)
         expires_at = time.monotonic() + ttl
-        self._cache[origin] = (expires_at, raw_txt, allow_all, encoded_len)
+        self._cache[origin] = (expires_at, raw_txt, allow_all, encoded_len, parsed_groups)
         self._cached_bytes += encoded_len
         self._cache.move_to_end(origin)
 
@@ -318,8 +344,11 @@ class RobotsChecker:
         ):
             oldest_key = next(iter(self._cache))
             self._evict_entry(oldest_key)
+        return parsed_groups
 
-    async def _get_cached_entry(self, origin: OriginTuple) -> tuple[str, bool] | None:
+    async def _get_cached_entry(
+        self, origin: OriginTuple
+    ) -> tuple[str, bool, list[_RobotsGroup]] | None:
         if self.redis_client is not None:
             redis_key = _format_redis_robots_key(origin)
             origin_label = format_origin_url(*origin)
@@ -331,10 +360,16 @@ class RobotsChecker:
                     try:
                         parsed = json.loads(raw_cached)
                         if isinstance(parsed, dict) and "allow_all" in parsed:
-                            return str(parsed.get("raw", "")), bool(parsed["allow_all"])
+                            txt = str(parsed.get("raw", ""))
+                            allow_all = bool(parsed["allow_all"])
+                            groups = (
+                                [] if allow_all or not txt.strip() else _parse_robots_groups(txt)
+                            )
+                            return txt, allow_all, groups
                     except ValueError:
                         pass
-                    return raw_cached, False
+                    groups = [] if not raw_cached.strip() else _parse_robots_groups(raw_cached)
+                    return raw_cached, False, groups
                 return None
             except (RedisError, OSError, RuntimeError, ValueError) as exc:
                 logger.warning(
@@ -350,8 +385,8 @@ class RobotsChecker:
         allow_all: bool,
         *,
         ttl: int,
-    ) -> None:
-        self._set_memory_cache(origin, raw_txt, allow_all, ttl)
+    ) -> list[_RobotsGroup]:
+        parsed_groups = self._set_memory_cache(origin, raw_txt, allow_all, ttl)
         if self.redis_client is not None:
             redis_key = _format_redis_robots_key(origin)
             origin_label = format_origin_url(*origin)
@@ -362,6 +397,7 @@ class RobotsChecker:
                 logger.warning(
                     f"Redis robots.txt cache write failed for {origin_label}, kept in memory cache: {exc}"
                 )
+        return parsed_groups
 
     async def _validate_candidate_url(self, target_url: str) -> str:
         if self._egress_policy is not None:
@@ -375,9 +411,21 @@ class RobotsChecker:
 
     def _ensure_http_client(self) -> httpx.AsyncClient:
         if self._http_client is None:
+            backend: httpcore.AsyncNetworkBackend | None = None
+            if self._network_backend is not None:
+                backend = (
+                    self._network_backend
+                    if isinstance(self._network_backend, SSRFSafeNetworkBackend)
+                    else SSRFSafeNetworkBackend(
+                        inner=self._network_backend,
+                        egress_policy=self._egress_policy,
+                    )
+                )
             active_transport = self._transport or SSRFSafeHTTPTransport(
                 limits=httpx.Limits(max_connections=20, max_keepalive_connections=10),
                 http2=False,
+                trust_env=False,
+                backend=backend,
                 egress_policy=self._egress_policy,
             )
             self._http_client = httpx.AsyncClient(
@@ -413,17 +461,20 @@ class RobotsChecker:
             body, _ = resolve_charset_and_decode(raw_bytes, response.headers.get("content-type"))
             return response.status_code, body
 
-    async def _fetch_and_cache(self, origin: OriginTuple) -> tuple[str, bool]:
+    async def _fetch_and_cache(self, origin: OriginTuple) -> tuple[str, bool, list[_RobotsGroup]]:
         robots_url = f"{format_origin_url(*origin)}/robots.txt"
+        safe_robots_url = redact_url_for_log(robots_url)
         _, host, _ = origin
 
         try:
             await self._validate_candidate_url(robots_url)
         except DNSResolutionError as exc:
             if self._fetcher is None or host.endswith("localhost"):
-                logger.warning(f"DNS resolution failed fetching {robots_url} ({exc}); failing open")
-                await self._set_cached_entry(origin, "", True, ttl=self.negative_cache_ttl)
-                return "", True
+                logger.warning(
+                    f"DNS resolution failed fetching {safe_robots_url} ({exc}); failing open"
+                )
+                groups = await self._set_cached_entry(origin, "", True, ttl=self.negative_cache_ttl)
+                return "", True, groups
         except SSRFProtectionError:
             raise
 
@@ -436,24 +487,26 @@ class RobotsChecker:
         except URLValidationError:
             raise
         except (httpx.HTTPError, OSError, TimeoutError, ValueError, RuntimeError) as exc:
-            logger.warning(f"Unreachable robots.txt at {robots_url} ({exc}); failing open")
-            await self._set_cached_entry(origin, "", True, ttl=self.negative_cache_ttl)
-            return "", True
+            logger.warning(f"Unreachable robots.txt at {safe_robots_url} ({exc}); failing open")
+            groups = await self._set_cached_entry(origin, "", True, ttl=self.negative_cache_ttl)
+            return "", True, groups
 
         if status_code in {404, 410}:
-            await self._set_cached_entry(origin, "", True, ttl=self.cache_ttl)
-            return "", True
+            groups = await self._set_cached_entry(origin, "", True, ttl=self.cache_ttl)
+            return "", True, groups
         if status_code >= 400:
-            logger.warning(f"robots.txt at {robots_url} returned HTTP {status_code}; failing open")
-            await self._set_cached_entry(origin, "", True, ttl=self.negative_cache_ttl)
-            return "", True
+            logger.warning(
+                f"robots.txt at {safe_robots_url} returned HTTP {status_code}; failing open"
+            )
+            groups = await self._set_cached_entry(origin, "", True, ttl=self.negative_cache_ttl)
+            return "", True, groups
         if _is_malformed_robots_txt(raw_text):
-            logger.warning(f"Malformed robots.txt at {robots_url}; failing open")
-            await self._set_cached_entry(origin, "", True, ttl=self.negative_cache_ttl)
-            return "", True
+            logger.warning(f"Malformed robots.txt at {safe_robots_url}; failing open")
+            groups = await self._set_cached_entry(origin, "", True, ttl=self.negative_cache_ttl)
+            return "", True, groups
 
-        await self._set_cached_entry(origin, raw_text, False, ttl=self.cache_ttl)
-        return raw_text, False
+        groups = await self._set_cached_entry(origin, raw_text, False, ttl=self.cache_ttl)
+        return raw_text, False, groups
 
     async def check_allowed(self, url: str, user_agent: str | None = None) -> float | None:
         """Evaluate whether `url` is allowed by origin's `/robots.txt` for `user_agent`."""
@@ -467,21 +520,21 @@ class RobotsChecker:
         cached = await self._get_cached_entry(origin)
         if cached is not None:
             record_robots_cache_hit()
-            raw_txt, allow_all = cached
+            raw_txt, allow_all, parsed_groups = cached
         else:
             lock = self._get_origin_lock(origin)
             async with lock:
                 cached = await self._get_cached_entry(origin)
                 if cached is not None:
                     record_robots_cache_hit()
-                    raw_txt, allow_all = cached
+                    raw_txt, allow_all, parsed_groups = cached
                 else:
-                    raw_txt, allow_all = await self._fetch_and_cache(origin)
+                    raw_txt, allow_all, parsed_groups = await self._fetch_and_cache(origin)
 
         if allow_all or not raw_txt.strip():
             return None
 
-        allowed, delay = _evaluate_robots_txt(raw_txt, effective_ua, url)
+        allowed, delay = _evaluate_robots_groups(parsed_groups, effective_ua, url)
         if not allowed:
             record_robots_disallowed()
             raise RobotsDisallowedError(url=url, user_agent=effective_ua)

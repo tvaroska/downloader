@@ -107,6 +107,7 @@ e2e:
     # Run all example scripts
     echo "Running example scripts..."
     export API_URL="http://localhost:8000"
+    failed=0
 
     for script in examples/*.py; do
         script_name=$(basename "$script" .py)
@@ -116,6 +117,7 @@ e2e:
             echo "✓ $script_name completed successfully"
         else
             echo "✗ $script_name failed (check logs/e2e-$script_name.log)"
+            failed=$((failed + 1))
         fi
     done
 
@@ -130,5 +132,10 @@ e2e:
     # Clean up
     echo "Cleaning up..."
     docker compose down -v
+
+    if [ "$failed" -ne 0 ]; then
+        echo "E2E test failed: $failed example script(s) failed"
+        exit 1
+    fi
 
     echo "E2E test completed! Check logs/ directory for details."

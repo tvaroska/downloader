@@ -166,8 +166,29 @@ class SystemMetricsCollector:
             self.collector.set_gauge("redis_status", 0)
 
     async def _collect_pdf_pool_metrics(self) -> None:
-        pdf_gen = getattr(self.app_state, "pdf_generator", None) if self.app_state else None
-        self.collector.set_gauge("pdf_pool_available", 1 if pdf_gen is not None else 0)
+        if not self.app_state:
+            self.collector.set_gauge("pdf_pool_available", 0)
+            return
+        pdf_gen = getattr(self.app_state, "pdf_generator", None)
+        if pdf_gen is None:
+            self.collector.set_gauge("pdf_pool_available", 0)
+            return
+
+        pool = getattr(pdf_gen, "pool", None)
+        avail_queue = getattr(pool, "_available_browsers", None) if pool is not None else None
+        if avail_queue is not None and callable(getattr(avail_queue, "qsize", None)):
+            qsize = avail_queue.qsize()
+            if isinstance(qsize, int):
+                self.collector.set_gauge("pdf_pool_available", max(0, qsize))
+                return
+
+        pdf_semaphore = getattr(self.app_state, "pdf_semaphore", None)
+        sem_value = getattr(pdf_semaphore, "_value", None) if pdf_semaphore is not None else None
+        if isinstance(sem_value, int):
+            self.collector.set_gauge("pdf_pool_available", max(0, sem_value))
+            return
+
+        self.collector.set_gauge("pdf_pool_available", 1)
 
     async def _collect_http_client_metrics(self) -> None:
         try:

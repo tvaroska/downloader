@@ -22,6 +22,7 @@ from ..dependencies import (
 from ..errors import classify_domain_error, log_classified_error
 from ..http_client import HTTPClient
 from ..models.responses import ErrorResponse, HTTPErrorResponse, ResponseMetadata
+from ..services.content_negotiation import sanitize_original_url_header
 from ..services.content_processor import (
     ConversionDeps,
     ConversionRequest,
@@ -79,7 +80,11 @@ def _extract_raw_target(request: Request, fallback_url: str) -> str:
     scope = getattr(request, "scope", None)
     raw_path = scope.get("raw_path") if isinstance(scope, dict) else None
     if isinstance(raw_path, bytes) and raw_path:
-        return unquote(raw_path.decode("latin-1").lstrip("/"))
+        try:
+            decoded_path = raw_path.decode("utf-8")
+        except UnicodeDecodeError:
+            decoded_path = raw_path.decode("latin-1")
+        return unquote(decoded_path.lstrip("/"))
     return fallback_url
 
 
@@ -286,10 +291,13 @@ async def download_url(  # noqa: PLR0913
             http_fetcher=_build_http_fetcher(http_client, validated_url, formats, format_type),
         )
         result = await _execute_download(params, output, deps)
+        headers = dict(result.headers)
+        if "X-Original-URL" in headers:
+            headers["X-Original-URL"] = sanitize_original_url_header(headers["X-Original-URL"])
         return Response(
             content=result.body,
             media_type=result.media_type,
-            headers=result.headers,
+            headers=headers,
         )
     except HTTPException:
         raise

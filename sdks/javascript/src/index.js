@@ -150,11 +150,12 @@ export class DownloaderClient {
   }
 
   /**
+   * @private
    * @param {string} url
    * @param {import("./index.js").DownloadOptions} [options]
-   * @returns {Promise<import("./index.js").DownloadResult>}
+   * @returns {string}
    */
-  async download(url, options = {}) {
+  buildDownloadUrl(url, options = {}) {
     const targetPath = encodeTargetUrlPath(url);
     const params = new URLSearchParams();
     if (options.render) params.set("render", "true");
@@ -171,7 +172,16 @@ export class DownloaderClient {
     if (options.ocrLang) params.set("ocr_lang", options.ocrLang);
 
     const qs = params.toString();
-    const fullUrl = `${this.baseUrl}/${targetPath}${qs ? `?${qs}` : ""}`;
+    return `${this.baseUrl}/${targetPath}${qs ? `?${qs}` : ""}`;
+  }
+
+  /**
+   * @param {string} url
+   * @param {import("./index.js").DownloadOptions} [options]
+   * @returns {Promise<import("./index.js").DownloadResult>}
+   */
+  async download(url, options = {}) {
+    const fullUrl = this.buildDownloadUrl(url, options);
     const accept = FORMAT_TO_ACCEPT[options.format ?? "text"] ?? options.format ?? "text/plain";
     const resp = await this.fetchImpl(fullUrl, {
       method: "GET",
@@ -179,6 +189,53 @@ export class DownloaderClient {
       signal: options.signal,
     });
     return this.toDownloadResult(url, resp);
+  }
+
+  /**
+   * @param {string} url
+   * @param {Array<import("./index.js").OutputFormat | string>} formats
+   * @param {Omit<import("./index.js").DownloadOptions, "output" | "format">} [options]
+   * @returns {Promise<Record<string, unknown>>}
+   */
+  async downloadMulti(url, formats, options = {}) {
+    const fullUrl = this.buildDownloadUrl(url, options);
+    const accept = formats.map((f) => FORMAT_TO_ACCEPT[f] ?? f).join(", ");
+    const resp = await this.fetchImpl(fullUrl, {
+      method: "GET",
+      headers: this.headers({ Accept: accept }),
+      signal: options.signal,
+    });
+    if (!resp.ok) {
+      await this.handleError(resp);
+    }
+    const contentType = (resp.headers.get("content-type") ?? "").split(";")[0].trim().toLowerCase();
+    if (contentType && contentType !== "application/json" && !contentType.endsWith("+json")) {
+      throw new DownloaderApiError(
+        `Expected JSON multi-format response, got ${contentType}`,
+        resp.status,
+        "unexpected_content_type",
+      );
+    }
+    try {
+      const data = await resp.json();
+      if (!data || typeof data !== "object" || Array.isArray(data)) {
+        throw new DownloaderApiError(
+          "Expected JSON object in multi-format response",
+          resp.status,
+          "invalid_json_response",
+        );
+      }
+      return /** @type {Record<string, unknown>} */ (data);
+    } catch (err) {
+      if (err instanceof DownloaderApiError) {
+        throw err;
+      }
+      throw new DownloaderApiError(
+        `Expected JSON multi-format response, got invalid JSON (${contentType || "unknown"})`,
+        resp.status,
+        "invalid_json_response",
+      );
+    }
   }
 
   /**
@@ -306,6 +363,23 @@ export class DownloaderClient {
 
   /**
    * @param {string} jobId
+   * @param {AbortSignal} [signal]
+   * @returns {Promise<import("./index.js").JobCancelResult>}
+   */
+  async cancelJob(jobId, signal) {
+    const resp = await this.fetchImpl(`${this.baseUrl}/jobs/${encodeURIComponent(jobId)}`, {
+      method: "DELETE",
+      headers: this.headers(),
+      signal,
+    });
+    if (!resp.ok) {
+      await this.handleError(resp);
+    }
+    return /** @type {import("./index.js").JobCancelResult} */ (await resp.json());
+  }
+
+  /**
+   * @param {string} jobId
    * @param {{ pollIntervalMs?: number; timeoutMs?: number; signal?: AbortSignal }} [options]
    * @returns {Promise<import("./index.js").BatchJobResults>}
    */
@@ -366,6 +440,49 @@ export class DownloaderClient {
       await resp.json()
     );
     return data.schedules ?? [];
+  }
+
+  /**
+   * @param {string} scheduleId
+   * @param {AbortSignal} [signal]
+   * @returns {Promise<import("./index.js").ScheduleInfo>}
+   */
+  async getSchedule(scheduleId, signal) {
+    const resp = await this.fetchImpl(
+      `${this.baseUrl}/schedules/${encodeURIComponent(scheduleId)}`,
+      {
+        method: "GET",
+        headers: this.headers(),
+        signal,
+      },
+    );
+    if (!resp.ok) {
+      await this.handleError(resp);
+    }
+    return /** @type {import("./index.js").ScheduleInfo} */ (await resp.json());
+  }
+
+  /**
+   * @param {string} scheduleId
+   * @param {{ limit?: number; offset?: number; signal?: AbortSignal }} [options]
+   * @returns {Promise<import("./index.js").ScheduleHistory>}
+   */
+  async getScheduleHistory(scheduleId, options = {}) {
+    const params = new URLSearchParams();
+    params.set("limit", String(options.limit ?? 20));
+    params.set("offset", String(options.offset ?? 0));
+    const resp = await this.fetchImpl(
+      `${this.baseUrl}/schedules/${encodeURIComponent(scheduleId)}/history?${params.toString()}`,
+      {
+        method: "GET",
+        headers: this.headers(),
+        signal: options.signal,
+      },
+    );
+    if (!resp.ok) {
+      await this.handleError(resp);
+    }
+    return /** @type {import("./index.js").ScheduleHistory} */ (await resp.json());
   }
 
   /**

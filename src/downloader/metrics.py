@@ -26,6 +26,7 @@ class PerformanceMetrics:
 
     request_count: int = 0
     error_count: int = 0
+    server_error_count: int = 0
     total_response_time: float = 0.0
     min_response_time: float = float("inf")
     max_response_time: float = 0.0
@@ -68,6 +69,8 @@ class MetricsCollector:
         self._histograms: dict[str, dict[float, int]] = defaultdict(
             lambda: dict.fromkeys(self._histogram_buckets, 0)
         )
+        self._histogram_sums: dict[str, float] = defaultdict(float)
+        self._histogram_counts: dict[str, int] = defaultdict(int)
 
     def record_request(
         self,
@@ -87,13 +90,18 @@ class MetricsCollector:
         if status_code >= 400:
             perf.error_count += 1
             self._counters[f"errors_total_{key}"] += 1
+        if status_code >= 500:
+            perf.server_error_count += 1
 
         self._counters[f"requests_total_{key}"] += 1
         self._counters[f"requests_total_status_{status_code}"] += 1
 
+        hist_key = f"response_time_{key}"
         for bucket in self._histogram_buckets:
             if response_time <= bucket:
-                self._histograms[f"response_time_{key}"][bucket] += 1
+                self._histograms[hist_key][bucket] += 1
+        self._histogram_sums[hist_key] += response_time
+        self._histogram_counts[hist_key] += 1
 
         self._metrics_history[f"response_time_{key}"].append(
             MetricSnapshot(
@@ -151,19 +159,29 @@ class MetricsCollector:
 
         return summary
 
-    def get_prometheus_metrics(self) -> str:
-        lines = [
-            "# HELP downloader_uptime_seconds Time since service started",
-            "# TYPE downloader_uptime_seconds gauge",
-            f"downloader_uptime_seconds {time.time() - self._start_time}",
-            "",
-            "# HELP downloader_requests_total Total number of requests",
-            "# TYPE downloader_requests_total counter",
-        ]
+    def _append_request_prometheus_lines(self, lines: list[str]) -> None:
+        lines.extend(
+            [
+                "",
+                "# HELP downloader_requests_total Total number of requests",
+                "# TYPE downloader_requests_total counter",
+            ]
+        )
         for name, value in self._counters.items():
-            if name.startswith("requests_total_"):
+            if name.startswith("requests_total_") and not name.startswith("requests_total_status_"):
                 endpoint = name.removeprefix("requests_total_")
                 lines.append(f'downloader_requests_total{{endpoint="{endpoint}"}} {value}')
+        lines.extend(
+            [
+                "",
+                "# HELP downloader_requests_by_status_total Total number of requests by HTTP status code",
+                "# TYPE downloader_requests_by_status_total counter",
+            ]
+        )
+        for name, value in self._counters.items():
+            if name.startswith("requests_total_status_"):
+                status = name.removeprefix("requests_total_status_")
+                lines.append(f'downloader_requests_by_status_total{{status="{status}"}} {value}')
         lines.extend(
             [
                 "",
@@ -175,6 +193,8 @@ class MetricsCollector:
             if name.startswith("errors_total_"):
                 endpoint = name.removeprefix("errors_total_")
                 lines.append(f'downloader_errors_total{{endpoint="{endpoint}"}} {value}')
+
+    def _append_histogram_prometheus_lines(self, lines: list[str]) -> None:
         lines.extend(
             [
                 "",
@@ -183,13 +203,60 @@ class MetricsCollector:
             ]
         )
         for endpoint, buckets in self._histograms.items():
-            if endpoint.startswith("response_time_"):
-                endpoint_name = endpoint.removeprefix("response_time_")
-                for bucket, count in buckets.items():
-                    bucket_str = "+Inf" if bucket == float("inf") else str(bucket)
-                    lines.append(
-                        f'downloader_response_time_seconds_bucket{{endpoint="{endpoint_name}",le="{bucket_str}"}} {count}'
-                    )
+            if not endpoint.startswith("response_time_"):
+                continue
+            endpoint_name = endpoint.removeprefix("response_time_")
+            for bucket, count in buckets.items():
+                bucket_str = "+Inf" if bucket == float("inf") else str(bucket)
+                lines.append(
+                    f'downloader_response_time_seconds_bucket{{endpoint="{endpoint_name}",le="{bucket_str}"}} {count}'
+                )
+            lines.append(
+                f'downloader_response_time_seconds_sum{{endpoint="{endpoint_name}"}} {self._histogram_sums[endpoint]}'
+            )
+            lines.append(
+                f'downloader_response_time_seconds_count{{endpoint="{endpoint_name}"}} {self._histogram_counts[endpoint]}'
+            )
+
+    def _append_html_rendering_prometheus_lines(self, lines: list[str]) -> None:
+        lines.extend(
+            [
+                "",
+                "# HELP html_rendering_detections_total Total HTML rendering detections",
+                "# TYPE html_rendering_detections_total counter",
+                f"html_rendering_detections_total {int(self._counters.get('html_rendering_detections_total', 0))}",
+                "# HELP html_rendering_successes_total Total successful HTML renders",
+                "# TYPE html_rendering_successes_total counter",
+                f"html_rendering_successes_total {int(self._counters.get('html_rendering_successes_total', 0))}",
+                "# HELP html_rendering_failures_total Total failed HTML renders",
+                "# TYPE html_rendering_failures_total counter",
+                f"html_rendering_failures_total {int(self._counters.get('html_rendering_failures_total', 0))}",
+                "# HELP html_rendering_duration_seconds HTML rendering duration histogram",
+                "# TYPE html_rendering_duration_seconds histogram",
+            ]
+        )
+        html_buckets = self._histograms.get(
+            "html_rendering_duration_seconds",
+            dict.fromkeys(self._histogram_buckets, 0),
+        )
+        for bucket, count in html_buckets.items():
+            bucket_str = "+Inf" if bucket == float("inf") else str(bucket)
+            lines.append(f'html_rendering_duration_seconds_bucket{{le="{bucket_str}"}} {count}')
+        lines.append(
+            f"html_rendering_duration_seconds_sum {self._histogram_sums.get('html_rendering_duration_seconds', 0.0)}"
+        )
+        lines.append(
+            f"html_rendering_duration_seconds_count {self._histogram_counts.get('html_rendering_duration_seconds', 0)}"
+        )
+
+    def get_prometheus_metrics(self) -> str:
+        lines = [
+            "# HELP downloader_uptime_seconds Time since service started",
+            "# TYPE downloader_uptime_seconds gauge",
+            f"downloader_uptime_seconds {time.time() - self._start_time}",
+        ]
+        self._append_request_prometheus_lines(lines)
+        self._append_histogram_prometheus_lines(lines)
         lines.extend(
             [
                 "",
@@ -199,6 +266,16 @@ class MetricsCollector:
         )
         for name, value in self._gauges.items():
             lines.append(f'downloader_gauge{{name="{name}"}} {value}')
+        health_score = self.get_system_health_score()["overall_score"]
+        lines.extend(
+            [
+                "",
+                "# HELP downloader_health_score Overall system health score (0-100)",
+                "# TYPE downloader_health_score gauge",
+                f"downloader_health_score {health_score}",
+            ]
+        )
+        self._append_html_rendering_prometheus_lines(lines)
         lines.extend(
             [
                 "",
@@ -221,7 +298,11 @@ class MetricsCollector:
         factors: dict[str, dict[str, Any]] = {}
         health_details: dict[str, Any] = {"overall_score": health_score, "factors": factors}
 
-        error_rate = performance.get("overall_error_rate_percent", 0)
+        total_requests = sum(perf.request_count for perf in self._performance_metrics.values())
+        total_server_errors = sum(
+            perf.server_error_count for perf in self._performance_metrics.values()
+        )
+        error_rate = (total_server_errors / total_requests) * 100 if total_requests > 0 else 0.0
         if error_rate > 5:
             error_penalty = min(30, error_rate * 2)
             health_score -= error_penalty
@@ -247,7 +328,7 @@ class MetricsCollector:
 
         health_details["overall_score"] = max(0, health_score)
         health_details["status"] = (
-            "healthy" if health_score >= 80 else "degraded" if health_score >= 60 else "unhealthy"
+            "healthy" if health_score >= 80 else "degraded" if health_score >= 50 else "unhealthy"
         )
         return health_details
 
@@ -280,9 +361,12 @@ def record_html_rendering_detection() -> None:
 
 def record_html_rendering_duration(duration_seconds: float) -> None:
     collector = get_metrics_collector()
+    hist_key = "html_rendering_duration_seconds"
     for bucket in collector._histogram_buckets:
         if duration_seconds <= bucket:
-            collector._histograms["html_rendering_duration_seconds"][bucket] += 1
+            collector._histograms[hist_key][bucket] += 1
+    collector._histogram_sums[hist_key] += duration_seconds
+    collector._histogram_counts[hist_key] += 1
     set_gauge("html_rendering_latest_duration_seconds", duration_seconds)
 
 

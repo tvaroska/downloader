@@ -18,6 +18,7 @@ from .models import (
     HealthStatus,
     ScheduleCreateRequest,
     ScheduleExecution,
+    ScheduleHistory,
     ScheduleInfo,
 )
 
@@ -38,6 +39,7 @@ __all__ = [
     "RateLimitError",
     "ScheduleCreateRequest",
     "ScheduleExecution",
+    "ScheduleHistory",
     "ScheduleInfo",
     "ServiceUnavailableError",
     "ValidationError",

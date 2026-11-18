@@ -30,6 +30,29 @@ class JobStatus(str, Enum):
     CANCELLED = "cancelled"
 
 
+TERMINAL_JOB_STATUSES: frozenset[JobStatus] = frozenset(
+    {JobStatus.COMPLETED, JobStatus.FAILED, JobStatus.CANCELLED}
+)
+
+ALLOWED_JOB_TRANSITIONS: dict[JobStatus, frozenset[JobStatus]] = {
+    JobStatus.PENDING: frozenset(
+        {
+            JobStatus.PENDING,
+            JobStatus.RUNNING,
+            JobStatus.COMPLETED,
+            JobStatus.FAILED,
+            JobStatus.CANCELLED,
+        }
+    ),
+    JobStatus.RUNNING: frozenset(
+        {JobStatus.RUNNING, JobStatus.COMPLETED, JobStatus.FAILED, JobStatus.CANCELLED}
+    ),
+    JobStatus.COMPLETED: frozenset(),
+    JobStatus.FAILED: frozenset(),
+    JobStatus.CANCELLED: frozenset(),
+}
+
+
 class JobInfo(BaseModel):
     """Job information model."""
 
@@ -121,23 +144,26 @@ class JobManager:
 
     async def disconnect(self) -> None:
         """Cancel active background tasks and close the Redis connection pool."""
-        for job_id, task in list(self._background_tasks.items()):
-            if not task.done():
-                logger.info(f"Cancelling background task for job {job_id}")
-                task.cancel()
+        try:
+            tasks_to_cancel: list[asyncio.Task[None]] = []
+            for job_id, task in list(self._background_tasks.items()):
+                if not task.done():
+                    logger.info(f"Cancelling background task for job {job_id}")
+                    task.cancel()
+                    tasks_to_cancel.append(task)
+            if tasks_to_cancel:
+                await asyncio.gather(*tasks_to_cancel, return_exceptions=True)
+            self._background_tasks.clear()
+        finally:
+            if self.redis_client:
                 try:
-                    await task
-                except asyncio.CancelledError:
-                    pass
-
-        self._background_tasks.clear()
-
-        if self.redis_client:
-            await self.redis_client.close()
-        if self.connection_pool:
-            await self.connection_pool.disconnect()
-
-        logger.info("Disconnected from Redis and closed connection pool")
+                    await self.redis_client.close()
+                finally:
+                    if self.connection_pool:
+                        await self.connection_pool.disconnect()
+            elif self.connection_pool:
+                await self.connection_pool.disconnect()
+            logger.info("Disconnected from Redis and closed connection pool")
 
     def _get_job_key(self, job_id: str) -> str:
         return f"job:{job_id}"
@@ -238,6 +264,12 @@ class JobManager:
                         return
 
                     job_info = JobInfo.model_validate_json(job_data)
+                    if status not in ALLOWED_JOB_TRANSITIONS.get(job_info.status, frozenset()):
+                        logger.debug(
+                            f"Ignoring invalid status transition for job {job_id}: "
+                            f"{job_info.status.value} -> {status.value}"
+                        )
+                        return
                     self._apply_status_fields(
                         job_info,
                         status,
@@ -247,6 +279,7 @@ class JobManager:
                         failed_urls,
                         error_message,
                     )
+                    job_info.expires_at = datetime.fromtimestamp(time.time() + self.job_ttl, UTC)
                     pipe.multi()
                     await pipe.setex(job_key, self.job_ttl, job_info.model_dump_json())
                     await pipe.execute()
@@ -263,11 +296,49 @@ class JobManager:
                 logger.error(f"Failed to update job {job_id}: {exc}")
                 raise
 
-    async def store_job_results(
+    @staticmethod
+    def _cap_job_result_payload(
+        job_result: JobResult,
+        max_bytes: int,
+    ) -> str:
+        payload = job_result.model_dump_json()
+        if len(payload.encode("utf-8")) <= max_bytes:
+            return payload
+
+        trimmed_results = [dict(item) for item in job_result.results]
+        trimmed_summary = dict(job_result.summary)
+        for idx in range(len(trimmed_results) - 1, -1, -1):
+            entry = trimmed_results[idx]
+            if entry.get("content") is None and entry.get("content_base64") is None:
+                continue
+            entry["content"] = None
+            entry["content_base64"] = None
+            entry["size"] = 0
+            entry["success"] = False
+            entry["error_type"] = "content_too_large"
+            entry["status_code"] = 413
+            entry["error"] = f"Batch result omitted: aggregate size exceeded {max_bytes} bytes"
+            trimmed_summary["truncated"] = True
+            candidate = job_result.model_copy(
+                update={"results": trimmed_results, "summary": trimmed_summary}
+            ).model_dump_json()
+            if len(candidate.encode("utf-8")) <= max_bytes:
+                return candidate
+
+        return job_result.model_copy(
+            update={"results": trimmed_results, "summary": trimmed_summary}
+        ).model_dump_json()
+
+    async def store_job_results(  # noqa: PLR0913
         self,
         job_id: str,
         results: list[dict[str, Any]],
         summary: dict[str, Any],
+        *,
+        status: JobStatus | None = None,
+        total_duration: float | None = None,
+        completed_at: datetime | None = None,
+        max_result_bytes: int | None = None,
     ) -> None:
         """Persist completed batch job results in Redis."""
         if not self.redis_client:
@@ -278,23 +349,33 @@ class JobManager:
             logger.warning(f"Attempted to store results for non-existent job {job_id}")
             return
 
+        resolved_completed_at = completed_at or job_info.completed_at or datetime.now(UTC)
+        if total_duration is not None:
+            resolved_duration = total_duration
+        elif job_info.started_at is not None:
+            resolved_duration = (resolved_completed_at - job_info.started_at).total_seconds()
+        else:
+            resolved_duration = float(summary.get("total_duration", 0.0))
+
         job_result = JobResult(
             job_id=job_id,
-            status=job_info.status,
-            total_duration=(
-                (job_info.completed_at - job_info.started_at).total_seconds()
-                if job_info.completed_at and job_info.started_at
-                else 0.0
-            ),
+            status=status if status is not None else job_info.status,
+            total_duration=resolved_duration,
             results=results,
             summary=summary,
             created_at=job_info.created_at,
-            completed_at=job_info.completed_at or datetime.now(UTC),
+            completed_at=resolved_completed_at,
         )
+        cap = (
+            max_result_bytes
+            if max_result_bytes is not None
+            else get_settings().content.max_download_size
+        )
+        payload = self._cap_job_result_payload(job_result, cap)
         await self.redis_client.setex(
             self._get_result_key(job_id),
             self.job_ttl,
-            job_result.model_dump_json(),
+            payload,
         )
         logger.info(f"Stored results for job {job_id}")
 
@@ -323,17 +404,25 @@ class JobManager:
 
         async def job_wrapper() -> None:
             batch_req = args[0] if args and hasattr(args[0], "webhook_url") else None
+            webhook_status: JobStatus | None = None
+            webhook_summary: dict[str, Any] | None = None
+            webhook_error: str | None = None
             try:
                 await self.update_job_status(job_id, JobStatus.RUNNING)
                 results, summary = await job_processor_func(job_id, *args, **kwargs)
-                await self.store_job_results(job_id, results, summary)
+                completed_at = datetime.now(UTC)
+                duration = float(summary["total_duration"]) if "total_duration" in summary else None
+                await self.store_job_results(
+                    job_id,
+                    results,
+                    summary,
+                    status=JobStatus.COMPLETED,
+                    total_duration=duration,
+                    completed_at=completed_at,
+                )
                 await self.update_job_status(job_id, JobStatus.COMPLETED)
-                if batch_req is not None and getattr(batch_req, "webhook_url", None):
-                    from .services.batch_processor import notify_batch_webhook
-
-                    await notify_batch_webhook(
-                        job_id, batch_req, JobStatus.COMPLETED, summary=summary
-                    )
+                webhook_status = JobStatus.COMPLETED
+                webhook_summary = summary
             except asyncio.CancelledError:
                 await self.update_job_status(job_id, JobStatus.CANCELLED)
                 raise
@@ -341,12 +430,25 @@ class JobManager:
                 # Isolate background task exceptions so any processor failure updates job status cleanly.
                 await self.update_job_status(job_id, JobStatus.FAILED, error_message=str(exc))
                 logger.error(f"Job {job_id} failed: {exc}")
-                if batch_req is not None and getattr(batch_req, "webhook_url", None):
-                    from .services.batch_processor import notify_batch_webhook
-
-                    await notify_batch_webhook(job_id, batch_req, JobStatus.FAILED, error=str(exc))
+                webhook_status = JobStatus.FAILED
+                webhook_error = str(exc)
             finally:
                 self._background_tasks.pop(job_id, None)
+
+            if (
+                webhook_status is not None
+                and batch_req is not None
+                and getattr(batch_req, "webhook_url", None)
+            ):
+                from .services.batch_processor import notify_batch_webhook
+
+                await notify_batch_webhook(
+                    job_id,
+                    batch_req,
+                    webhook_status,
+                    summary=webhook_summary,
+                    error=webhook_error,
+                )
 
         task = asyncio.create_task(job_wrapper())
         self._background_tasks[job_id] = task

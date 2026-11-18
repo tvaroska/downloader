@@ -12,11 +12,15 @@ import argparse
 import asyncio
 import base64
 import logging
+import os
 import signal
 import socket
 import sys
+import tempfile
 import uuid
 from dataclasses import dataclass
+from datetime import UTC, datetime
+from pathlib import Path
 from typing import Any
 
 import redis.exceptions as redis_exc
@@ -28,7 +32,7 @@ from .config import Settings, get_settings
 from .content_converter import SelectorTimeoutError, render_html_with_playwright
 from .crawling import DomainThrottle, RobotsChecker
 from .http_client import ContentTooLargeError, HTTPClient
-from .job_manager import JobManager, JobStatus
+from .job_manager import TERMINAL_JOB_STATUSES, JobManager, JobStatus
 from .logging_config import get_logger, setup_logging
 from .models.responses import BatchRequest
 from .pdf_generator import (
@@ -95,13 +99,18 @@ async def process_worker_batch_envelope(  # noqa: PLR0913
 
     with tracer.start_as_current_span("worker.batch_job", context=parent_ctx) as span:
         span.set_attribute("batch.job_id", envelope.job_id)
+        span.set_attribute("batch.attempt", envelope.attempt)
+        should_ack = True
         try:
             job_info = await job_manager.get_job_info(envelope.job_id)
             if job_info is None:
                 logger.warning(f"[WORKER] Job {envelope.job_id} expired or missing; skipping")
                 return
-            if job_info.status == JobStatus.CANCELLED:
-                logger.info(f"[WORKER] Job {envelope.job_id} already cancelled; skipping")
+            if job_info.status in TERMINAL_JOB_STATUSES:
+                logger.info(
+                    f"[WORKER] Job {envelope.job_id} already in terminal status "
+                    f"{job_info.status.value}; skipping"
+                )
                 return
 
             batch_req = BatchRequest.model_validate(job_info.request_data)
@@ -118,14 +127,26 @@ async def process_worker_batch_envelope(  # noqa: PLR0913
                 domain_throttle=domain_throttle,
             )
 
-            await job_manager.store_job_results(envelope.job_id, results, summary)
+            completed_at = datetime.now(UTC)
+            duration = float(summary["total_duration"]) if "total_duration" in summary else None
+            await job_manager.store_job_results(
+                envelope.job_id,
+                results,
+                summary,
+                status=JobStatus.COMPLETED,
+                total_duration=duration,
+                completed_at=completed_at,
+            )
             await job_manager.update_job_status(envelope.job_id, JobStatus.COMPLETED)
             await notify_batch_webhook(
                 envelope.job_id, batch_req, JobStatus.COMPLETED, summary=summary
             )
             logger.info(f"[WORKER] Completed batch job {envelope.job_id}")
         except asyncio.CancelledError:
-            await job_manager.update_job_status(envelope.job_id, JobStatus.CANCELLED)
+            current = await job_manager.get_job_info(envelope.job_id)
+            if current is None or current.status != JobStatus.CANCELLED:
+                await worker_queue.requeue_batch_job(envelope)
+                should_ack = False
             raise
         except Exception as exc:  # noqa: BLE001
             # Isolate dequeued job failures so the worker marks the job FAILED and stays alive.
@@ -138,7 +159,8 @@ async def process_worker_batch_envelope(  # noqa: PLR0913
                     envelope.job_id, batch_req, JobStatus.FAILED, error=str(exc)
                 )
         finally:
-            await worker_queue.ack_batch_job(envelope.raw_payload)
+            if should_ack:
+                await worker_queue.ack_batch_job(envelope.raw_payload)
 
 
 async def process_worker_browser_task(
@@ -155,6 +177,19 @@ async def process_worker_browser_task(
     with tracer.start_as_current_span("worker.browser_task", context=parent_ctx) as span:
         span.set_attribute("browser.task_id", task.task_id)
         span.set_attribute("browser.task_kind", task.kind)
+        if task.is_expired():
+            logger.warning(
+                f"[WORKER] Browser task {task.task_id} expired before execution; skipping"
+            )
+            expired_resp = BrowserTaskResponse(
+                task_id=task.task_id,
+                success=False,
+                error="Browser task deadline expired before execution",
+                error_type="timeout_error",
+                status_code=408,
+            )
+            await worker_queue.publish_browser_result(expired_resp, ttl_seconds=30)
+            return expired_resp
         try:
             async with pdf_semaphore:
                 if task.kind == "pdf":
@@ -230,11 +265,27 @@ async def process_worker_browser_task(
         return response
 
 
+def _get_worker_id_file() -> Path:
+    configured = os.getenv("WORKER_ID_FILE")
+    if configured:
+        return Path(configured)
+    return Path(tempfile.gettempdir()) / "downloader-worker-id"
+
+
 async def run_healthcheck() -> int:
-    """Verify Redis connectivity and at least one live worker heartbeat."""
+    """Verify Redis connectivity and this worker process's own live heartbeat."""
     settings = get_settings()
     if not settings.redis.redis_uri:
         print("ERROR: REDIS_URI is required for worker healthcheck", file=sys.stderr)
+        return 1
+
+    worker_id = os.getenv("WORKER_ID")
+    if not worker_id:
+        id_file = _get_worker_id_file()
+        if id_file.is_file():
+            worker_id = id_file.read_text(encoding="utf-8").strip()
+    if not worker_id:
+        print("UNHEALTHY: no local worker_id registered", file=sys.stderr)
         return 1
 
     jm = JobManager(settings.redis.redis_uri, max_connections=2)
@@ -243,9 +294,8 @@ async def run_healthcheck() -> int:
         if jm.redis_client is None:
             return 1
         queue = WorkerQueue(jm.redis_client)
-        workers = await queue.list_active_workers()
-        if not workers:
-            print("UNHEALTHY: no active worker heartbeats in Redis", file=sys.stderr)
+        if not await queue.has_heartbeat(worker_id):
+            print(f"UNHEALTHY: no active heartbeat for worker {worker_id}", file=sys.stderr)
             return 1
         return 0
     except (redis_exc.RedisError, OSError, RuntimeError, ValueError) as exc:
@@ -267,7 +317,7 @@ async def _init_worker_runtime(settings: Settings, worker_id: str) -> _WorkerRun
     if job_manager.redis_client is None:
         raise RuntimeError("JobManager connected without initializing redis_client")
 
-    worker_queue = WorkerQueue(job_manager.redis_client)
+    worker_queue = WorkerQueue(job_manager.redis_client, worker_id=worker_id)
     await worker_queue.requeue_processing_jobs()
 
     robots_checker = RobotsChecker(
@@ -482,6 +532,7 @@ async def _shutdown_worker_runtime(
     await rt.http_client.close()
     await rt.pdf_generator.close()
     await cleanup_pdf_generator()
+    await rt.worker_queue.close()
     await rt.job_manager.disconnect()
     shutdown_ocr_executor()
     shutdown_telemetry()
@@ -499,7 +550,9 @@ async def run_worker() -> None:
         raise SystemExit(1)
 
     configure_telemetry(settings.telemetry, service_version=__version__)
-    worker_id = f"{socket.gethostname()}-{uuid.uuid4().hex[:8]}"
+    worker_id = os.getenv("WORKER_ID") or f"{socket.gethostname()}-{uuid.uuid4().hex[:8]}"
+    id_file = _get_worker_id_file()
+    id_file.write_text(worker_id, encoding="utf-8")
     log.info(f"Starting downloader worker {worker_id} (v{__version__})")
 
     rt = await _init_worker_runtime(settings, worker_id)
@@ -528,11 +581,18 @@ async def run_worker() -> None:
     if settings.worker.remote_browser_enabled:
         loops.append(asyncio.create_task(_run_browser_consumer_loop(rt, stop_event, _track, log)))
 
-    await stop_event.wait()
-    for loop_task in loops:
-        loop_task.cancel()
-    await asyncio.gather(*loops, return_exceptions=True)
-    await _shutdown_worker_runtime(rt, active_tasks, log)
+    try:
+        await stop_event.wait()
+        for loop_task in loops:
+            loop_task.cancel()
+        await asyncio.gather(*loops, return_exceptions=True)
+        await _shutdown_worker_runtime(rt, active_tasks, log)
+    finally:
+        try:
+            if id_file.is_file() and id_file.read_text(encoding="utf-8").strip() == worker_id:
+                id_file.unlink()
+        except OSError:
+            pass
 
 
 def main() -> None:

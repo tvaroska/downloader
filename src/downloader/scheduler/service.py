@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import asyncio
+import contextlib
 import logging
 from datetime import datetime
 from typing import Any
@@ -36,11 +38,23 @@ def _get_redis_job_store(redis_uri: str) -> Any:
 class SchedulerService:
     """Service wrapper for APScheduler with Redis or in-memory persistence."""
 
-    def __init__(self, redis_uri: str | None, settings: SchedulerConfig) -> None:
+    def __init__(
+        self,
+        redis_uri: str | None,
+        settings: SchedulerConfig,
+        *,
+        wakeup_interval: float | None = None,
+    ) -> None:
         self.redis_uri = redis_uri
         self.settings = settings
         self._scheduler: AsyncIOScheduler | None = None
         self._started = False
+        self._wakeup_interval = (
+            wakeup_interval
+            if wakeup_interval is not None
+            else min(30.0, max(1.0, settings.misfire_grace_time / 2))
+        )
+        self._wakeup_task: asyncio.Task[None] | None = None
 
         jobstores: dict[str, Any] = {}
         if redis_uri and settings.job_store_type == "redis":
@@ -77,6 +91,16 @@ class SchedulerService:
             raise RuntimeError("Scheduler not initialized")
         return self._scheduler
 
+    async def _periodic_wakeup_loop(self) -> None:
+        """Wake APScheduler periodically so jobs added by paused API pods are discovered."""
+        try:
+            while self._started and self._scheduler is not None:
+                await asyncio.sleep(self._wakeup_interval)
+                if self._started and self._scheduler is not None and self._scheduler.running:
+                    self._scheduler.wakeup()
+        except asyncio.CancelledError:
+            pass
+
     async def start(self, *, paused: bool = False) -> None:
         """Start the scheduler (optionally paused for CRUD-only API pods)."""
         if self._started:
@@ -86,6 +110,8 @@ class SchedulerService:
             raise RuntimeError("Scheduler not initialized")
         self._scheduler.start(paused=paused)
         self._started = True
+        if not paused and self._wakeup_interval > 0:
+            self._wakeup_task = asyncio.create_task(self._periodic_wakeup_loop())
         jobs = self._scheduler.get_jobs()
         mode_label = "paused (CRUD-only)" if paused else "active"
         logger.info(f"Scheduler started in {mode_label} mode with {len(jobs)} existing jobs")
@@ -94,8 +120,13 @@ class SchedulerService:
         """Shut down the scheduler cleanly."""
         if not self._started or self._scheduler is None:
             return
-        self._scheduler.shutdown(wait=wait)
         self._started = False
+        if self._wakeup_task is not None:
+            self._wakeup_task.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await self._wakeup_task
+            self._wakeup_task = None
+        self._scheduler.shutdown(wait=wait)
         logger.info("Scheduler shutdown complete")
 
     def is_running(self) -> bool:

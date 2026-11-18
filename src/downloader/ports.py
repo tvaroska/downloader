@@ -18,7 +18,7 @@ from . import pdf_generator as _pg
 from .browser.actions import BrowserAction, BrowserActionError
 from .content_converter import SelectorTimeoutError
 from .http_client import ContentTooLargeError
-from .job_manager import JobInfo, JobResult, JobStatus
+from .job_manager import ALLOWED_JOB_TRANSITIONS, JobInfo, JobResult, JobStatus
 from .pdf_generator import PDFGeneratorError, enforce_rendered_output_size
 from .validation import EgressPolicy
 from .worker_queue import BatchQueueEnvelope, BrowserTaskRequest, BrowserTaskResponse
@@ -190,6 +190,8 @@ class WorkQueue(Protocol):
 
     async def ack_batch_job(self, raw_payload: str) -> None: ...
 
+    async def requeue_batch_job(self, envelope: BatchQueueEnvelope) -> None: ...
+
     async def requeue_processing_jobs(self) -> int: ...
 
     async def enqueue_browser_task(
@@ -217,6 +219,8 @@ class WorkQueue(Protocol):
     ) -> None: ...
 
     async def remove_heartbeat(self, worker_id: str) -> None: ...
+
+    async def has_heartbeat(self, worker_id: str) -> bool: ...
 
     async def list_active_workers(self) -> list[dict[str, Any]]: ...
 
@@ -341,11 +345,15 @@ class JobStore(Protocol):
         error_message: str | None = None,
     ) -> None: ...
 
-    async def store_job_results(
+    async def store_job_results(  # noqa: PLR0913
         self,
         job_id: str,
         results: list[dict[str, Any]],
         summary: dict[str, Any],
+        *,
+        status: JobStatus | None = None,
+        total_duration: float | None = None,
+        completed_at: datetime | None = None,
     ) -> None: ...
 
     async def get_job_results(self, job_id: str) -> JobResult | None: ...
@@ -409,6 +417,8 @@ class InMemoryJobStore:
             info = self._jobs.get(job_id)
             if info is None:
                 return
+            if status not in ALLOWED_JOB_TRANSITIONS.get(info.status, frozenset()):
+                return
             info.status = status
             now = datetime.now(UTC)
             if status == JobStatus.RUNNING and info.started_at is None:
@@ -427,30 +437,35 @@ class InMemoryJobStore:
             if error_message is not None:
                 info.error_message = error_message
 
-    async def store_job_results(
+    async def store_job_results(  # noqa: PLR0913
         self,
         job_id: str,
         results: list[dict[str, Any]],
         summary: dict[str, Any],
+        *,
+        status: JobStatus | None = None,
+        total_duration: float | None = None,
+        completed_at: datetime | None = None,
     ) -> None:
         async with self._lock:
             info = self._jobs.get(job_id)
             if info is None:
                 return
-            completed_at = info.completed_at or datetime.now(UTC)
-            duration = (
-                (completed_at - info.started_at).total_seconds()
-                if info.started_at is not None
-                else float(summary.get("total_duration", 0.0))
-            )
+            resolved_completed_at = completed_at or info.completed_at or datetime.now(UTC)
+            if total_duration is not None:
+                duration = total_duration
+            elif info.started_at is not None:
+                duration = (resolved_completed_at - info.started_at).total_seconds()
+            else:
+                duration = float(summary.get("total_duration", 0.0))
             self._results[job_id] = JobResult(
                 job_id=job_id,
-                status=info.status,
+                status=status if status is not None else info.status,
                 total_duration=duration,
                 results=results,
                 summary=summary,
                 created_at=info.created_at,
-                completed_at=completed_at,
+                completed_at=resolved_completed_at,
             )
 
     async def get_job_results(self, job_id: str) -> JobResult | None:
@@ -467,29 +482,50 @@ class InMemoryJobStore:
     ) -> asyncio.Task[None]:
         async def _runner() -> None:
             batch_req = args[0] if args and hasattr(args[0], "webhook_url") else None
+            webhook_status: JobStatus | None = None
+            webhook_summary: dict[str, Any] | None = None
+            webhook_error: str | None = None
             try:
                 await self.update_job_status(job_id, JobStatus.RUNNING)
                 results, summary = await job_processor_func(job_id, *args, **kwargs)
-                await self.store_job_results(job_id, results, summary)
+                completed_at = datetime.now(UTC)
+                duration = float(summary["total_duration"]) if "total_duration" in summary else None
+                await self.store_job_results(
+                    job_id,
+                    results,
+                    summary,
+                    status=JobStatus.COMPLETED,
+                    total_duration=duration,
+                    completed_at=completed_at,
+                )
                 await self.update_job_status(job_id, JobStatus.COMPLETED)
-                if batch_req is not None and getattr(batch_req, "webhook_url", None):
-                    from .services.batch_processor import notify_batch_webhook
-
-                    await notify_batch_webhook(
-                        job_id, batch_req, JobStatus.COMPLETED, summary=summary
-                    )
+                webhook_status = JobStatus.COMPLETED
+                webhook_summary = summary
             except asyncio.CancelledError:
                 await self.update_job_status(job_id, JobStatus.CANCELLED)
                 raise
             except Exception as exc:  # noqa: BLE001
                 # Isolate background batch job failures so task exceptions become FAILED job state.
                 await self.update_job_status(job_id, JobStatus.FAILED, error_message=str(exc))
-                if batch_req is not None and getattr(batch_req, "webhook_url", None):
-                    from .services.batch_processor import notify_batch_webhook
-
-                    await notify_batch_webhook(job_id, batch_req, JobStatus.FAILED, error=str(exc))
+                webhook_status = JobStatus.FAILED
+                webhook_error = str(exc)
             finally:
                 self._background_tasks.pop(job_id, None)
+
+            if (
+                webhook_status is not None
+                and batch_req is not None
+                and getattr(batch_req, "webhook_url", None)
+            ):
+                from .services.batch_processor import notify_batch_webhook
+
+                await notify_batch_webhook(
+                    job_id,
+                    batch_req,
+                    webhook_status,
+                    summary=webhook_summary,
+                    error=webhook_error,
+                )
 
         task = asyncio.create_task(_runner())
         self._background_tasks[job_id] = task
@@ -524,12 +560,13 @@ class InMemoryJobStore:
 class InMemoryWorkQueue:
     """Shared in-memory `WorkQueue` adapter for deterministic split-worker tests."""
 
-    def __init__(self) -> None:
+    def __init__(self, *, max_remote_browser_calls: int = 8) -> None:
         self._batch_pending: deque[str] = deque()
         self._batch_processing: list[str] = []
         self._batch_event = asyncio.Event()
         self._browser_pending: asyncio.Queue[BrowserTaskRequest] = asyncio.Queue()
         self._browser_results: dict[str, asyncio.Queue[BrowserTaskResponse]] = {}
+        self._browser_inflight_semaphore = asyncio.Semaphore(max(1, max_remote_browser_calls))
         self._heartbeats: dict[str, tuple[float, dict[str, Any]]] = {}
 
     async def enqueue_batch_job(
@@ -537,11 +574,13 @@ class InMemoryWorkQueue:
         job_id: str,
         *,
         trace_headers: dict[str, str] | None = None,
+        attempt: int = 1,
     ) -> None:
         payload = json.dumps(
             {
                 "job_id": job_id,
                 "enqueued_at": datetime.now(UTC).isoformat(),
+                "attempt": attempt,
                 "trace_headers": trace_headers or {},
             },
             separators=(",", ":"),
@@ -565,11 +604,19 @@ class InMemoryWorkQueue:
             job_id=str(data["job_id"]),
             trace_headers=dict(data.get("trace_headers") or {}),
             raw_payload=raw,
+            attempt=int(data.get("attempt", 1)),
         )
 
     async def ack_batch_job(self, raw_payload: str) -> None:
         if raw_payload in self._batch_processing:
             self._batch_processing.remove(raw_payload)
+
+    async def requeue_batch_job(self, envelope: BatchQueueEnvelope) -> None:
+        await self.ack_batch_job(envelope.raw_payload)
+        data = json.loads(envelope.raw_payload)
+        data["attempt"] = envelope.attempt + 1
+        self._batch_pending.appendleft(json.dumps(data, separators=(",", ":")))
+        self._batch_event.set()
 
     async def requeue_processing_jobs(self) -> int:
         moved = 0
@@ -587,16 +634,23 @@ class InMemoryWorkQueue:
         *,
         timeout: float = 45.0,
     ) -> BrowserTaskResponse:
-        reply_q = self._browser_results.setdefault(task.task_id, asyncio.Queue(maxsize=1))
-        await self._browser_pending.put(task)
-        try:
-            return await asyncio.wait_for(reply_q.get(), timeout=timeout)
-        except TimeoutError as exc:
-            raise TimeoutError(
-                f"Remote browser worker timed out after {timeout:.1f}s for task {task.task_id}"
-            ) from exc
-        finally:
-            self._browser_results.pop(task.task_id, None)
+        if self._browser_inflight_semaphore.locked():
+            raise BrowserCapacityError(
+                "Remote browser rendering queue is at capacity. Please try again later."
+            )
+        async with self._browser_inflight_semaphore:
+            if task.deadline is None:
+                task = task.model_copy(update={"deadline": time.time() + timeout})
+            reply_q = self._browser_results.setdefault(task.task_id, asyncio.Queue(maxsize=1))
+            await self._browser_pending.put(task)
+            try:
+                return await asyncio.wait_for(reply_q.get(), timeout=timeout)
+            except TimeoutError as exc:
+                raise TimeoutError(
+                    f"Remote browser worker timed out after {timeout:.1f}s for task {task.task_id}"
+                ) from exc
+            finally:
+                self._browser_results.pop(task.task_id, None)
 
     async def pop_browser_task(self, timeout: float = 2.0) -> BrowserTaskRequest | None:
         try:
@@ -633,6 +687,15 @@ class InMemoryWorkQueue:
 
     async def remove_heartbeat(self, worker_id: str) -> None:
         self._heartbeats.pop(worker_id, None)
+
+    async def has_heartbeat(self, worker_id: str) -> bool:
+        entry = self._heartbeats.get(worker_id)
+        if entry is None:
+            return False
+        if entry[0] <= time.monotonic():
+            self._heartbeats.pop(worker_id, None)
+            return False
+        return True
 
     async def list_active_workers(self) -> list[dict[str, Any]]:
         now = time.monotonic()

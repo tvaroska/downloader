@@ -170,8 +170,11 @@ def test_ratelimit_ignores_xff_when_client_is_none(
     cfg = Settings()
     assert mw._resolve_client_ip(fake_request, cfg) == "fallback-peer"
 
+    from limits.storage import MemoryStorage as SyncMemoryStorage
+
     bad_limiter = MagicMock()
-    bad_limiter._storage = MagicMock()
+    bad_limiter._storage_uri = "memory://"
+    bad_limiter._storage = MagicMock(spec=SyncMemoryStorage)
     bad_limiter._storage.reset = MagicMock(side_effect=RuntimeError("storage reset boom"))
     caplog.set_level(logging.DEBUG, logger="downloader.ratelimit_middleware")
     reset_rate_limiter(bad_limiter)

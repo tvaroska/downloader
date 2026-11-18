@@ -11,7 +11,7 @@
         "type": "stat",
         "targets": [
           {
-            "expr": "downloader_gauge{name=\"health_score\"}",
+            "expr": "downloader_health_score",
             "legendFormat": "Health Score"
           }
         ],
@@ -23,7 +23,7 @@
             "thresholds": {
               "steps": [
                 { "color": "red", "value": 0 },
-                { "color": "yellow", "value": 60 },
+                { "color": "yellow", "value": 50 },
                 { "color": "green", "value": 80 }
               ]
             }

@@ -12,7 +12,7 @@ FastAPI web service for programmatic URL content downloading, DOM article extrac
   - Unifies all headless Chromium pathways (`Accept: application/pdf`, `Accept: image/png|jpeg`, `?output=screenshot|pdf`, `?render=true`, `?wait_for=`, and `POST /render`) under a single `pdf_semaphore` (`PDF_CONCURRENCY`, default `CPUx2`, max `12`) without redundant pre-flight HTTP fetches.
   - Uses single-pass `domcontentloaded` navigation with a bounded non-fatal `networkidle` settle (`min(timeout_ms, 2500)`), eliminating `10s-20s` hangs on tracker-heavy origins (`v0.6.2`).
   - Supports strictly allowlisted declarative Playwright actions (`click`, `fill`, `select`, `scroll`, `wait`, `wait_for_selector`, `hover`, `press`; max `20` steps) with zero arbitrary JavaScript evaluation (`src/downloader/browser/actions.py`).
-  - Fails fast with `HTTP 503` (`Retry-After: 5`) when the browser pool is saturated on explicit PDF/screenshot/`?render=true` requests, while degrading gracefully to static HTML extraction on automatic JS-detection fallbacks.
+  - Fails fast with `HTTP 503` (`service_unavailable`) when the browser pool is saturated on explicit PDF/screenshot/`?render=true` requests, while degrading gracefully to static HTML extraction on automatic JS-detection fallbacks.
   - Automatically recycles Chromium instances after `PDF_MAX_USES_PER_BROWSER=50` renders and scales the pool to zero after `PDF_IDLE_TIMEOUT=600s` idle.
 - **Stateless-First Ethical Crawling (`robots.txt` & `Crawl-delay`)**:
   - Evaluates origin `/robots.txt` (`robots:v2:{scheme}:{netloc}`) before `GET /{url}`, `POST /render`, `POST /batch`, and scheduled executions using configurable `USER_AGENT` (`REST-API-Downloader/1.0` default) when `RESPECT_ROBOTS_TXT=true`.
@@ -30,8 +30,8 @@ FastAPI web service for programmatic URL content downloading, DOM article extrac
   - Opt-in OpenTelemetry (`OTEL_ENABLED=false` default) traces FastAPI, `httpx`, Redis, Playwright, OCR, webhooks, and worker jobs with `trace_id`/`span_id` JSON log correlation, `X-Trace-ID` headers, and W3C `traceparent` queue propagation.
 - **Active Moving-Window Rate Limiting**: Multi-tier limits (fallback order: `RATELIMIT_STORAGE_URI`, then `REDIS_URI`, then `memory://`) with right-to-left trusted-proxy `X-Forwarded-For` parsing (`RATELIMIT_TRUSTED_PROXIES`), separate authenticated vs. unauthenticated buckets, `X-RateLimit-{Limit,Remaining,Reset}` headers, and `HTTP 429` (`rate_limit_exceeded`) with `Retry-After`:
   - Download endpoints (`/{url}`, `/render`): 60 requests/minute
-  - Batch endpoints (`/batch`, `/jobs/*`): 20 requests/minute
-  - Status endpoints (`/health`, `/metrics*`): 200 requests/minute
+  - Batch creation (`/batch`): 20 requests/minute
+  - Status and job-polling endpoints (`/health`, `/metrics*`, `/jobs/*`): 200 requests/minute
   - Default endpoints: 100 requests/minute
 - **Authentication & Production Surface Hardening**:
   - Constant-time API key verification (`secrets.compare_digest` via `Authorization: Bearer <key>` or `X-API-Key: <key>`) across download, render, batch, schedule, and `/metrics*` endpoints when `DOWNLOADER_KEY` is configured (`GET /health` remains unauthenticated for liveness probes).
@@ -48,8 +48,8 @@ Runs out of the box without external dependencies for single-URL downloading, DO
 uv sync
 uv run python run.py
 
-# Plain text article extraction (default)
-curl http://localhost:8000/https://example.com
+# Plain text article extraction (explicit Accept; bare curl sends Accept: */* for raw passthrough)
+curl -H "Accept: text/plain" http://localhost:8000/https://example.com
 
 # Markdown extraction
 curl -H "Accept: text/markdown" http://localhost:8000/https://example.com
@@ -186,7 +186,7 @@ Configured via environment variables (see `.env.example` and [`docs/guides/confi
 ### Logging & Network Security
 - `LOG_JSON_LOGS`: Emit structured JSON logs with top-level `method`, `path`, `status_code`, and optional `trace_id`/`span_id` on `uvicorn.access` (default: `false`; set `true` in production)
 - `SSRF_BLOCK_PRIVATE_IPS`: Block private/reserved IPs across DNS-pinned sockets, redirects, webhooks, `robots.txt`, and Playwright requests (default: `true`)
-- `CORS_ALLOWED_ORIGINS`: Comma-separated origins (default: `http://localhost:3000,http://localhost:8080` for localhost only; set explicitly in production)
+- `CORS_ALLOWED_ORIGINS`: Comma-separated origins (default: `http://localhost:3000,http://localhost:8080,http://127.0.0.1:3000,http://127.0.0.1:8080` for localhost only; set explicitly in production)
 
 ## Testing
 

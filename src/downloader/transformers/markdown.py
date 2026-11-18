@@ -12,6 +12,7 @@ from markdownify import ATX, MarkdownConverter
 from .common import extract_main_content_node
 
 logger = logging.getLogger(__name__)
+_MULTI_NEWLINE_RE = re.compile(r"\n\s*\n\s*\n+")
 
 
 class ContentMarkdownConverter(MarkdownConverter):
@@ -40,5 +41,5 @@ def html_to_markdown(html: str | bytes | BeautifulSoup | Tag) -> str:
         strip=["script", "style"],
     )
     markdown: str = converter.convert_soup(content_source)
-    markdown = re.sub(r"\n\s*\n\s*\n+", "\n\n", markdown)
+    markdown = _MULTI_NEWLINE_RE.sub("\n\n", markdown)
     return markdown.strip()

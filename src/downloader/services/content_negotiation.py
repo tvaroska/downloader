@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from urllib.parse import quote, urlsplit, urlunsplit
+
 FORMAT_MIME_SPECS: tuple[tuple[str, str, tuple[str, ...]], ...] = (
     ("text", "text/plain", ("text/plain",)),
     ("html", "text/html", ("text/html",)),
@@ -56,3 +58,42 @@ def parse_accept_headers(accept_headers: str | list[str] | None) -> list[str]:
                 unique_formats.append(fmt)
 
     return unique_formats
+
+
+def sanitize_original_url_header(url: str) -> str:
+    """Ensure an `X-Original-URL` header value is ASCII-safe for Starlette Latin-1 encoding."""
+    if url.isascii():
+        return url
+    parsed = urlsplit(url)
+    host = parsed.hostname or ""
+    if host and not host.isascii():
+        try:
+            ascii_host = host.encode("idna").decode("ascii")
+        except UnicodeError:
+            ascii_host = quote(host, safe=".-_:")
+    else:
+        ascii_host = host
+    host_part = f"[{ascii_host}]" if ":" in ascii_host else ascii_host
+    try:
+        port = parsed.port
+    except ValueError:
+        port = None
+    port_part = f":{port}" if port is not None else ""
+    userinfo = ""
+    if parsed.username is not None:
+        user = quote(parsed.username, safe="")
+        userinfo = (
+            f"{user}:{quote(parsed.password, safe='')}@"
+            if parsed.password is not None
+            else f"{user}@"
+        )
+    netloc = f"{userinfo}{host_part}{port_part}" if ascii_host else parsed.netloc
+    return urlunsplit(
+        (
+            parsed.scheme,
+            netloc,
+            quote(parsed.path, safe="/:@!$&'()*+,;=-._~%"),
+            quote(parsed.query, safe="/?:@!$&'()*+,;=-._~%"),
+            quote(parsed.fragment, safe="/?:@!$&'()*+,;=-._~%"),
+        )
+    )

@@ -9,7 +9,7 @@ import re
 import socket
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
-from urllib.parse import urlparse, urlsplit
+from urllib.parse import quote, urlsplit, urlunsplit
 
 from .config import Settings, get_settings
 
@@ -92,6 +92,14 @@ def format_origin_url(scheme: str, host: str, port: int) -> str:
     return f"{scheme}://{host_part}" if is_default else f"{scheme}://{host_part}:{port}"
 
 
+def origin_key(url: str) -> str:
+    """Return canonical `scheme://host[:port]` origin key without userinfo or trailing dots."""
+    origin = canonical_origin(url)
+    if origin is None:
+        raise URLValidationError(f"Invalid URL for origin key: {url}")
+    return format_origin_url(*origin)
+
+
 def canonical_host(domain_or_url: str) -> str:
     """Extract canonical lowercase hostname stripped of scheme, userinfo, port, and trailing dot."""
     raw = domain_or_url.strip()
@@ -124,35 +132,92 @@ def redact_url_for_log(url: str) -> str:
     return f"{origin}{path}"
 
 
-def _parse_and_normalize_url(url: str) -> tuple[str, str, int | None]:
-    """Normalize and validate URL syntax, returning `(normalized_url, hostname, port)`."""
+def _encode_ascii_host(raw_host: str) -> str:
+    """Punycode IDN hostnames and validate allowed ASCII hostname characters."""
+    ascii_host = raw_host
+    if not raw_host.isascii():
+        try:
+            ascii_host = raw_host.encode("idna").decode("ascii")
+        except UnicodeError as exc:
+            raise URLValidationError("Invalid hostname format") from exc
+    if not re.match(r"^[a-zA-Z0-9._:-]+$", ascii_host):
+        raise URLValidationError("Invalid hostname format")
+    return ascii_host
+
+
+def _build_canonical_ascii_url(
+    scheme: str,
+    parsed: object,
+    ascii_host: str,
+    port: int | None,
+) -> str:
+    """Reconstruct an ASCII-safe URL with percent-encoded userinfo, path, query, and fragment."""
+    from urllib.parse import SplitResult
+
+    assert isinstance(parsed, SplitResult)
+    userinfo = ""
+    if parsed.username is not None:
+        user = quote(parsed.username, safe="")
+        userinfo = (
+            f"{user}:{quote(parsed.password, safe='')}@"
+            if parsed.password is not None
+            else f"{user}@"
+        )
+    host_part = f"[{ascii_host}]" if ":" in ascii_host else ascii_host
+    port_part = f":{port}" if port is not None else ""
+    netloc = f"{userinfo}{host_part}{port_part}"
+    return urlunsplit(
+        (
+            scheme,
+            netloc,
+            quote(parsed.path, safe="/:@!$&'()*+,;=-._~%"),
+            quote(parsed.query, safe="/?:@!$&'()*+,;=-._~%"),
+            quote(parsed.fragment, safe="/?:@!$&'()*+,;=-._~%"),
+        )
+    )
+
+
+def _validate_raw_url_string(url: str) -> str:
+    """Validate raw URL string for emptiness, control chars, whitespace, and backslashes."""
     if not url or not isinstance(url, str):
         raise URLValidationError("URL must be a non-empty string")
-
+    if any(ord(ch) < 0x20 or ord(ch) == 0x7F for ch in url):
+        raise URLValidationError("URL must not contain control characters")
     normalized = url.strip()
+    if not normalized:
+        raise URLValidationError("URL must be a non-empty string")
+    if any(ch.isspace() or ch == "\\" for ch in normalized):
+        raise URLValidationError("URL must not contain whitespace or backslashes")
     if not re.match(r"^[a-zA-Z][a-zA-Z0-9+.-]*://", normalized):
-        normalized = f"http://{normalized}"
+        return f"http://{normalized}"
+    return normalized
+
+
+def _parse_and_normalize_url(url: str) -> tuple[str, str, int | None]:
+    """Normalize and validate URL syntax, returning `(ascii_canonical_url, hostname, port)`."""
+    normalized = _validate_raw_url_string(url)
 
     try:
-        parsed = urlparse(normalized)
+        parsed = urlsplit(normalized)
     except ValueError as exc:
         raise URLValidationError(f"Invalid URL format: {exc}") from exc
 
-    if parsed.scheme == "file":
+    scheme = parsed.scheme.lower()
+    if scheme == "file":
         raise URLValidationError("Access to local file system via file:// URLs is not allowed")
-    if parsed.scheme not in ("http", "https"):
+    if scheme not in ("http", "https"):
         raise URLValidationError("URL must use http or https scheme")
     if not parsed.hostname:
         raise URLValidationError("URL must have a valid hostname")
-    if not re.match(r"^[a-zA-Z0-9._:-]+$", parsed.hostname):
-        raise URLValidationError("Invalid hostname format")
 
+    ascii_host = _encode_ascii_host(parsed.hostname)
     try:
         port = parsed.port
     except ValueError as exc:
         raise URLValidationError(f"Invalid URL port: {exc}") from exc
 
-    return normalized, parsed.hostname, port
+    canonical_url = _build_canonical_ascii_url(scheme, parsed, ascii_host, port)
+    return canonical_url, ascii_host, port
 
 
 def _parse_ipv4_part(part: str) -> int | None:

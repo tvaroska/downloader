@@ -118,6 +118,7 @@ def _offline_fixture_dns(request: pytest.FixtureRequest, monkeypatch: pytest.Mon
     orig_getaddrinfo = socket.getaddrinfo
     orig_anyio_connect_tcp = anyio.connect_tcp
     orig_create_connection = socket.create_connection
+    orig_loop_create_connection = asyncio.BaseEventLoop.create_connection
 
     monkeypatch.setattr(
         socket,
@@ -144,8 +145,26 @@ def _offline_fixture_dns(request: pytest.FixtureRequest, monkeypatch: pytest.Mon
             )
         return orig_create_connection(address, *args, **kwargs)
 
+    async def _guarded_loop_create_connection(
+        self: asyncio.BaseEventLoop,
+        protocol_factory: Any,
+        host: Any = None,
+        port: Any = None,
+        *args: Any,
+        **kwargs: Any,
+    ):
+        if host is not None and not _is_loopback_target(host):
+            raise OSError(
+                errno.ENETUNREACH,
+                f"Network is unreachable (offline fixture guard blocked {host}:{port})",
+            )
+        return await orig_loop_create_connection(
+            self, protocol_factory, host, port, *args, **kwargs
+        )
+
     monkeypatch.setattr(anyio, "connect_tcp", _guarded_connect_tcp)
     monkeypatch.setattr(socket, "create_connection", _guarded_create_connection)
+    monkeypatch.setattr(asyncio.BaseEventLoop, "create_connection", _guarded_loop_create_connection)
 
 
 def _apply_item_tier_and_timeout(rootpath: Any, item: Any) -> None:

@@ -15,44 +15,7 @@ from downloader.job_manager import (
     cleanup_job_manager,
     get_job_manager,
 )
-
-# =============================================================================
-# Mock Classes
-# =============================================================================
-
-
-class MockPipeline:
-    """Mock Redis pipeline for transaction testing."""
-
-    def __init__(self):
-        self.watch = AsyncMock()
-        self.multi = MagicMock()  # multi() is not async
-        self.execute = AsyncMock(return_value=[True, True])
-        self.setex = AsyncMock()
-
-    async def __aenter__(self):
-        return self
-
-    async def __aexit__(self, exc_type, exc_val, exc_tb):
-        pass
-
-
-class MockPipelineWithWatchError(MockPipeline):
-    """Pipeline that raises WatchError for retry testing."""
-
-    def __init__(self, fail_count=1):
-        super().__init__()
-        self.fail_count = fail_count
-        self.attempt = 0
-
-        async def _execute():
-            self.attempt += 1
-            if self.attempt <= self.fail_count:
-                raise redis.WatchError("Concurrent modification")
-            return [True, True]
-
-        self.execute = AsyncMock(side_effect=_execute)
-
+from tests.fixtures.mock_fixtures import MockPipeline
 
 # =============================================================================
 # Fixtures
@@ -95,6 +58,49 @@ async def job_manager_with_pool(mock_redis_client, mock_connection_pool):
     manager.redis_client = mock_redis_client
     manager.connection_pool = mock_connection_pool
     yield manager
+
+
+def _make_kv_job_manager() -> tuple[JobManager, AsyncMock, AsyncMock]:
+    """Create a JobManager backed by an in-memory transactional KV stub."""
+    kv: dict[str, str] = {}
+
+    class _Pipe:
+        def __init__(self) -> None:
+            self._ops: list[tuple[str, str]] = []
+
+        async def __aenter__(self) -> "_Pipe":
+            return self
+
+        async def __aexit__(self, *_args: object) -> None:
+            return None
+
+        async def watch(self, _key: str) -> None:
+            return None
+
+        def multi(self) -> None:
+            return None
+
+        async def setex(self, key: str, _ttl: int, value: str) -> None:
+            self._ops.append((key, value))
+
+        async def execute(self) -> list[bool]:
+            for k, v in self._ops:
+                kv[k] = v
+            return [True] * len(self._ops)
+
+    client = AsyncMock()
+    client.get = AsyncMock(side_effect=lambda k: kv.get(k))
+    client.setex = AsyncMock(side_effect=lambda k, _ttl, v: kv.__setitem__(k, v))
+    client.pipeline = MagicMock(side_effect=lambda **_kw: _Pipe())
+    client.close = AsyncMock()
+
+    pool = AsyncMock()
+    pool.disconnect = AsyncMock()
+
+    manager = JobManager(redis_url="redis://localhost:6379")
+    manager.redis_client = client
+    manager.connection_pool = pool
+    return manager, client, pool
 
 
 class TestJobManager:
@@ -329,6 +335,38 @@ class TestJobManagerConnection:
         await manager.disconnect()
 
         assert len(manager._background_tasks) == 0
+
+    @pytest.mark.asyncio
+    async def test_disconnect_with_real_background_job(self):
+        """Test disconnect cancels real start_background_job tasks and closes pool."""
+        manager, client, pool = _make_kv_job_manager()
+
+        job1 = await manager.create_job({"urls": [{"url": "https://example.com/1"}]})
+        job2 = await manager.create_job({"urls": [{"url": "https://example.com/2"}]})
+        started = asyncio.Event()
+        gate = asyncio.Event()
+
+        async def slow_processor(_job_id: str):
+            started.set()
+            await gate.wait()
+            return [], {}
+
+        t1 = await manager.start_background_job(job1, slow_processor)
+        t2 = await manager.start_background_job(job2, slow_processor)
+        await started.wait()
+        await asyncio.sleep(0.01)
+
+        await manager.disconnect()
+
+        assert t1.done()
+        assert t2.done()
+        assert len(manager._background_tasks) == 0
+        client.close.assert_awaited_once()
+        pool.disconnect.assert_awaited_once()
+        info1 = await manager.get_job_info(job1)
+        info2 = await manager.get_job_info(job2)
+        assert info1 is not None and info1.status == JobStatus.CANCELLED
+        assert info2 is not None and info2.status == JobStatus.CANCELLED
 
 
 # =============================================================================
@@ -700,6 +738,79 @@ class TestJobManagerBackgroundLifecycle:
 
         # Task should be cleaned up after completion
         assert job_id not in job_manager._background_tasks
+
+    @pytest.mark.asyncio
+    async def test_result_blob_reports_completed_and_duration(self):
+        """Stored JobResult must report status=completed and non-zero total_duration (R9)."""
+        manager, _, _ = _make_kv_job_manager()
+
+        job_id = await manager.create_job({"urls": [{"url": "https://example.com"}]})
+
+        async def processor(_jid: str):
+            await asyncio.sleep(0.02)
+            return [{"url": "https://example.com", "success": True}], {
+                "total_requests": 1,
+                "total_duration": 0.42,
+            }
+
+        task = await manager.start_background_job(job_id, processor)
+        await task
+
+        result = await manager.get_job_results(job_id)
+        assert result is not None
+        assert result.status == JobStatus.COMPLETED
+        assert result.total_duration == pytest.approx(0.42)
+        assert result.completed_at is not None
+
+    @pytest.mark.asyncio
+    async def test_progress_update_does_not_resurrect_cancelled_job(self):
+        """Non-terminal or later status updates cannot overwrite a terminal CANCELLED state (R10)."""
+        manager, _, _ = _make_kv_job_manager()
+
+        job_id = await manager.create_job({"urls": [{"url": "https://example.com"}]})
+        await manager.update_job_status(job_id, JobStatus.RUNNING, progress=10)
+        await manager.update_job_status(job_id, JobStatus.CANCELLED)
+        await manager.update_job_status(job_id, JobStatus.RUNNING, progress=50, processed_urls=1)
+        await manager.update_job_status(job_id, JobStatus.COMPLETED, progress=100)
+
+        info = await manager.get_job_info(job_id)
+        assert info is not None
+        assert info.status == JobStatus.CANCELLED
+        assert info.progress == 10
+
+    @pytest.mark.asyncio
+    async def test_cancel_during_webhook_keeps_completed(self):
+        """Cancelling while the completion webhook is in-flight keeps status COMPLETED (R10)."""
+        manager, _, _ = _make_kv_job_manager()
+
+        job_id = await manager.create_job({"urls": [{"url": "https://example.com"}]})
+        req = MagicMock()
+        req.webhook_url = "https://hooks.example.com/batch"
+        webhook_started = asyncio.Event()
+        release_webhook = asyncio.Event()
+
+        async def _slow_webhook(*_args, **_kwargs):
+            webhook_started.set()
+            await release_webhook.wait()
+
+        async def _processor(_jid: str, _req):
+            return [{"url": "https://example.com", "success": True}], {"total_duration": 0.1}
+
+        with patch(
+            "downloader.services.batch_processor.notify_batch_webhook",
+            new=AsyncMock(side_effect=_slow_webhook),
+        ):
+            task = await manager.start_background_job(job_id, _processor, req)
+            await webhook_started.wait()
+            cancelled = await manager.cancel_job(job_id)
+            assert cancelled is False
+            release_webhook.set()
+            await task
+
+        info = await manager.get_job_info(job_id)
+        assert info is not None
+        assert info.status == JobStatus.COMPLETED
+        assert info.results_available is True
 
 
 # =============================================================================

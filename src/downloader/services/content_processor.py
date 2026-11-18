@@ -14,7 +14,7 @@ from ..browser.actions import BrowserAction, BrowserActionError
 from ..content_converter import (
     SelectorTimeoutError,
     convert_content,
-    should_use_playwright_fallback,
+    run_in_html_executor,
     should_use_playwright_for_html,
 )
 from ..content_encoding import is_text_convertible_content_type, resolve_charset_and_decode
@@ -296,26 +296,6 @@ async def _maybe_convert_ocr(
     return None
 
 
-async def _maybe_empty_body_fallback(
-    req: ConversionRequest,
-    deps: ConversionDeps,
-    converted: str,
-    payload: tuple[bytes, str],
-    fmt: Literal["text", "markdown"],
-) -> str:
-    raw_content, content_type = payload
-    if converted.strip() or not should_use_playwright_fallback(req.url, raw_content, content_type):
-        return converted
-    try:
-        fallback = await deps.renderer.convert_fallback(req.url, fmt)
-        return fallback if fallback is not None else converted
-    except (URLValidationError, ContentTooLargeError, ContentConversionError):
-        raise
-    except (PDFGeneratorError, RuntimeError, OSError, TimeoutError) as exc:
-        logger.warning(f"Playwright {fmt} auto-fallback failed for {req.url}: {exc}")
-        return converted
-
-
 async def _force_render_text_or_markdown(
     req: ConversionRequest,
     deps: ConversionDeps,
@@ -337,7 +317,7 @@ async def _force_render_text_or_markdown(
             req.metadata["content_type"] if req.metadata is not None else "text/html; charset=utf-8"
         )
         orig_size = req.metadata["size"] if req.metadata is not None else len(rendered_html)
-        converted = convert_content(rendered_html, "text/html", fmt)
+        converted = await run_in_html_executor(convert_content, rendered_html, "text/html", fmt)
         return ConversionResult(
             body=converted.encode("utf-8"),
             media_type=media_type,
@@ -366,7 +346,9 @@ async def _force_render_text_or_markdown(
         if req.content is None and deps.http_fetcher is None:
             raise
         content, metadata = await _require_http_payload(req, deps)
-        converted = convert_content(content, metadata["content_type"], fmt)
+        converted = await run_in_html_executor(
+            convert_content, content, metadata["content_type"], fmt
+        )
         return ConversionResult(
             body=converted.encode("utf-8"),
             media_type=media_type,
@@ -379,6 +361,28 @@ async def _force_render_text_or_markdown(
             original_content_type=metadata["content_type"],
             rendered_with_js=False,
         )
+
+
+async def _try_auto_fallback_text_or_markdown(
+    req: ConversionRequest,
+    deps: ConversionDeps,
+    content: bytes,
+    content_type: str,
+    fmt: Literal["text", "markdown"],
+) -> str | None:
+    if req.force_render or "html" not in content_type.lower():
+        return None
+    if not await run_in_html_executor(
+        should_use_playwright_for_html, req.url, content, content_type
+    ):
+        return None
+    try:
+        return await deps.renderer.convert_fallback(req.url, fmt)
+    except (URLValidationError, ContentTooLargeError, ContentConversionError):
+        raise
+    except (PDFGeneratorError, RuntimeError, OSError, TimeoutError) as exc:
+        logger.warning(f"Playwright {fmt} auto-fallback failed for {req.url}: {exc}")
+        return None
 
 
 async def _convert_text_or_markdown(
@@ -397,7 +401,7 @@ async def _convert_text_or_markdown(
             req.metadata["content_type"] if req.metadata is not None else "text/html; charset=utf-8"
         )
         orig_size = req.metadata["size"] if req.metadata is not None else len(req.content)
-        converted = convert_content(req.content, "text/html", fmt)
+        converted = await run_in_html_executor(convert_content, req.content, "text/html", fmt)
         return ConversionResult(
             body=converted.encode("utf-8"),
             media_type=media_type,
@@ -413,7 +417,9 @@ async def _convert_text_or_markdown(
 
     if req.degraded_force_render and not req.force_ocr:
         content, metadata = await _require_http_payload(req, deps)
-        converted = convert_content(content, metadata["content_type"], fmt)
+        converted = await run_in_html_executor(
+            convert_content, content, metadata["content_type"], fmt
+        )
         return ConversionResult(
             body=converted.encode("utf-8"),
             media_type=media_type,
@@ -438,15 +444,20 @@ async def _convert_text_or_markdown(
     if ocr_res is not None:
         return ocr_res
 
-    converted = convert_content(content, metadata["content_type"], fmt)
-    if not req.force_render and "html" in metadata["content_type"].lower():
-        converted = await _maybe_empty_body_fallback(
-            req, deps, converted, (content, metadata["content_type"]), fmt
+    is_html = "html" in metadata["content_type"].lower()
+    fallback = await _try_auto_fallback_text_or_markdown(
+        req, deps, content, metadata["content_type"], fmt
+    )
+    if fallback is not None:
+        final_text = fallback
+        rendered_flag: bool | None = True
+    else:
+        final_text = await run_in_html_executor(
+            convert_content, content, metadata["content_type"], fmt
         )
-
-    rendered_flag: bool | None = False if req.force_render else None
+        rendered_flag = False if (req.force_render or is_html) else None
     return ConversionResult(
-        body=converted.encode("utf-8"),
+        body=final_text.encode("utf-8"),
         media_type=media_type,
         headers=_build_conversion_headers(
             original_url=metadata["url"],
@@ -582,7 +593,9 @@ async def _convert_html(req: ConversionRequest, deps: ConversionDeps) -> Convers
     if (
         "html" in metadata["content_type"].lower()
         and not req.force_render
-        and should_use_playwright_for_html(req.url, content, metadata["content_type"])
+        and await run_in_html_executor(
+            should_use_playwright_for_html, req.url, content, metadata["content_type"]
+        )
     ):
         try:
             rendered = await render_html_with_metrics(

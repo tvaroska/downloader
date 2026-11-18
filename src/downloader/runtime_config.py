@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from typing import Literal
 
-from pydantic import Field, model_validator
+from pydantic import AliasChoices, Field, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -21,16 +21,18 @@ class OCRConfig(BaseSettings):
         default=15.0,
         ge=1.0,
         le=120.0,
+        validation_alias=AliasChoices("OCR_TIMEOUT", "OCR_TIMEOUT_SECONDS"),
         description="Maximum time in seconds for a single Tesseract OCR pass",
     )
     max_image_pixels: int = Field(
         default=25_000_000,
         ge=100_000,
         le=200_000_000,
+        validation_alias=AliasChoices("OCR_MAX_IMAGE_PIXELS", "OCR_MAX_PIXELS"),
         description="Pillow pixel cap to guard against decompression bombs",
     )
 
-    model_config = SettingsConfigDict(env_prefix="OCR_")
+    model_config = SettingsConfigDict(env_prefix="OCR_", populate_by_name=True, extra="ignore")
 
 
 class WebhookConfig(BaseSettings):
@@ -41,6 +43,7 @@ class WebhookConfig(BaseSettings):
         default=10.0,
         ge=1.0,
         le=60.0,
+        validation_alias=AliasChoices("WEBHOOK_TIMEOUT", "WEBHOOK_TIMEOUT_SECONDS"),
         description="HTTP request timeout in seconds for each webhook delivery attempt",
     )
     max_retries: int = Field(
@@ -56,7 +59,7 @@ class WebhookConfig(BaseSettings):
         description="Base exponential backoff delay in seconds between retries",
     )
 
-    model_config = SettingsConfigDict(env_prefix="WEBHOOK_")
+    model_config = SettingsConfigDict(env_prefix="WEBHOOK_", populate_by_name=True, extra="ignore")
 
 
 class ShutdownConfig(BaseSettings):
@@ -69,7 +72,7 @@ class ShutdownConfig(BaseSettings):
         description="Maximum seconds to wait for active requests and jobs during shutdown",
     )
 
-    model_config = SettingsConfigDict(env_prefix="SHUTDOWN_")
+    model_config = SettingsConfigDict(env_prefix="SHUTDOWN_", extra="ignore")
 
 
 class WorkerConfig(BaseSettings):
@@ -112,10 +115,13 @@ class WorkerConfig(BaseSettings):
         default=45.0,
         ge=5.0,
         le=180.0,
+        validation_alias=AliasChoices(
+            "WORKER_REMOTE_BROWSER_TIMEOUT", "WORKER_BROWSER_TASK_TIMEOUT"
+        ),
         description="Timeout in seconds awaiting a remote worker browser response",
     )
 
-    model_config = SettingsConfigDict(env_prefix="WORKER_", populate_by_name=True)
+    model_config = SettingsConfigDict(env_prefix="WORKER_", populate_by_name=True, extra="ignore")
 
     @model_validator(mode="after")
     def validate_heartbeat_ttl_exceeds_interval(self) -> WorkerConfig:
@@ -153,4 +159,4 @@ class TelemetryConfig(BaseSettings):
         description="Also emit spans to stdout via ConsoleSpanExporter (useful for local debugging)",
     )
 
-    model_config = SettingsConfigDict(env_prefix="OTEL_")
+    model_config = SettingsConfigDict(env_prefix="OTEL_", extra="ignore")

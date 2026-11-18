@@ -247,9 +247,7 @@ class TestHTMLRenderingE2E:
                 print(f"\n  {test_case['description']}: X-Rendered-With-JS = {rendered_with_js} ✓")
 
             except (httpx.ConnectError, httpx.TimeoutException) as e:
-                # If connection fails to real URL, skip this test case
-                print(f"\n  {test_case['description']}: Skipped (connection error: {e})")
-                pytest.skip(f"Could not connect to {url}: {e}")
+                pytest.fail(f"Could not connect to {url}: {e}")
 
 
 @pytest.mark.e2e

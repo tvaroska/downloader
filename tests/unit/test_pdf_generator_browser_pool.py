@@ -39,7 +39,6 @@ class TestPDFGeneratorBrowserPool:
         browser.new_context.assert_called_once()
         context.new_page.assert_called_once()
         page.goto.assert_called_once()
-        page.wait_for_load_state.assert_called_once()
         page.pdf.assert_called_once()
         context.close.assert_called_once()
         pool_instance.release_browser.assert_called_once_with(browser)

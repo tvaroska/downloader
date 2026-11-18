@@ -371,7 +371,10 @@ class TestTrackBAuthDocsRateLimitAndSSRF:
         prev_settings = getattr(app.state, "settings", None)
         try:
             with TestClient(app) as client:
-                app.state.settings = Settings(environment="production")
+                app.state.settings = Settings(
+                    environment="production",
+                    auth=AuthConfig(api_key="test-prod-key"),
+                )
                 prod_resp = client.get(doc_path)
                 assert prod_resp.status_code == 404
                 assert client.get("/health").status_code == 200
@@ -533,6 +536,121 @@ class TestTrackBAuthDocsRateLimitAndSSRF:
     def test_ssrf_ip_literal_and_hostname_variants_blocked(self, blocked_url: str) -> None:
         with pytest.raises(URLValidationError):
             validate_url(blocked_url)
+
+    def test_rotating_leftmost_xff_hop_stays_in_one_bucket(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.delenv("REDIS_URI", raising=False)
+        reload_settings()
+
+        prev_settings = getattr(app.state, "settings", None)
+        test_settings = Settings(
+            auth=AuthConfig(api_key="valid-token"),
+            ratelimit=RateLimitConfig(
+                enabled=True,
+                default_limit="2/minute",
+                download_limit="2/minute",
+                trusted_proxies=["127.0.0.1", "10.0.0.0/8"],
+            ),
+        )
+        mock_http = AsyncMock()
+        mock_http.download.return_value = (
+            b"<html>ok</html>",
+            {
+                "url": "https://example.com",
+                "status_code": 200,
+                "content_type": "text/html",
+                "size": 15,
+                "headers": {"content-type": "text/html"},
+            },
+        )
+        mock_robots = AsyncMock()
+        mock_robots.check_allowed.return_value = None
+
+        app.dependency_overrides[get_http_client] = lambda: mock_http
+        app.dependency_overrides[get_robots_checker] = lambda: mock_robots
+        try:
+            with TestClient(app, client=("127.0.0.1", 50000)) as trusted_client:
+                app.state.settings = test_settings
+                r1 = trusted_client.get(
+                    "/https://example.com",
+                    headers={"X-Forwarded-For": "198.51.100.1, 203.0.113.5, 10.0.0.2"},
+                )
+                r2 = trusted_client.get(
+                    "/https://example.com",
+                    headers={"X-Forwarded-For": "198.51.100.2, 203.0.113.5, 10.0.0.2"},
+                )
+                r3 = trusted_client.get(
+                    "/https://example.com",
+                    headers={"X-Forwarded-For": "198.51.100.3, 203.0.113.5, 10.0.0.2"},
+                )
+                assert r1.status_code == 401
+                assert r2.status_code == 401
+                assert r3.status_code == 429
+        finally:
+            if prev_settings is None:
+                if hasattr(app.state, "settings"):
+                    delattr(app.state, "settings")
+            else:
+                app.state.settings = prev_settings
+            app.dependency_overrides.pop(get_http_client, None)
+            app.dependency_overrides.pop(get_robots_checker, None)
+
+    @pytest.mark.parametrize(
+        "peer_ip, xff_header, expected_ip",
+        [
+            ("127.0.0.1", "198.51.100.99, 203.0.113.5, 10.0.0.2", "203.0.113.5"),
+            ("127.0.0.1", "203.0.113.5:1234, 10.0.0.2:8080", "203.0.113.5"),
+            ("127.0.0.1", "[2001:db8::1]:443, 10.0.0.2", "2001:db8::1"),
+            ("127.0.0.1", "10.0.0.3, 10.0.0.2", "10.0.0.3"),
+            ("198.51.100.77", "203.0.113.5, 10.0.0.2", "198.51.100.77"),
+        ],
+    )
+    def test_resolve_client_ip_table(self, peer_ip: str, xff_header: str, expected_ip: str) -> None:
+        from slowapi import Limiter
+        from slowapi.util import get_remote_address
+
+        from downloader.ratelimit_middleware import RateLimitMiddleware
+
+        cfg = Settings(
+            ratelimit=RateLimitConfig(
+                enabled=True,
+                trusted_proxies=["127.0.0.1", "10.0.0.0/8"],
+            )
+        )
+        with patch("downloader.ratelimit_middleware.get_settings", return_value=cfg):
+            mw = RateLimitMiddleware(MagicMock(), Limiter(key_func=get_remote_address))
+
+        req = MagicMock()
+        req.client = MagicMock(host=peer_ip)
+        req.headers = {"x-forwarded-for": xff_header}
+        assert mw._resolve_client_ip(req, cfg) == expected_ip
+
+    def test_xff_unparsable_hop_is_not_skipped(self) -> None:
+        from slowapi import Limiter
+        from slowapi.util import get_remote_address
+
+        from downloader.ratelimit_middleware import RateLimitMiddleware
+
+        cfg = Settings(
+            ratelimit=RateLimitConfig(
+                enabled=True,
+                trusted_proxies=["127.0.0.1", "10.0.0.0/8"],
+            )
+        )
+        with patch("downloader.ratelimit_middleware.get_settings", return_value=cfg):
+            mw = RateLimitMiddleware(MagicMock(), Limiter(key_func=get_remote_address))
+
+        # Unparsable 'unknown' stops the right-to-left walk without reaching spoofed leftmost IP
+        req_after_trusted = MagicMock()
+        req_after_trusted.client = MagicMock(host="127.0.0.1")
+        req_after_trusted.headers = {"x-forwarded-for": "198.51.100.99, unknown, 10.0.0.2"}
+        assert mw._resolve_client_ip(req_after_trusted, cfg) == "10.0.0.2"
+
+        req_rightmost_bad = MagicMock()
+        req_rightmost_bad.client = MagicMock(host="127.0.0.1")
+        req_rightmost_bad.headers = {"x-forwarded-for": "198.51.100.99, not-an-ip"}
+        assert mw._resolve_client_ip(req_rightmost_bad, cfg) == "127.0.0.1"
 
 
 @pytest.mark.unit

@@ -152,6 +152,15 @@ class ScheduleExecution(BaseModel):
     attempt: int
 
 
+class ScheduleHistory(BaseModel):
+    """Paginated execution history returned by GET /schedules/{id}/history."""
+
+    executions: list[ScheduleExecution] = Field(default_factory=list)
+    total: int = 0
+    limit: int = 20
+    offset: int = 0
+
+
 class HealthStatus(BaseModel):
     """Response from GET /health."""
 

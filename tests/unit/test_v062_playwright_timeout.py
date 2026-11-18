@@ -132,3 +132,27 @@ class TestPlaywrightNavigationResilience:
         mock_page.wait_for_load_state.assert_not_awaited()
         mock_context.close.assert_awaited_once()
         mock_pool.release_browser.assert_awaited_once()
+
+    async def test_pdf_honours_wait_until_without_networkidle_gate(self) -> None:
+        """R52: PDF generation with wait_until=domcontentloaded does not fail on networkidle settle."""
+        from downloader.pdf_generator import PlaywrightPDFGenerator
+
+        _, mock_pool, mock_context, mock_page = _make_mock_playwright()
+        mock_page.wait_for_load_state.side_effect = PlaywrightTimeoutError("tracker still open")
+        mock_page.pdf = AsyncMock(return_value=b"%PDF-1.7 ok")
+
+        gen = PlaywrightPDFGenerator(pool_size=1, wait_until="domcontentloaded", idle_timeout=0.0)
+        gen.pool = mock_pool
+        gen.ensure_started = AsyncMock(return_value=mock_pool)  # type: ignore[method-assign]
+
+        pdf_bytes = await gen.generate_pdf("https://example.com/ad-heavy")
+
+        assert pdf_bytes == b"%PDF-1.7 ok"
+        mock_page.goto.assert_awaited_once_with(
+            "https://example.com/ad-heavy",
+            wait_until="domcontentloaded",
+            timeout=30000,
+        )
+        mock_page.wait_for_load_state.assert_awaited_once_with("networkidle", timeout=2500)
+        mock_context.close.assert_awaited_once()
+        mock_pool.release_browser.assert_awaited_once()

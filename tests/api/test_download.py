@@ -6,9 +6,10 @@ from unittest.mock import AsyncMock, patch
 import pytest
 
 from downloader.dependencies import get_http_client, get_pdf_semaphore
-from downloader.http_client import HTTPClientError, HTTPTimeoutError
+from downloader.http_client import DownloadError, HTTPClientError, HTTPTimeoutError
 from downloader.main import app
 from downloader.pdf_generator import PDFGeneratorError
+from downloader.transformers.ocr import OCRError
 
 
 class TestDownloadEndpoint:
@@ -124,6 +125,11 @@ class TestDownloadEndpoint:
                 404,
                 "http_error",
             ),
+            (OCRError("Corrupt image"), 422, "ocr_error"),
+            (TimeoutError("Operation timed out"), 504, "timeout_error"),
+            (HTTPClientError("Connection refused"), 502, "http_error"),
+            (DownloadError("Generic download error"), 500, "download_error"),
+            (RuntimeError("Unexpected failure"), 500, "internal_error"),
         ],
     )
     def test_download_client_errors(self, api_client, error, expected_status, expected_error_type):
@@ -620,5 +626,42 @@ def test_target_query_string_reaches_http_client(api_client, env_no_auth):
         assert detail["error_type"] == "validation_error"
         assert "page" in detail["error"]
         assert "q" in detail["error"]
+    finally:
+        app.dependency_overrides.pop(get_http_client, None)
+
+
+def test_pdf_of_non_latin1_url_returns_200(api_client, env_no_auth):
+    """Non-Latin-1 URLs are ASCII-canonicalized so X-Original-URL never raises UnicodeEncodeError (`R33`)."""
+    pdf_content = b"%PDF-1.4 non-latin1 ok"
+    with patch(
+        "downloader.pdf_generator.generate_pdf_from_url",
+        return_value=pdf_content,
+    ) as mock_generate_pdf:
+        response = api_client.get(
+            "/https://example.com/%D0%BF%D1%83%D1%82%D1%8C%3Fk=%D0%B7%D0%BD%D0%B0%D1%87%D0%B5%D0%BD%D0%B8%D0%B5",
+            headers={"Accept": "application/pdf"},
+        )
+        assert response.status_code == 200
+        assert response.content == pdf_content
+        assert response.headers["X-Original-URL"].isascii()
+        assert "%D0%BF%D1%83%D1%82%D1%8C" in response.headers["X-Original-URL"]
+        mock_generate_pdf.assert_called_once()
+
+
+@pytest.mark.parametrize("upstream_status", [500, 502, 503, 504])
+def test_upstream_5xx_maps_to_502(api_client, env_no_auth, upstream_status):
+    """Upstream 5xx responses are mapped to HTTP 502 instead of passed through (`R40`)."""
+    mock_client = AsyncMock()
+    mock_client.download.side_effect = HTTPClientError(
+        f"HTTP {upstream_status}: Upstream error",
+        status_code=upstream_status,
+    )
+    app.dependency_overrides[get_http_client] = lambda: mock_client
+    try:
+        response = api_client.get("/https://example.com")
+        assert response.status_code == 502
+        detail = response.json()["detail"]
+        assert detail["success"] is False
+        assert detail["error_type"] == "http_error"
     finally:
         app.dependency_overrides.pop(get_http_client, None)

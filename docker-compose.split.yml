@@ -1,5 +1,8 @@
 # Split API + Worker deployment overlay
 # Usage: docker compose -f docker-compose.yml -f docker-compose.split.yml up -d
+# Note: Only downloader-worker (DEPLOYMENT_MODE=worker) runs an active APScheduler
+# instance with periodic wake-up and a per-run Redis lock (schedule:run_lock:<id>);
+# downloader (DEPLOYMENT_MODE=api) starts its scheduler paused for CRUD-only operations.
 
 services:
   downloader:

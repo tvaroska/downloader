@@ -103,6 +103,41 @@ class TestHTTPStreamingAndRedirectSSRF:
         finally:
             await client.close()
 
+    async def test_body_exactly_at_limit_is_accepted(self) -> None:
+        limit = 1024
+        exact_payload = b"x" * limit
+
+        def stream_handler(request: httpx.Request) -> httpx.Response:
+            return httpx.Response(
+                200,
+                headers={"Content-Type": "text/plain"},
+                stream=_CountingByteStream([exact_payload[:512], exact_payload[512:]]),
+                request=request,
+            )
+
+        def content_length_handler(request: httpx.Request) -> httpx.Response:
+            return httpx.Response(
+                200,
+                headers={"Content-Length": str(limit), "Content-Type": "text/plain"},
+                stream=httpx.ByteStream(exact_payload),
+                request=request,
+            )
+
+        for handler in (stream_handler, content_length_handler):
+            client = HTTPClient(max_download_size=limit)
+            await client.close()
+            client._client = httpx.AsyncClient(
+                transport=httpx.MockTransport(handler),
+                follow_redirects=True,
+                event_hooks={"response": [client._on_response_hook]},
+            )
+            try:
+                content, metadata = await client.download("https://example.com/exact-limit")
+                assert content == exact_payload
+                assert metadata["size"] == limit
+            finally:
+                await client.close()
+
     def test_content_too_large_maps_to_http_413_on_get_url(self, api_client: TestClient) -> None:
         mock_http = AsyncMock()
         mock_http.download.side_effect = ContentTooLargeError(max_size=1024, actual_size=4096)

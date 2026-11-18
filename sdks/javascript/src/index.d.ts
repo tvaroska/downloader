@@ -140,6 +140,31 @@ export interface ScheduleInfo {
   webhook_url?: string | null;
 }
 
+export interface ScheduleExecution {
+  execution_id: string;
+  schedule_id: string;
+  status: string;
+  started_at: string;
+  completed_at?: string | null;
+  duration?: number | null;
+  success: boolean;
+  content_size?: number | null;
+  error_message?: string | null;
+  attempt: number;
+}
+
+export interface ScheduleHistory {
+  executions: ScheduleExecution[];
+  total: number;
+  limit: number;
+  offset: number;
+}
+
+export interface JobCancelResult {
+  success: boolean;
+  message: string;
+}
+
 export interface HealthStatus {
   status: string;
   version: string;
@@ -177,6 +202,11 @@ export declare class DownloaderClient {
   constructor(options: DownloaderClientOptions);
   health(signal?: AbortSignal): Promise<HealthStatus>;
   download(url: string, options?: DownloadOptions): Promise<DownloadResult>;
+  downloadMulti(
+    url: string,
+    formats: Array<OutputFormat | string>,
+    options?: Omit<DownloadOptions, "output" | "format">,
+  ): Promise<Record<string, unknown>>;
   screenshot(
     url: string,
     options?: Omit<DownloadOptions, "output" | "format">,
@@ -193,11 +223,17 @@ export declare class DownloaderClient {
   ): Promise<BatchJobSubmission>;
   getJobStatus(jobId: string, signal?: AbortSignal): Promise<BatchJobStatus>;
   getJobResults(jobId: string, signal?: AbortSignal): Promise<BatchJobResults>;
+  cancelJob(jobId: string, signal?: AbortSignal): Promise<JobCancelResult>;
   waitForBatch(
     jobId: string,
     options?: { pollIntervalMs?: number; timeoutMs?: number; signal?: AbortSignal },
   ): Promise<BatchJobResults>;
   createSchedule(schedule: ScheduleCreateRequest, signal?: AbortSignal): Promise<ScheduleInfo>;
   listSchedules(signal?: AbortSignal): Promise<ScheduleInfo[]>;
+  getSchedule(scheduleId: string, signal?: AbortSignal): Promise<ScheduleInfo>;
+  getScheduleHistory(
+    scheduleId: string,
+    options?: { limit?: number; offset?: number; signal?: AbortSignal },
+  ): Promise<ScheduleHistory>;
   deleteSchedule(scheduleId: string, signal?: AbortSignal): Promise<{ success: boolean }>;
 }

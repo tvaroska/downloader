@@ -9,6 +9,7 @@ from unittest.mock import AsyncMock, patch
 import pytest
 from fastapi import HTTPException, Request
 from fastapi.security import HTTPAuthorizationCredentials
+from pydantic import ValidationError
 
 from downloader.auth import (
     get_api_key,
@@ -16,6 +17,7 @@ from downloader.auth import (
     is_auth_enabled,
     verify_api_key,
 )
+from downloader.config import Settings
 
 
 @pytest.mark.smoke
@@ -168,3 +170,33 @@ class TestGetApiKey:
 
             result = await get_api_key(mock_request, credentials)
             assert result == "test-key"
+
+
+@pytest.mark.smoke
+@pytest.mark.parametrize("blank_key", [None, "", "   "])
+def test_production_without_key_refuses_to_start(
+    monkeypatch: pytest.MonkeyPatch, blank_key: str | None
+) -> None:
+    """Production refuses to start without a non-empty `DOWNLOADER_KEY` unless opted out (`R37`)."""
+    monkeypatch.setenv("ENVIRONMENT", "production")
+    monkeypatch.delenv("AUTH_ALLOW_UNAUTHENTICATED_PRODUCTION", raising=False)
+    if blank_key is None:
+        monkeypatch.delenv("DOWNLOADER_KEY", raising=False)
+    else:
+        monkeypatch.setenv("DOWNLOADER_KEY", blank_key)
+
+    with pytest.raises(ValidationError, match="DOWNLOADER_KEY"):
+        Settings()
+
+    # Explicit opt-out allows unauthenticated production startup
+    monkeypatch.setenv("AUTH_ALLOW_UNAUTHENTICATED_PRODUCTION", "true")
+    opted_out = Settings()
+    assert opted_out.environment == "production"
+    assert is_auth_enabled(opted_out) is False
+
+    # Non-empty key succeeds without opt-out
+    monkeypatch.delenv("AUTH_ALLOW_UNAUTHENTICATED_PRODUCTION", raising=False)
+    monkeypatch.setenv("DOWNLOADER_KEY", "prod-secret-key")
+    prod_settings = Settings()
+    assert prod_settings.environment == "production"
+    assert is_auth_enabled(prod_settings) is True

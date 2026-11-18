@@ -101,6 +101,7 @@ type BatchJobStatus struct {
 	FailedURLs       int     `json:"failed_urls"`
 	ErrorMessage     *string `json:"error_message,omitempty"`
 	ResultsAvailable bool    `json:"results_available"`
+	ExpiresAt        *string `json:"expires_at,omitempty"`
 }
 
 // BatchJobResults is returned by GET /jobs/{job_id}/results.
@@ -112,6 +113,12 @@ type BatchJobResults struct {
 	Summary       map[string]any   `json:"summary"`
 	CreatedAt     string           `json:"created_at"`
 	CompletedAt   string           `json:"completed_at"`
+}
+
+// JobCancelResult is returned by DELETE /jobs/{job_id}.
+type JobCancelResult struct {
+	Success bool   `json:"success"`
+	Message string `json:"message"`
 }
 
 // ScheduleCreateRequest is the payload for POST /schedules.
@@ -138,6 +145,34 @@ type ScheduleInfo struct {
 	CreatedAt      string            `json:"created_at"`
 	NextRunTime    *string           `json:"next_run_time,omitempty"`
 	WebhookURL     *string           `json:"webhook_url,omitempty"`
+}
+
+// ScheduleExecution represents a single execution entry returned by GET /schedules/{id}/history.
+type ScheduleExecution struct {
+	ExecutionID  string   `json:"execution_id"`
+	ScheduleID   string   `json:"schedule_id"`
+	Status       string   `json:"status"`
+	StartedAt    string   `json:"started_at"`
+	CompletedAt  *string  `json:"completed_at,omitempty"`
+	Duration     *float64 `json:"duration,omitempty"`
+	Success      bool     `json:"success"`
+	ContentSize  *int     `json:"content_size,omitempty"`
+	ErrorMessage *string  `json:"error_message,omitempty"`
+	Attempt      int      `json:"attempt"`
+}
+
+// ScheduleHistory is returned by GET /schedules/{id}/history.
+type ScheduleHistory struct {
+	Executions []ScheduleExecution `json:"executions"`
+	Total      int                 `json:"total"`
+	Limit      int                 `json:"limit"`
+	Offset     int                 `json:"offset"`
+}
+
+// ScheduleDeleteResult is returned by DELETE /schedules/{id}.
+type ScheduleDeleteResult struct {
+	Success bool   `json:"success"`
+	Message string `json:"message,omitempty"`
 }
 
 // HealthStatus is returned by GET /health.

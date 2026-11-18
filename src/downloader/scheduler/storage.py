@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+import time
 from typing import TYPE_CHECKING, Any, cast
 
 from ..models.schedule import ScheduleExecution
@@ -28,6 +29,10 @@ class ExecutionStorage:
     def _get_executions_list_key(self, schedule_id: str) -> str:
         return f"schedule:executions:{schedule_id}"
 
+    async def _trim_expired(self, list_key: str) -> None:
+        cutoff = time.time() - self.ttl
+        await cast(Any, self.redis.zremrangebyscore(list_key, "-inf", cutoff))
+
     async def store_execution(self, execution: ScheduleExecution) -> None:
         execution_key = self._get_execution_key(execution.schedule_id, execution.execution_id)
         await self.redis.setex(execution_key, self.ttl, execution.model_dump_json())
@@ -37,6 +42,7 @@ class ExecutionStorage:
             Any,
             self.redis.zadd(list_key, {execution.execution_id: execution.started_at.timestamp()}),
         )
+        await self._trim_expired(list_key)
         await self.redis.expire(list_key, self.ttl)
 
     async def get_executions(
@@ -46,6 +52,7 @@ class ExecutionStorage:
         offset: int = 0,
     ) -> list[ScheduleExecution]:
         list_key = self._get_executions_list_key(schedule_id)
+        await self._trim_expired(list_key)
         execution_ids = await cast(
             Any,
             self.redis.zrevrange(list_key, offset, offset + limit - 1),
@@ -63,6 +70,7 @@ class ExecutionStorage:
 
     async def get_execution_count(self, schedule_id: str) -> int:
         list_key = self._get_executions_list_key(schedule_id)
+        await self._trim_expired(list_key)
         count = await cast(Any, self.redis.zcard(list_key))
         return int(count or 0)
 

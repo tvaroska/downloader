@@ -271,7 +271,7 @@ def test_upstream_4xx_logs_warning_while_5xx_logs_error_f20261118001(
                 "HTTP 503: Service Unavailable", status_code=503
             )
             r503 = client.get("/https://example.com/down")
-            assert r503.status_code == 503
+            assert r503.status_code == 502
             dl_records_503 = [r for r in caplog.records if r.name.startswith("downloader")]
             assert len([r for r in dl_records_503 if r.levelno >= logging.ERROR]) == 1
     finally:

@@ -247,7 +247,7 @@ class TestSSRFProtection:
         with pytest.raises(URLValidationError, match="Invalid hostname format"):
             validate_url("http://host$name.com", settings)
 
-        with pytest.raises(URLValidationError, match="Invalid hostname format"):
+        with pytest.raises(URLValidationError, match="whitespace or backslashes"):
             validate_url("http://host name.com", settings)
 
     def test_url_scheme_validation(self):

@@ -2,11 +2,16 @@
 
 from __future__ import annotations
 
+import asyncio
+import functools
 import logging
+import os
 import re
+import threading
 import time
 from collections import OrderedDict
 from collections.abc import Callable, Sequence
+from concurrent.futures import ThreadPoolExecutor
 from typing import Any, Literal
 from urllib.parse import urlparse
 
@@ -34,6 +39,41 @@ from .validation import EgressPolicy, URLValidationError
 
 logger = logging.getLogger(__name__)
 
+MAX_HTML_PARSE_BYTES = 10 * 1024 * 1024
+
+_html_executor: ThreadPoolExecutor | None = None
+_html_executor_lock = threading.Lock()
+
+
+def _get_html_executor() -> ThreadPoolExecutor:
+    """Return a dedicated bounded thread pool so CPU-bound HTML work never starves DNS lookups."""
+    global _html_executor
+    with _html_executor_lock:
+        if _html_executor is None:
+            workers = max(2, min(4, os.cpu_count() or 2))
+            _html_executor = ThreadPoolExecutor(
+                max_workers=workers,
+                thread_name_prefix="downloader-html",
+            )
+        return _html_executor
+
+
+def shutdown_html_executor() -> None:
+    """Shut down the dedicated HTML thread pool if initialized."""
+    global _html_executor
+    with _html_executor_lock:
+        executor = _html_executor
+        _html_executor = None
+    if executor is not None:
+        executor.shutdown(wait=False, cancel_futures=True)
+
+
+async def run_in_html_executor[T](func: Callable[..., T], *args: Any, **kwargs: Any) -> T:
+    """Run a CPU-bound HTML parsing or conversion function on the bounded HTML executor."""
+    loop = asyncio.get_running_loop()
+    call = functools.partial(func, *args, **kwargs) if kwargs else functools.partial(func, *args)
+    return await loop.run_in_executor(_get_html_executor(), call)
+
 
 class SelectorTimeoutError(Exception):
     """Raised when `wait_for_selector` times out."""
@@ -45,7 +85,7 @@ class SelectorTimeoutError(Exception):
 
 
 class BoundedCache:
-    """A bounded set-like cache with LRU eviction and optional monotonic TTL."""
+    """A thread-safe bounded set-like cache with LRU eviction and optional monotonic TTL."""
 
     def __init__(
         self,
@@ -55,6 +95,7 @@ class BoundedCache:
         self._maxsize = maxsize
         self._ttl = ttl
         self._cache: OrderedDict[str, float] = OrderedDict()
+        self._lock = threading.Lock()
 
     def _resolve_limits(self) -> tuple[int, float | None]:
         max_sz = self._maxsize() if callable(self._maxsize) else self._maxsize
@@ -69,39 +110,43 @@ class BoundedCache:
             self._cache.pop(k, None)
 
     def __contains__(self, key: str) -> bool:
-        max_sz, ttl_s = self._resolve_limits()
-        if max_sz <= 0:
-            return False
-        ts = self._cache.get(key)
-        if ts is None:
-            return False
-        if ttl_s is not None and (time.monotonic() - ts) >= ttl_s:
-            self._cache.pop(key, None)
-            return False
-        self._cache.move_to_end(key)
-        return True
+        with self._lock:
+            max_sz, ttl_s = self._resolve_limits()
+            if max_sz <= 0:
+                return False
+            ts = self._cache.get(key)
+            if ts is None:
+                return False
+            if ttl_s is not None and (time.monotonic() - ts) >= ttl_s:
+                self._cache.pop(key, None)
+                return False
+            self._cache.move_to_end(key)
+            return True
 
     def add(self, key: str) -> None:
-        max_sz, ttl_s = self._resolve_limits()
-        if max_sz <= 0:
-            self._cache.clear()
-            return
-        now = time.monotonic()
-        self._purge_expired(now, ttl_s)
-        self._cache[key] = now
-        self._cache.move_to_end(key)
-        while len(self._cache) > max_sz:
-            self._cache.popitem(last=False)
+        with self._lock:
+            max_sz, ttl_s = self._resolve_limits()
+            if max_sz <= 0:
+                self._cache.clear()
+                return
+            now = time.monotonic()
+            self._purge_expired(now, ttl_s)
+            self._cache[key] = now
+            self._cache.move_to_end(key)
+            while len(self._cache) > max_sz:
+                self._cache.popitem(last=False)
 
     def clear(self) -> None:
-        self._cache.clear()
+        with self._lock:
+            self._cache.clear()
 
     def __len__(self) -> int:
-        max_sz, ttl_s = self._resolve_limits()
-        if max_sz <= 0:
-            return 0
-        self._purge_expired(time.monotonic(), ttl_s)
-        return len(self._cache)
+        with self._lock:
+            max_sz, ttl_s = self._resolve_limits()
+            if max_sz <= 0:
+                return 0
+            self._purge_expired(time.monotonic(), ttl_s)
+            return len(self._cache)
 
 
 def _cache_maxsize() -> int:
@@ -178,45 +223,6 @@ async def _navigate_and_settle(
         )
 
 
-def _evaluate_fallback_soup(url: str, soup: BeautifulSoup, min_text_len: int) -> bool:
-    for ignored in soup(["script", "style", "noscript", "template"]):
-        ignored.decompose()
-
-    body = soup.find("body")
-    if not body or len(body.get_text(strip=True)) < min_text_len:
-        _empty_content_cache.add(url)
-        return False
-
-    if soup.select("main, article, .content, #content, .post, .article-body"):
-        return True
-
-    if soup.select(".error, .not-found, .404, .maintenance, .coming-soon"):
-        _fallback_bypass_cache.add(url)
-        return False
-
-    return True
-
-
-def should_use_playwright_fallback(url: str, content: bytes, content_type: str) -> bool:
-    """Detect whether an empty extraction warrants a Playwright render fallback."""
-    settings = get_settings()
-    if (
-        not settings.content.enable_html_js_rendering
-        or url in _empty_content_cache
-        or url in _fallback_bypass_cache
-        or "html" not in content_type.lower()
-    ):
-        return False
-
-    try:
-        decoded_html, _ = resolve_charset_and_decode(content, content_type)
-        soup = BeautifulSoup(decoded_html, "html.parser")
-        return _evaluate_fallback_soup(url, soup, settings.content.min_body_text_threshold)
-    except (RecursionError, ValueError, TypeError, RuntimeError) as exc:
-        logger.warning(f"Content detection failed for {url}: {exc}")
-        return True
-
-
 def _has_missing_metadata(soup: BeautifulSoup) -> bool:
     """Return True if neither Open Graph nor Twitter Card title+description tags are present."""
     og_title = soup.find("meta", property="og:title")
@@ -228,14 +234,19 @@ def _has_missing_metadata(soup: BeautifulSoup) -> bool:
     return not (has_title and has_description)
 
 
-def _has_js_framework_markers(soup: BeautifulSoup, body_text: str) -> bool:
+def _has_js_framework_markers(
+    soup: BeautifulSoup,
+    body_text: str,
+    *,
+    settings: Settings | None = None,
+) -> bool:
     """Check for React/Vue/Angular root containers accompanied by minimal static body text."""
     react_root = soup.find(id="root")
     vue_app = soup.find(id="app")
     angular_app = soup.find(attrs={"ng-app": True})
     has_framework_marker = react_root is not None or vue_app is not None or angular_app is not None
-    settings = get_settings()
-    has_minimal_content = len(body_text) < settings.content.min_js_framework_content_threshold
+    cfg = settings if settings is not None else get_settings()
+    has_minimal_content = len(body_text) < cfg.content.min_js_framework_content_threshold
     return has_framework_marker and has_minimal_content
 
 
@@ -253,26 +264,56 @@ def _classify_parsed_html_for_js(
 
     body = soup.find("body")
     if not body:
-        _static_html_cache.add(url)
         return False
 
     body_text = body.get_text(" ", strip=True)
     # Server-rendered pages that already carry substantial visible body prose do not
     # need a browser render even if <noscript> contains a generic JS notice or OG tags are absent.
     if len(body_text) > 500:
-        _static_html_cache.add(url)
         return False
 
     visible_text = soup.get_text(" ", strip=True)
-    needs_js = (
+    return (
         bool(_JS_REQUIRED_RE.search(visible_text) or _JS_REQUIRED_RE.search(noscript_text))
-        or _has_js_framework_markers(soup, body_text)
+        or _has_js_framework_markers(soup, body_text, settings=settings)
         or (content_size < 50000 and missing_metadata)
         or _is_js_heavy_domain(url, settings.content.html_js_heavy_domains)
     )
-    if needs_js:
-        _js_heavy_cache.add(url)
-    return needs_js
+
+
+def needs_js_render(
+    url: str,
+    content: bytes,
+    content_type: str,
+    *,
+    settings: Settings | None = None,
+    soup: BeautifulSoup | None = None,
+) -> bool:
+    """Pure decision function: return True if static HTML likely requires JS rendering.
+
+    Shared across all output formats (HTML, Markdown, plain text, multi-format)
+    so SPA/app shells trigger Playwright rendering consistently.
+    """
+    cfg = settings if settings is not None else get_settings()
+    if not cfg.content.enable_html_js_rendering or "html" not in content_type.lower():
+        return False
+
+    if soup is None:
+        if len(content) > MAX_HTML_PARSE_BYTES:
+            return _is_js_heavy_domain(url, cfg.content.html_js_heavy_domains)
+        try:
+            decoded_html, _ = resolve_charset_and_decode(content, content_type)
+            soup = BeautifulSoup(decoded_html, "lxml")
+        except (RecursionError, ValueError, TypeError, RuntimeError) as exc:
+            logger.warning(f"HTML detection failed for {url}: {exc}")
+            return False
+
+    return _classify_parsed_html_for_js(url, soup, len(content), cfg)
+
+
+def should_use_playwright_fallback(url: str, content: bytes, content_type: str) -> bool:
+    """Detect whether static HTML warrants a Playwright render fallback (unified with HTML)."""
+    return should_use_playwright_for_html(url, content, content_type)
 
 
 def should_use_playwright_for_html(url: str, content: bytes, content_type: str) -> bool:
@@ -285,13 +326,12 @@ def should_use_playwright_for_html(url: str, content: bytes, content_type: str) 
     if url in _static_html_cache or "html" not in content_type.lower():
         return False
 
-    try:
-        decoded_html, _ = resolve_charset_and_decode(content, content_type)
-        soup = BeautifulSoup(decoded_html, "html.parser")
-        return _classify_parsed_html_for_js(url, soup, len(content), settings)
-    except (RecursionError, ValueError, TypeError, RuntimeError) as exc:
-        logger.warning(f"HTML detection failed for {url}: {exc}")
-        return False
+    needs_js = needs_js_render(url, content, content_type, settings=settings)
+    if needs_js:
+        _js_heavy_cache.add(url)
+    else:
+        _static_html_cache.add(url)
+    return needs_js
 
 
 async def convert_content_with_playwright_fallback(
@@ -321,7 +361,7 @@ async def convert_content_with_playwright_fallback(
                 max_output_bytes=max_output_bytes,
                 egress_policy=egress_policy,
             )
-            return _convert_html_to_format(html_content, output_format)
+            return await run_in_html_executor(_convert_html_to_format, html_content, output_format)
     except (URLValidationError, ContentTooLargeError, ContentConversionError):
         raise
     except (PDFGeneratorError, PlaywrightError, TimeoutError, RuntimeError, OSError) as exc:
@@ -426,6 +466,11 @@ def convert_content(
 
     ct_lower = content_type.lower()
     if "html" in ct_lower or "xhtml" in ct_lower:
+        if len(content) > MAX_HTML_PARSE_BYTES:
+            raise ContentTooLargeError(
+                f"HTML content size ({len(content)} bytes) exceeds parse limit "
+                f"({MAX_HTML_PARSE_BYTES} bytes)"
+            )
         try:
             return _convert_html_to_format(text, output_format)
         except ContentConversionError:

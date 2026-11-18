@@ -10,13 +10,14 @@ import re
 import time
 import weakref
 from collections.abc import Callable
-from typing import Any, cast
+from typing import Any
 
 import limits
 from fastapi import Request, Response
 from fastapi.responses import JSONResponse
-from limits.storage import MemoryStorage, MovingWindowSupport, Storage, storage_from_string
-from limits.strategies import FixedWindowRateLimiter, MovingWindowRateLimiter, RateLimiter
+from limits.aio.storage import MemoryStorage, MovingWindowSupport, RedisStorage, Storage
+from limits.aio.strategies import FixedWindowRateLimiter, MovingWindowRateLimiter, RateLimiter
+from limits.storage import MemoryStorage as SyncMemoryStorage
 from slowapi import Limiter
 from starlette.middleware.base import BaseHTTPMiddleware
 
@@ -28,6 +29,7 @@ logger = logging.getLogger(__name__)
 
 _SKIP_PATHS = frozenset({"/docs", "/docs/oauth2-redirect", "/redoc", "/openapi.json"})
 _ACTIVE_MIDDLEWARES: weakref.WeakSet[RateLimitMiddleware] = weakref.WeakSet()
+_REDIS_SOCKET_TIMEOUT_SECONDS = 2.0
 
 
 def _make_strategy(storage: Storage) -> RateLimiter:
@@ -36,12 +38,46 @@ def _make_strategy(storage: Storage) -> RateLimiter:
     return FixedWindowRateLimiter(storage)
 
 
-def _is_valid_ip(value: str) -> bool:
+def _create_aio_storage(uri: str) -> Storage:
+    """Instantiate an async `limits.aio` storage backend with bounded Redis socket timeouts."""
+    if uri == "memory://" or uri.startswith("memory://"):
+        return MemoryStorage()
+    if uri.startswith(("redis://", "rediss://", "redis+unix://")):
+        return RedisStorage(
+            uri,
+            implementation="redispy",
+            socket_timeout=_REDIS_SOCKET_TIMEOUT_SECONDS,
+            socket_connect_timeout=_REDIS_SOCKET_TIMEOUT_SECONDS,
+        )
+    raise ValueError(f"Unsupported rate-limit storage URI: {uri}")
+
+
+def _parse_xff_hop(raw_hop: str) -> str | None:
+    """Parse one X-Forwarded-For hop, stripping optional `:port` on IPv4 or `[IPv6]`."""
+    token = raw_hop.strip()
+    if not token:
+        return None
+    if token.startswith("["):
+        end = token.find("]")
+        rest = token[end + 1 :] if end != -1 else ""
+        if end == -1 or (rest and (not rest.startswith(":") or not rest[1:].isdigit())):
+            return None
+        candidate = token[1:end]
+        ip_cls: type[ipaddress.IPv6Address] | None = ipaddress.IPv6Address
+    elif token.count(":") == 1:
+        host_part, port_part = token.split(":", 1)
+        if not port_part.isdigit():
+            return None
+        candidate = host_part
+        ip_cls = None
+    else:
+        candidate = token
+        ip_cls = None
     try:
-        ipaddress.ip_address(value)
-        return True
+        ip_obj = ip_cls(candidate) if ip_cls is not None else ipaddress.ip_address(candidate)
+        return str(ip_obj)
     except ValueError:
-        return False
+        return None
 
 
 def _compile_trusted_networks(
@@ -57,10 +93,15 @@ def _compile_trusted_networks(
 
 
 def reset_rate_limiter(limiter: Limiter | None = None) -> None:
-    """Reset in-memory rate-limit counters on lifespan startup."""
+    """Reset in-memory rate-limit counters on lifespan startup; never clear shared Redis."""
     if limiter is not None:
         storage = getattr(limiter, "_storage", None)
-        if storage is not None and hasattr(storage, "reset"):
+        storage_uri = str(getattr(limiter, "_storage_uri", None) or "memory://")
+        if (
+            storage is not None
+            and storage_uri.startswith("memory://")
+            and isinstance(storage, SyncMemoryStorage)
+        ):
             try:
                 storage.reset()
             except (OSError, RuntimeError, AttributeError, TypeError) as exc:
@@ -89,22 +130,17 @@ class RateLimitMiddleware(BaseHTTPMiddleware):
             self._fallback_memory_storage
         )
         self._storages: dict[str, tuple[Storage, RateLimiter]] = {}
-        limiter_storage = getattr(limiter, "_storage", None)
-        limiter_uri = getattr(limiter, "_storage_uri", None) or "memory://"
-        if isinstance(limiter_storage, Storage):
-            self._storages[str(limiter_uri)] = (limiter_storage, _make_strategy(limiter_storage))
 
         _ACTIVE_MIDDLEWARES.add(self)
 
     def reset(self) -> None:
-        """Reset all resettable rate-limit storages held by this middleware."""
-        self._fallback_memory_storage.reset()
-        for storage, _ in list(self._storages.values()):
-            if isinstance(storage, MemoryStorage) or hasattr(storage, "reset"):
-                try:
-                    storage.reset()  # type: ignore[attr-defined]
-                except (OSError, RuntimeError, AttributeError, TypeError) as exc:
-                    logger.debug(f"Rate-limit storage reset failed: {exc}")
+        """Reset in-memory rate-limit storages held by this middleware; never flush Redis."""
+        self._fallback_memory_storage = MemoryStorage()
+        self._fallback_strategy = MovingWindowRateLimiter(self._fallback_memory_storage)
+        for uri, (storage, _) in list(self._storages.items()):
+            if isinstance(storage, MemoryStorage):
+                fresh = MemoryStorage()
+                self._storages[uri] = (fresh, _make_strategy(fresh))
 
     def _active_settings(self, request: Request | None = None) -> Settings:
         app_obj = getattr(request, "app", None) if request is not None else None
@@ -154,7 +190,7 @@ class RateLimitMiddleware(BaseHTTPMiddleware):
         if cached is not None:
             return cached[1]
         try:
-            storage = cast(Storage, storage_from_string(uri))
+            storage = _create_aio_storage(uri)
             strategy = _make_strategy(storage)
             self._storages[uri] = (storage, strategy)
             return strategy
@@ -189,12 +225,15 @@ class RateLimitMiddleware(BaseHTTPMiddleware):
         if self._is_trusted_ip(peer_ip):
             xff = request.headers.get("x-forwarded-for")
             if xff:
-                valid_hops = [h.strip() for h in xff.split(",") if _is_valid_ip(h.strip())]
-                if valid_hops:
-                    for hop in reversed(valid_hops):
-                        if not self._is_trusted_ip(hop):
-                            return hop
-                    return valid_hops[0]
+                candidate = peer_ip
+                for raw_hop in reversed(xff.split(",")):
+                    hop = _parse_xff_hop(raw_hop)
+                    if hop is None:
+                        return candidate
+                    if not self._is_trusted_ip(hop):
+                        return hop
+                    candidate = hop
+                return candidate
 
         return peer_ip
 
@@ -236,12 +275,12 @@ class RateLimitMiddleware(BaseHTTPMiddleware):
         strategy = self._get_strategy(cfg)
 
         try:
-            allowed = strategy.hit(item, bucket, client_key)
-            stats = strategy.get_window_stats(item, bucket, client_key)
+            allowed = await strategy.hit(item, bucket, client_key)
+            stats = await strategy.get_window_stats(item, bucket, client_key)
         except (OSError, RuntimeError, ValueError) as exc:
             logger.warning(f"Rate-limit backend error ({exc}); falling back to in-memory window")
-            allowed = self._fallback_strategy.hit(item, bucket, client_key)
-            stats = self._fallback_strategy.get_window_stats(item, bucket, client_key)
+            allowed = await self._fallback_strategy.hit(item, bucket, client_key)
+            stats = await self._fallback_strategy.get_window_stats(item, bucket, client_key)
 
         now = time.time()
         reset_epoch = max(int(math.ceil(stats.reset_time)), int(now))

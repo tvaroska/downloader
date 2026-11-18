@@ -245,6 +245,76 @@ class TestWebhookDeliveryAndIntegration:
         assert len(sig) == len("sha256=") + 64
         assert sig == sign_webhook_payload(b'{"ok":true}', "top-secret")
 
+    def test_signature_known_answer(self) -> None:
+        # RFC 4231 Test Case 2 known-answer HMAC-SHA256 vector
+        sig = sign_webhook_payload(b"what do ya want for nothing?", "Jefe")
+        assert sig == "sha256=5bdcc146bf60754e6a042426089575c75a003f089d2739839dec58b964ec3843"
+
+    def test_signature_depends_on_secret(self) -> None:
+        payload = b'{"event":"batch.completed"}'
+        sig_a = sign_webhook_payload(payload, "secret-alpha")
+        sig_b = sign_webhook_payload(payload, "secret-beta")
+        sig_empty = sign_webhook_payload(payload, "")
+        assert sig_a != sig_b
+        assert sig_a != sig_empty
+
+    async def test_redirect_is_not_followed(self) -> None:
+        cfg = Settings()
+        cfg.webhook.max_retries = 1
+        cfg.webhook.backoff_base = 0.0
+        seen_urls: list[str] = []
+
+        def _redirect_handler(request: httpx.Request) -> httpx.Response:
+            seen_urls.append(str(request.url))
+            return httpx.Response(
+                302,
+                headers={"Location": "https://evil.example.com/steal"},
+                request=request,
+            )
+
+        with patch(
+            "downloader.services.webhooks.validate_url_async",
+            new=AsyncMock(return_value="https://hooks.example.com/cb"),
+        ):
+            res = await deliver_webhook(
+                "https://hooks.example.com/cb",
+                "batch.completed",
+                {"job_id": "1"},
+                settings=cfg,
+                transport=httpx.MockTransport(_redirect_handler),
+            )
+        assert res.delivered is False
+        assert res.status_code == 302
+        assert seen_urls == ["https://hooks.example.com/cb"]
+
+    async def test_429_is_retried(self) -> None:
+        cfg = Settings()
+        cfg.webhook.max_retries = 3
+        cfg.webhook.backoff_base = 0.0
+        attempts = 0
+
+        def _rate_limit_handler(request: httpx.Request) -> httpx.Response:
+            nonlocal attempts
+            attempts += 1
+            if attempts == 1:
+                return httpx.Response(429, text="rate limited", request=request)
+            return httpx.Response(200, text="ok", request=request)
+
+        with patch(
+            "downloader.services.webhooks.validate_url_async",
+            new=AsyncMock(return_value="https://hooks.example.com/cb"),
+        ):
+            res = await deliver_webhook(
+                "https://hooks.example.com/cb",
+                "batch.completed",
+                {"job_id": "1"},
+                settings=cfg,
+                transport=httpx.MockTransport(_rate_limit_handler),
+            )
+        assert res.delivered is True
+        assert res.attempts == 2
+        assert attempts == 2
+
     async def test_deliver_webhook_signs_retries_and_blocks_ssrf(self) -> None:
         cfg = Settings()
         cfg.webhook.max_retries = 3
@@ -321,7 +391,7 @@ class TestWebhookDeliveryAndIntegration:
         async def _update_status(job_id: str, status, **kwargs) -> None:
             events.append(f"status:{status.value}")
 
-        async def _store_results(job_id: str, results, summary) -> None:
+        async def _store_results(job_id: str, results, summary, **kwargs) -> None:
             events.append("store_results")
 
         jm.update_job_status = _update_status  # type: ignore[method-assign,assignment]
@@ -511,3 +581,47 @@ async def test_pixel_cap_enforced_at_configured_value() -> None:
     assert out == "Bounded OCR OK"
     assert len(observed_threads) == 1
     assert observed_threads[0].startswith("downloader-ocr")
+
+
+@pytest.mark.unit
+async def test_webhook_logs_redact_url_credentials(caplog: pytest.LogCaptureFixture) -> None:
+    """Webhook logs include only scheme, host, and delivery ID — never credentials or query tokens."""
+    cfg = Settings()
+    cfg.webhook.max_retries = 1
+    cfg.webhook.backoff_base = 0.0
+
+    with caplog.at_level("WARNING", logger="downloader.services.webhooks"):
+        blocked = await deliver_webhook(
+            "http://admin:supersecret@127.0.0.1:8080/hook?token=tok_blocked_999",
+            "batch.completed",
+            {"job_id": "1"},
+            settings=cfg,
+        )
+        assert blocked.delivered is False
+
+        def _fail_handler(request: httpx.Request) -> httpx.Response:
+            return httpx.Response(400, text="bad", request=request)
+
+        with patch(
+            "downloader.services.webhooks.validate_url_async",
+            new=AsyncMock(
+                return_value="https://user:topsecretpass@hooks.example.com/cb?token=tok_live_888"
+            ),
+        ):
+            failed = await deliver_webhook(
+                "https://user:topsecretpass@hooks.example.com/cb?token=tok_live_888",
+                "batch.completed",
+                {"job_id": "2"},
+                settings=cfg,
+                transport=httpx.MockTransport(_fail_handler),
+            )
+        assert failed.delivered is False
+
+    logs = caplog.text
+    assert "supersecret" not in logs
+    assert "topsecretpass" not in logs
+    assert "tok_blocked_999" not in logs
+    assert "tok_live_888" not in logs
+    assert "hooks.example.com" in logs
+    assert blocked.delivery_id in logs
+    assert failed.delivery_id in logs

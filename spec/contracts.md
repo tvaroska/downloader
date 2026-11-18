@@ -79,7 +79,8 @@ The API uses HTTP Accept headers to determine response format. This allows the s
 | `application/pdf` | PDF | Page rendered as PDF document via Playwright |
 | `image/png` | PNG Screenshot | Page rendered as PNG screenshot via Playwright |
 | `image/jpeg` | JPEG Screenshot | Page rendered as JPEG screenshot via Playwright |
-| (none/other) | Plain Text | Default fallback format |
+| `*/*` | Raw Passthrough | Original response bytes and `Content-Type` (e.g. bare `curl`) |
+| (none) | Plain Text | Default fallback format when `Accept` is omitted |
 
 ### Multi-Format Requests
 
@@ -120,12 +121,12 @@ Check service health, version, deployment mode, connection drain state, and spli
   "deployment_mode": "all",
   "telemetry_enabled": false,
   "configuration": {
-    "pdf_concurrency": 4,
+    "pdf_concurrency": 3,
     "batch_concurrency": 10,
     "max_download_size_mb": 50.0,
     "cpu_cores": 4,
     "respect_robots_txt": true,
-    "user_agent": "DownloaderBot/0.7.0",
+    "user_agent": "REST-API-Downloader/1.0",
     "ocr_enabled": true,
     "webhooks_enabled": true
   },
@@ -137,13 +138,7 @@ Check service health, version, deployment mode, connection drain state, and spli
     "workers": {
       "deployment_mode": "all",
       "remote_browser_enabled": false,
-      "active_workers": 0,
-      "workers": [],
-      "queues": {
-        "batch_pending": 0,
-        "batch_processing": 0,
-        "browser_pending": 0
-      }
+      "queue_configured": false
     }
   },
   "auth_enabled": true,
@@ -154,7 +149,7 @@ Check service health, version, deployment mode, connection drain state, and spli
 }
 ```
 
-When `REDIS_URI` is configured, `services.workers` includes `active_workers`, `workers` (active worker heartbeats), and `queues` (`batch_pending`, `batch_processing`, `browser_pending`). When `DOWNLOADER_KEY` is unset, `auth_enabled` is `false` and `auth_methods` is `null`.
+When `REDIS_URI` is configured, `services.workers.queue_configured` is `true` (unauthenticated `/health` omits worker hostnames, queue depths, and raw Redis exception text). When `DOWNLOADER_KEY` is unset, `auth_enabled` is `false` and `auth_methods` is `null`.
 
 **Draining Response (`503 Service Unavailable` during graceful shutdown):**
 ```json
@@ -201,7 +196,7 @@ Download and process content from any public URL with intelligent content extrac
 | `screenshot_format` | string | `png` | Image encoding for screenshot captures: `png` (`image/png`) or `jpeg` (`image/jpeg`). |
 | `actions` | string | `null` | URL-encoded JSON array (max 8192 chars, max 20 actions) of strictly allowlisted declarative Playwright actions (`click`, `fill`, `select`, `scroll`, `wait`, `wait_for_selector`, `hover`, `press`; zero raw JS evaluation). Implies `render=true`. |
 | `ocr` | boolean | `false` | Require Tesseract OCR extraction (returns `HTTP 422` if origin is not a supported `image/*` content type, or `HTTP 503` `ocr_unavailable` if `tesseract` is unavailable or `OCR_ENABLED=false`). Image origins also run OCR automatically when `Accept` requests `text/plain`, `text/markdown`, or `text/html`. |
-| `ocr_lang` | string | `null` | Optional Tesseract OCR language code (validated against `^[a-zA-Z0-9_+-]{1,32}$`, e.g., `eng`, `eng+deu`). |
+| `ocr_lang` | string | `null` | Optional Tesseract OCR language code (validated against `^[a-zA-Z0-9_+]{1,64}$`, e.g., `eng`, `eng+deu`). |
 
 **Common Response Headers:**
 - `X-Original-URL`: Target URL
@@ -334,7 +329,7 @@ Accept: application/json
 
 #### Default Response (Plain Text)
 
-When no Accept header is specified, returns the content as plain text with intelligent article extraction. For unsupported Accept header formats, returns the raw content with original content type.
+When no `Accept` header is specified, returns the content as plain text with intelligent article extraction. When `Accept: */*` (such as bare `curl`) or an unsupported `Accept` header is sent, returns the raw content with its original `Content-Type`.
 
 **Request:**
 ```http
@@ -387,7 +382,7 @@ Execute up to `20` strictly allowlisted declarative Playwright actions (`click`,
 | `actions` | array | No | Up to `20` allowlisted actions: `click`, `fill`, `select`, `scroll`, `wait` (`ms <= 10000`), `wait_for_selector`, `hover`, `press` |
 | `full_page` | boolean | No | Capture full scrollable page when `output="screenshot"` (default: `false`) |
 | `screenshot_format` | string | No | `png` or `jpeg` when `output="screenshot"` (default: `png`) |
-| `timeout_ms` | integer | No | Optional render timeout override in milliseconds (`1000..60000`) |
+| `timeout_ms` | integer | No | Optional render timeout override in milliseconds (`1000..120000`) |
 
 **Response:**
 - Returns raw payload bytes with matching `Content-Type` (`text/plain`, `text/markdown`, `text/html`, `application/pdf`, `image/png`, or `image/jpeg`) and `X-Rendered-With-JS: true`.
@@ -454,17 +449,16 @@ Supported per-URL `format` and `default_format` values: `text`, `markdown`, `htm
 
 #### Implicit Playwright Fallback
 
-When processing batch URLs with `text` or `markdown` format, the service automatically falls back to Playwright browser rendering if the initial HTML-to-text/markdown conversion produces empty content. This handles JavaScript-heavy pages (SPAs, React/Vue/Angular sites) without requiring `render=true`.
+When processing `GET /{url}` or batch URLs with `text`, `markdown`, `html`, or multi-format negotiation, the service shares a single `needs_js_render()` decision to automatically fall back to Playwright browser rendering for JavaScript-heavy pages (SPAs, React/Vue/Angular sites) without requiring `render=true`.
 
 **How it works:**
 
-1. The URL is fetched and converted to the requested format (text or markdown)
-2. If the converted content is empty, the service checks whether Playwright fallback is appropriate:
-   - The response must be HTML content
-   - The HTML body must contain enough text (above a configurable threshold)
-   - The page must have content indicators (`<main>`, `<article>`, `.content`, etc.)
+1. The URL is fetched and evaluated by `needs_js_render()`
+2. Playwright fallback is triggered when:
+   - The response is HTML (`text/html` / `application/xhtml+xml`)
+   - The page matches JS-required prompts, SPA mount-point markers (`#root`, `#app`, `ng-app`) with minimal visible text, small HTML missing Open Graph/Twitter metadata, or `CONTENT_HTML_JS_HEAVY_DOMAINS`
    - Error/maintenance pages are excluded from fallback
-3. If eligible, Playwright renders the page with `networkidle` wait strategy and extracts content from the rendered DOM
+3. If eligible, Playwright navigates on `domcontentloaded` with a bounded non-fatal `networkidle` settle (`min(timeout_ms, 2500)`) and extracts content from the rendered DOM
 
 **Caching:** Results of fallback eligibility checks are cached per-URL with bounded LRU eviction and monotonic TTL (`CONTENT_CACHE_MAX_SIZE`, `CONTENT_HTML_JS_RENDERING_CACHE_TTL`) to avoid redundant Playwright invocations on repeated requests.
 
@@ -1603,16 +1597,15 @@ Failed scheduled jobs are automatically retried for transient errors:
 |---------------------|---------|-------------|
 | `OCR_ENABLED` | `true` | Enable Tesseract image-to-text OCR (`false` returns `503 ocr_unavailable` on `?ocr=true`) |
 | `OCR_DEFAULT_LANGUAGE` | `eng` | Default Tesseract language pack |
-| `OCR_TIMEOUT_SECONDS` | `30.0` | Timeout per OCR extraction in seconds |
-| `OCR_MAX_PIXELS` | `25000000` | Maximum decoded image pixels (decompression-bomb guard) |
+| `OCR_TIMEOUT_SECONDS` | `15.0` | Timeout per OCR extraction in seconds (alias for `OCR_TIMEOUT`) |
+| `OCR_MAX_PIXELS` | `25000000` | Maximum decoded image pixels (decompression-bomb guard; alias for `OCR_MAX_IMAGE_PIXELS`) |
 | `WEBHOOK_ENABLED` | `true` | Enable outbound batch/schedule webhook delivery |
-| `WEBHOOK_TIMEOUT_SECONDS` | `10.0` | Timeout per outbound webhook attempt in seconds |
+| `WEBHOOK_TIMEOUT_SECONDS` | `10.0` | Timeout per outbound webhook attempt in seconds (alias for `WEBHOOK_TIMEOUT`) |
 | `WEBHOOK_MAX_RETRIES` | `3` | Retry attempts on transient `5xx`/network failures |
 | `SHUTDOWN_DRAIN_TIMEOUT` | `30.0` | Max seconds to wait for active requests and jobs during shutdown |
-| `SHUTDOWN_POLL_INTERVAL` | `0.25` | Poll interval in seconds while waiting for drain completion |
 | `DEPLOYMENT_MODE` | `all` | Runtime topology: `all` (monolith/stateless default), `api` (offloads batch/browser via Redis), or `worker` |
-| `WORKER_POLL_TIMEOUT` | `5.0` | Worker Redis `BLMOVE` poll interval in seconds |
-| `WORKER_BROWSER_TASK_TIMEOUT` | `60.0` | Timeout waiting for remote worker Playwright/PDF/screenshot RPC |
+| `WORKER_POLL_TIMEOUT` | `2.0` | Worker Redis `BLMOVE` poll interval in seconds |
+| `WORKER_BROWSER_TASK_TIMEOUT` | `45.0` | Timeout waiting for remote worker Playwright/PDF/screenshot RPC (alias for `WORKER_REMOTE_BROWSER_TIMEOUT`) |
 | `WORKER_MAX_CONCURRENT_JOBS` | `4` | Max concurrent batch jobs processed per worker instance |
 | `OTEL_ENABLED` | `false` | Opt-in OpenTelemetry distributed tracing (`false` adds zero runtime overhead) |
 | `OTEL_SERVICE_NAME` | `downloader` | OpenTelemetry service name resource attribute |

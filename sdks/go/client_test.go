@@ -35,13 +35,45 @@ func TestDownloaderClientEndToEnd(t *testing.T) {
 			_, _ = w.Write([]byte(`{"job_id":"job-go-1","status":"pending","created_at":"2026-11-12T00:00:00Z","total_urls":1}`))
 		case "/jobs/job-go-1/status":
 			w.Header().Set("Content-Type", "application/json")
-			_, _ = w.Write([]byte(`{"job_id":"job-go-1","status":"completed","progress":100,"total_urls":1,"processed_urls":1,"successful_urls":1,"failed_urls":0,"results_available":true}`))
+			_, _ = w.Write([]byte(`{"job_id":"job-go-1","status":"completed","progress":100,"total_urls":1,"processed_urls":1,"successful_urls":1,"failed_urls":0,"results_available":true,"expires_at":"2026-11-13T00:00:00Z"}`))
 		case "/jobs/job-go-1/results":
 			w.Header().Set("Content-Type", "application/json")
 			_, _ = w.Write([]byte(`{"job_id":"job-go-1","status":"completed","total_duration":0.3,"results":[{"url":"https://example.com","success":true}],"summary":{"successful_requests":1},"created_at":"2026-11-12T00:00:00Z","completed_at":"2026-11-12T00:00:01Z"}`))
+		case "/jobs/job-go-1":
+			if r.Method != http.MethodDelete {
+				w.WriteHeader(http.StatusMethodNotAllowed)
+				return
+			}
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(`{"success":true,"message":"Job job-go-1 cancelled successfully"}`))
 		case "/schedules":
 			w.Header().Set("Content-Type", "application/json")
+			if r.Method == http.MethodGet {
+				_, _ = w.Write([]byte(`{"schedules":[{"id":"sched-go-1","name":"Hourly","url":"https://example.com","cron_expression":"0 * * * *","format":"screenshot","enabled":true,"created_at":"2026-11-12T00:00:00Z"}],"total":1}`))
+				return
+			}
 			_, _ = w.Write([]byte(`{"id":"sched-go-1","name":"Hourly","url":"https://example.com","cron_expression":"0 * * * *","format":"screenshot","enabled":true,"created_at":"2026-11-12T00:00:00Z"}`))
+		case "/schedules/sched-go-1":
+			w.Header().Set("Content-Type", "application/json")
+			if r.Method == http.MethodDelete {
+				_, _ = w.Write([]byte(`{"success":true,"message":"Schedule sched-go-1 deleted successfully"}`))
+				return
+			}
+			_, _ = w.Write([]byte(`{"id":"sched-go-1","name":"Hourly","url":"https://example.com","cron_expression":"0 * * * *","format":"screenshot","enabled":true,"created_at":"2026-11-12T00:00:00Z"}`))
+		case "/schedules/sched-go-1/history":
+			if r.URL.Query().Get("limit") != "10" || r.URL.Query().Get("offset") != "2" {
+				t.Fatalf("unexpected history query: %s", r.URL.RawQuery)
+			}
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(`{"executions":[{"execution_id":"exec-go-1","schedule_id":"sched-go-1","status":"completed","started_at":"2026-11-12T00:00:00Z","success":true,"attempt":1}],"total":9,"limit":10,"offset":2}`))
+		case "/https://example.com/multi":
+			if r.Header.Get("Accept") == "text/plain, text/markdown" {
+				w.Header().Set("Content-Type", "application/json")
+				_, _ = w.Write([]byte(`{"url":"https://example.com/multi","formats":{"text":"Hello","markdown":"# Hello"}}`))
+				return
+			}
+			w.Header().Set("Content-Type", "text/plain; charset=utf-8")
+			_, _ = w.Write([]byte("single format text"))
 		case "/https://example.com/shot":
 			if r.URL.Query().Get("output") != "screenshot" {
 				t.Fatalf("expected output=screenshot, got %s", r.URL.RawQuery)
@@ -99,12 +131,16 @@ func TestDownloaderClientEndToEnd(t *testing.T) {
 		t.Fatalf("SubmitBatch failed: sub=%+v err=%v", sub, err)
 	}
 	st, err := client.GetJobStatus(ctx, sub.JobID)
-	if err != nil || !st.ResultsAvailable {
+	if err != nil || !st.ResultsAvailable || st.ExpiresAt == nil || *st.ExpiresAt != "2026-11-13T00:00:00Z" {
 		t.Fatalf("GetJobStatus failed: st=%+v err=%v", st, err)
 	}
 	res, err := client.GetJobResults(ctx, sub.JobID)
 	if err != nil || len(res.Results) != 1 {
 		t.Fatalf("GetJobResults failed: res=%+v err=%v", res, err)
+	}
+	cancelled, err := client.CancelJob(ctx, sub.JobID)
+	if err != nil || !cancelled.Success {
+		t.Fatalf("CancelJob failed: cancelled=%+v err=%v", cancelled, err)
 	}
 
 	sched, err := client.CreateSchedule(ctx, ScheduleCreateRequest{
@@ -115,6 +151,32 @@ func TestDownloaderClientEndToEnd(t *testing.T) {
 	})
 	if err != nil || sched.ID != "sched-go-1" {
 		t.Fatalf("CreateSchedule failed: sched=%+v err=%v", sched, err)
+	}
+	schedList, err := client.ListSchedules(ctx)
+	if err != nil || len(schedList) != 1 || schedList[0].ID != "sched-go-1" {
+		t.Fatalf("ListSchedules failed: list=%+v err=%v", schedList, err)
+	}
+	schedDetail, err := client.GetSchedule(ctx, "sched-go-1")
+	if err != nil || schedDetail.Name != "Hourly" {
+		t.Fatalf("GetSchedule failed: sched=%+v err=%v", schedDetail, err)
+	}
+	history, err := client.GetScheduleHistory(ctx, "sched-go-1", 10, 2)
+	if err != nil || history.Total != 9 || len(history.Executions) != 1 || history.Executions[0].ExecutionID != "exec-go-1" {
+		t.Fatalf("GetScheduleHistory failed: history=%+v err=%v", history, err)
+	}
+	delRes, err := client.DeleteSchedule(ctx, "sched-go-1")
+	if err != nil || !delRes.Success {
+		t.Fatalf("DeleteSchedule failed: delRes=%+v err=%v", delRes, err)
+	}
+
+	multi, err := client.DownloadMulti(ctx, "https://example.com/multi", []string{"text", "markdown"}, nil)
+	if err != nil || multi["url"] != "https://example.com/multi" {
+		t.Fatalf("DownloadMulti failed: multi=%+v err=%v", multi, err)
+	}
+	_, err = client.DownloadMulti(ctx, "https://example.com/multi", []string{"text"}, nil)
+	var multiErr *APIError
+	if !errors.As(err, &multiErr) || multiErr.ErrorType != "unexpected_content_type" {
+		t.Fatalf("expected unexpected_content_type APIError, got %v", err)
 	}
 
 	_, err = client.Download(ctx, "https://blocked.local", nil)

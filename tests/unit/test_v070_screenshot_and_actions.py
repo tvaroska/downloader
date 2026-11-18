@@ -434,3 +434,60 @@ class TestScreenshotAndRenderEndpoints:
             )
             assert res_md.success is True
             assert "## Expanded" in (res_md.content or "")
+
+
+@pytest.mark.unit
+async def test_pdf_and_screenshot_action_errors_map_to_400_and_408() -> None:
+    """R27: Failed actions and selector waits on PDF/screenshot map to 400 and 408, never 500."""
+    from playwright.async_api import Error as PlaywrightError
+    from playwright.async_api import TimeoutError as PlaywrightTimeoutError
+
+    from downloader.errors import classify_domain_error
+    from downloader.pdf_generator import PlaywrightPDFGenerator
+
+    def _make_gen_with_page(page: AsyncMock) -> PlaywrightPDFGenerator:
+        context = AsyncMock()
+        context.new_page = AsyncMock(return_value=page)
+        context.route = AsyncMock()
+        context.close = AsyncMock()
+
+        pool = MagicMock()
+        pool.get_browser = AsyncMock(return_value=MagicMock())
+        pool.create_context = AsyncMock(return_value=context)
+        pool.release_browser = AsyncMock()
+
+        gen = PlaywrightPDFGenerator(pool_size=1, idle_timeout=0.0)
+        gen.pool = pool
+        gen.ensure_started = AsyncMock(return_value=pool)  # type: ignore[method-assign]
+        return gen
+
+    # 1. Failed action on PDF & screenshot -> BrowserActionError -> 400
+    action_page = AsyncMock()
+    action_page.goto = AsyncMock(return_value=AsyncMock(status=200))
+    action_page.wait_for_load_state = AsyncMock()
+    action_page.click = AsyncMock(side_effect=PlaywrightError("element detached"))
+    gen_action = _make_gen_with_page(action_page)
+
+    actions = [BrowserAction(type="click", selector="#missing")]
+    with pytest.raises(BrowserActionError) as pdf_action_exc:
+        await gen_action.generate_pdf("https://example.com", actions=actions)
+    assert classify_domain_error(pdf_action_exc.value).status_code == 400
+
+    with pytest.raises(BrowserActionError) as shot_action_exc:
+        await gen_action.generate_screenshot("https://example.com", actions=actions)
+    assert classify_domain_error(shot_action_exc.value).status_code == 400
+
+    # 2. Selector timeout on PDF & screenshot -> SelectorTimeoutError -> 408
+    selector_page = AsyncMock()
+    selector_page.goto = AsyncMock(return_value=AsyncMock(status=200))
+    selector_page.wait_for_load_state = AsyncMock()
+    selector_page.wait_for_selector = AsyncMock(side_effect=PlaywrightTimeoutError("timed out"))
+    gen_selector = _make_gen_with_page(selector_page)
+
+    with pytest.raises(SelectorTimeoutError) as pdf_sel_exc:
+        await gen_selector.generate_pdf("https://example.com", wait_for_selector="#never")
+    assert classify_domain_error(pdf_sel_exc.value).status_code == 408
+
+    with pytest.raises(SelectorTimeoutError) as shot_sel_exc:
+        await gen_selector.generate_screenshot("https://example.com", wait_for_selector="#never")
+    assert classify_domain_error(shot_sel_exc.value).status_code == 408

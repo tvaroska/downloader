@@ -40,10 +40,10 @@ for script in "${SCRIPTS[@]}"; do
 
     if uv run python "$script"; then
         echo "✅ $(basename "$script") completed successfully"
-        ((SUCCESSFUL++))
+        SUCCESSFUL=$((SUCCESSFUL + 1))
     else
         echo "❌ $(basename "$script") failed"
-        ((FAILED++))
+        FAILED=$((FAILED + 1))
     fi
 done
 

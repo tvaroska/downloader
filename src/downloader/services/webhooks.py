@@ -20,11 +20,21 @@ from ..validation import (
     EgressPolicy,
     SSRFProtectionError,
     URLValidationError,
+    canonical_origin,
+    format_origin_url,
     redact_url_for_log,
     validate_url_async,
 )
 
 logger = logging.getLogger(__name__)
+
+
+def _format_webhook_log_target(url: str) -> str:
+    """Return only scheme and host (plus non-default port) for safe webhook logging."""
+    origin = canonical_origin(url)
+    if origin is not None:
+        return format_origin_url(*origin)
+    return redact_url_for_log(url)
 
 
 @dataclass(frozen=True)
@@ -59,7 +69,7 @@ async def _post_with_retries(  # noqa: PLR0913
     max_attempts = max(1, cfg.webhook.max_retries)
     last_status: int | None = None
     last_error: str | None = None
-    safe_url = redact_url_for_log(validated_url)
+    safe_target = _format_webhook_log_target(validated_url)
 
     for attempt in range(1, max_attempts + 1):
         try:
@@ -70,7 +80,7 @@ async def _post_with_retries(  # noqa: PLR0913
             if 200 <= resp.status_code < 300:
                 logger.info(
                     f"Webhook delivered: event={event} delivery={delivery_id} "
-                    f"status={resp.status_code} attempt={attempt}"
+                    f"target={safe_target} status={resp.status_code} attempt={attempt}"
                 )
                 return WebhookDeliveryResult(
                     delivered=True,
@@ -84,7 +94,8 @@ async def _post_with_retries(  # noqa: PLR0913
             last_error = f"HTTP {resp.status_code}"
             if 400 <= resp.status_code < 500 and resp.status_code != 429:
                 logger.warning(
-                    f"Webhook rejected ({resp.status_code}) for {safe_url}; not retrying"
+                    f"Webhook rejected ({resp.status_code}) for {safe_target} "
+                    f"delivery={delivery_id}; not retrying"
                 )
                 return WebhookDeliveryResult(
                     delivered=False,
@@ -96,7 +107,10 @@ async def _post_with_retries(  # noqa: PLR0913
                     error=last_error,
                 )
         except (URLValidationError, SSRFProtectionError) as exc:
-            logger.warning(f"Webhook blocked during connect ({safe_url}): {exc}")
+            logger.warning(
+                f"Webhook blocked during connect ({safe_target}) delivery={delivery_id}: "
+                f"{type(exc).__name__}"
+            )
             return WebhookDeliveryResult(
                 delivered=False,
                 webhook_url=validated_url,
@@ -108,7 +122,8 @@ async def _post_with_retries(  # noqa: PLR0913
         except (httpx.HTTPError, OSError, RuntimeError) as exc:
             last_error = f"{type(exc).__name__}: {exc}"
             logger.warning(
-                f"Webhook attempt {attempt}/{max_attempts} failed for {safe_url}: {last_error}"
+                f"Webhook attempt {attempt}/{max_attempts} failed for {safe_target} "
+                f"delivery={delivery_id}: {type(exc).__name__}"
             )
 
         if attempt < max_attempts and cfg.webhook.backoff_base > 0:
@@ -157,7 +172,10 @@ async def deliver_webhook(  # noqa: PLR0913
         try:
             validated_url = await validate_url_async(webhook_url, cfg)
         except (URLValidationError, SSRFProtectionError) as exc:
-            logger.warning(f"Blocked unsafe webhook URL ({redact_url_for_log(webhook_url)}): {exc}")
+            logger.warning(
+                f"Blocked unsafe webhook URL ({_format_webhook_log_target(webhook_url)}) "
+                f"delivery={delivery_id}: {type(exc).__name__}"
+            )
             span.set_attribute("webhook.blocked", True)
             return WebhookDeliveryResult(
                 delivered=False,

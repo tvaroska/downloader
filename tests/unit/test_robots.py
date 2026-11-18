@@ -11,71 +11,9 @@ from downloader.crawling.robots import RobotsChecker, RobotsDisallowedError
 from downloader.crawling.throttle import DomainThrottle
 from downloader.metrics import get_metrics_collector
 from downloader.validation import SSRFProtectionError
+from tests.fixtures.mock_fixtures import FakeRedis
 
-
-class FakeAsyncRedis:
-    """Minimal in-memory async Redis stub for parity testing."""
-
-    def __init__(self) -> None:
-        self.store: dict[str, tuple[str, float | None]] = {}
-        self.fail_get: bool = False
-        self.fail_set: bool = False
-
-    async def get(self, key: str) -> bytes | None:
-        if self.fail_get:
-            raise ConnectionError("simulated redis read failure")
-        entry = self.store.get(key)
-        if entry is None:
-            return None
-        return entry[0].encode("utf-8")
-
-    async def set(
-        self,
-        key: str,
-        value: str,
-        *,
-        ex: int | None = None,
-        px: int | None = None,
-    ) -> bool:
-        if self.fail_set:
-            raise ConnectionError("simulated redis write failure")
-        ttl_s = float(ex) if ex is not None else (float(px) / 1000.0 if px is not None else None)
-        self.store[key] = (value, ttl_s)
-        return True
-
-    async def psetex(self, key: str, time_ms: int, value: str) -> bool:
-        if self.fail_set:
-            raise ConnectionError("simulated redis psetex failure")
-        self.store[key] = (value, float(time_ms) / 1000.0)
-        return True
-
-    async def eval(
-        self,
-        _script: str,
-        _numkeys: int,
-        key: str,
-        now_str: str,
-        delay_str: str,
-        max_wait_str: str | None = None,
-    ) -> str:
-        if self.fail_get or self.fail_set:
-            raise ConnectionError("Redis eval failed")
-        now_wall = float(now_str)
-        delay = float(delay_str)
-        max_wait = float(max_wait_str) if max_wait_str is not None else None
-        entry = self.store.get(key)
-        next_wall = float(entry[0]) if entry is not None else 0.0
-        if now_wall < next_wall:
-            wait_s = next_wall - now_wall
-            if max_wait is not None and wait_s > max_wait:
-                return str(-wait_s)
-            new_next = next_wall + delay
-        else:
-            wait_s = 0.0
-            new_next = now_wall + delay
-        ttl_ms = max(1, int((new_next - now_wall) * 1000 + 0.5))
-        self.store[key] = (str(new_next), ttl_ms / 1000.0)
-        return str(wait_s)
+FakeAsyncRedis = FakeRedis
 
 
 @pytest.mark.unit
@@ -233,7 +171,7 @@ class TestRobotsChecker:
             redis_fetches += 1
             return 200, robots_txt
 
-        fake_redis = FakeAsyncRedis()
+        fake_redis = FakeRedis()
         mem_checker = RobotsChecker(fetcher=mem_fetcher, redis_client=None)
         redis_checker_writer = RobotsChecker(fetcher=redis_fetcher, redis_client=fake_redis)
         redis_checker_reader = RobotsChecker(fetcher=redis_fetcher, redis_client=fake_redis)
@@ -299,6 +237,27 @@ class TestRobotsChecker:
         finally:
             await checker.close()
 
+    @pytest.mark.parametrize(
+        "blocked_url",
+        [
+            "http://127.0.0.1/secret",
+            "http://169.254.169.254/latest/meta-data/",
+            "http://10.0.0.1/internal",
+        ],
+    )
+    async def test_origin_validated_before_any_fetch(self, blocked_url: str) -> None:
+        fetch_calls = 0
+
+        async def _fetcher(_url: str) -> tuple[int, str]:
+            nonlocal fetch_calls
+            fetch_calls += 1
+            return 200, "User-agent: *\nAllow: /\n"
+
+        checker = RobotsChecker(fetcher=_fetcher)
+        with pytest.raises(SSRFProtectionError):
+            await checker.check_allowed(blocked_url)
+        assert fetch_calls == 0
+
 
 @pytest.mark.unit
 class TestDomainThrottle:
@@ -362,7 +321,7 @@ class TestDomainThrottle:
 
         monkeypatch.setattr(asyncio, "sleep", fake_sleep)
 
-        fake_redis = FakeAsyncRedis()
+        fake_redis = FakeRedis()
         pod_a = DomainThrottle(max_crawl_delay=10.0, redis_client=fake_redis)
         pod_b = DomainThrottle(max_crawl_delay=10.0, redis_client=fake_redis)
 
@@ -407,7 +366,7 @@ async def test_failure_sentinel_uses_short_ttl(monkeypatch: pytest.MonkeyPatch) 
         fetch_calls += 1
         return responses[idx]
 
-    fake_redis = FakeAsyncRedis()
+    fake_redis = FakeRedis()
     redis_checker = RobotsChecker(
         robots_cache_ttl=3600,
         negative_cache_ttl=60,
@@ -467,7 +426,7 @@ async def test_cache_key_excludes_userinfo(caplog: pytest.LogCaptureFixture) -> 
         fetched_urls.append(url)
         return 503, "Upstream down"
 
-    fake_redis = FakeAsyncRedis()
+    fake_redis = FakeRedis()
     checker = RobotsChecker(
         max_cache_bytes=2048,
         redis_client=fake_redis,

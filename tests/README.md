@@ -24,11 +24,11 @@ This test suite uses a **3-tier testing strategy** to optimize test execution sp
 
 **How to Run:**
 ```bash
-# Run all smoke tests
-pytest -m smoke
+# Run the full offline verification gate (recommended)
+proj-test downloader   # or: just check
 
-# Or use the script
-./scripts/test_smoke.sh
+# Run smoke tests only
+uv run --no-sync pytest -m smoke -v
 ```
 
 ### Tier 2: Unit Tests (`tests/unit/`)
@@ -139,39 +139,22 @@ All tests are marked with appropriate pytest markers for easy filtering:
 
 ## Running Tests
 
-### Quick Commands
+### Single Verification Gate (Recommended)
+
+Run the canonical offline gate before every commit:
 
 ```bash
-# Run ONLY smoke tests (fastest)
-pytest -m smoke
-
-# Run smoke + unit tests
-pytest -m "smoke or unit"
-
-# Run all tests EXCEPT integration and e2e
-pytest -m "not integration and not e2e"
-
-# Run all tests EXCEPT those requiring Playwright
-pytest -m "not requires_playwright"
-
-# Run everything
-pytest
-
-# Run with coverage report
-pytest --cov=src/downloader --cov-report=html
+proj-test downloader   # or: just check
 ```
 
-### Using Test Scripts
+`just check` executes `uv lock --check --offline --no-config`, `ruff check`, `ruff format --check`, `mypy src/ tests/`, the offline pytest suite (`-m "not (integration or e2e or network or requires_redis or requires_playwright)"` with `--cov=src/downloader` >= 83%), and the Python, JavaScript/TypeScript, and Go SDK test suites.
+
+For targeted runs:
 
 ```bash
-# Run smoke tests only
-./scripts/test_smoke.sh
-
-# Run all tiers sequentially (smoke -> unit -> integration -> api)
-./scripts/test_all.sh
-
-# Generate coverage report
-./scripts/test_coverage.sh
+uv run --no-sync pytest -m smoke -v
+uv run --no-sync pytest -m integration -v
+uv run --no-sync pytest -m e2e -v
 ```
 
 ## Test Organization
@@ -327,27 +310,18 @@ def test_with_redis(env_with_redis, mock_job_manager):
 **Issue: Tests are slow**
 ```bash
 # Run only smoke tests for quick feedback
-pytest -m smoke
+uv run --no-sync pytest -m smoke -v
 
-# Run tests in parallel (requires pytest-xdist)
-pip install pytest-xdist
-pytest -n auto
+# Run tests in parallel (pytest-xdist is included in dev dependencies)
+uv run --no-sync pytest -n auto
 ```
 
 ## Coverage
 
-Generate coverage reports:
+Coverage is enforced automatically by `proj-test downloader` / `just check` (`--cov=src/downloader`, minimum 83%). To generate an HTML report:
 
 ```bash
-# Terminal report
-pytest --cov=src/downloader --cov-report=term-missing
-
-# HTML report (opens in browser)
-pytest --cov=src/downloader --cov-report=html
-open htmlcov/index.html
-
-# Use the coverage script
-./scripts/test_coverage.sh
+uv run --no-sync pytest --cov=src/downloader --cov-report=html
 ```
 
 ## Best Practices

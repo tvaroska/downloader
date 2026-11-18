@@ -7,7 +7,7 @@ import uuid
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Any
 
-from apscheduler.triggers.cron import CronTrigger
+import redis.exceptions as redis_exc
 from fastapi import APIRouter, Depends, HTTPException, Path, Query, Request
 
 from ..auth import get_api_key
@@ -19,6 +19,7 @@ from ..models.schedule import (
     ScheduleExecutionListResponse,
     ScheduleListResponse,
     ScheduleResponse,
+    cron_trigger_from_unix_crontab,
 )
 from ..scheduler import SchedulerService
 from ..validation import URLValidationError, sanitize_custom_headers, validate_url_async
@@ -53,6 +54,23 @@ def _require_scheduler(scheduler: SchedulerDep) -> SchedulerService:
     return scheduler
 
 
+async def _acquire_schedule_run_lock(schedule_id: str) -> bool:
+    """Acquire a short-lived per-run Redis lock so two active schedulers do not duplicate a run."""
+    if _executor is None:
+        return True
+    storage = getattr(_executor, "storage", None)
+    redis_client = getattr(storage, "redis", None)
+    if redis_client is None:
+        return True
+    lock_key = f"schedule:run_lock:{schedule_id}"
+    try:
+        acquired = await redis_client.set(lock_key, "1", nx=True, ex=50)
+    except redis_exc.RedisError as exc:
+        logger.warning(f"[SCHEDULE-{schedule_id}] Failed to acquire run lock: {exc}")
+        return True
+    return bool(acquired)
+
+
 async def scheduled_download_job(  # noqa: PLR0913
     schedule_id: str,
     url: str,
@@ -65,6 +83,12 @@ async def scheduled_download_job(  # noqa: PLR0913
     """Entrypoint invoked by APScheduler when a scheduled cron job fires."""
     if _executor is None:
         logger.error(f"[SCHEDULE-{schedule_id}] Executor not initialized, cannot execute job")
+        return
+
+    if not await _acquire_schedule_run_lock(schedule_id):
+        logger.info(
+            f"[SCHEDULE-{schedule_id}] Skipping duplicate run (lock held by another worker)"
+        )
         return
 
     logger.info(f"[SCHEDULE-{schedule_id}] Starting execution: {url} (format={format})")
@@ -92,20 +116,12 @@ async def scheduled_download_job(  # noqa: PLR0913
         logger.exception(f"[SCHEDULE-{schedule_id}] Unexpected error during execution: {exc}")
 
 
-def _format_cron_trigger(trigger: CronTrigger) -> str:
-    if hasattr(trigger, "fields"):
-        fields = trigger.fields
-        if len(fields) >= 6:
-            return f"{fields[1]} {fields[2]} {fields[3]} {fields[4]} {fields[5]}"
-    return str(trigger)
-
-
 def _job_to_schedule_response(job: Any) -> ScheduleResponse:
     kwargs = job.kwargs or {}
     created_at_str = kwargs.get("created_at")
     created_at = datetime.fromisoformat(created_at_str) if created_at_str else datetime.now(UTC)
     stored_expr = kwargs.get("cron_expression")
-    cron_expr = stored_expr if isinstance(stored_expr, str) else _format_cron_trigger(job.trigger)
+    cron_expr = stored_expr if isinstance(stored_expr, str) else str(job.trigger)
     return ScheduleResponse(
         id=job.id,
         name=job.name or "",
@@ -139,7 +155,7 @@ async def create_schedule(
             else None
         )
         sanitized_headers = sanitize_custom_headers(schedule_data.headers)
-        trigger = CronTrigger.from_crontab(schedule_data.cron_expression)
+        trigger = cron_trigger_from_unix_crontab(schedule_data.cron_expression)
     except (ValueError, URLValidationError) as exc:
         raise HTTPException(
             status_code=400,
@@ -306,9 +322,10 @@ async def get_schedule_history(  # noqa: PLR0913
 async def delete_schedule(
     schedule_id: str = Path(..., description="Schedule identifier"),
     scheduler: SchedulerDep = None,
+    execution_storage: ExecutionStorageDep = None,
     _api_key: str | None = Depends(get_api_key),
 ) -> dict[str, Any]:
-    """Remove a scheduled job."""
+    """Remove a scheduled job and its execution history."""
     svc = _require_scheduler(scheduler)
     try:
         job = svc.get_job(schedule_id)
@@ -321,6 +338,8 @@ async def delete_schedule(
                 ).model_dump(),
             )
         svc.remove_job(schedule_id)
+        if execution_storage is not None:
+            await execution_storage.delete_executions(schedule_id)
         logger.info(f"Deleted schedule {schedule_id}")
         return {"success": True, "message": f"Schedule {schedule_id} deleted successfully"}
     except HTTPException:

@@ -58,13 +58,21 @@ def _classify_http_or_pdf_error(
     context: ErrorContext,
 ) -> ErrorClassification:
     if isinstance(exc, HTTPClientError):
-        code = exc.status_code if exc.status_code else 502
-        is_4xx = 400 <= code < 500
+        raw_code = exc.status_code
+        if raw_code is None or raw_code >= 500:
+            return ErrorClassification(
+                status_code=502,
+                error_type="http_error",
+                message=str(exc),
+                retryable=True,
+                log_level="error",
+            )
+        is_4xx = 400 <= raw_code < 500
         return ErrorClassification(
-            status_code=code,
+            status_code=raw_code,
             error_type="http_error",
             message=str(exc),
-            retryable=(code == 429 or not is_4xx),
+            retryable=(raw_code == 429 or not is_4xx),
             log_level="warning" if is_4xx else "error",
         )
 
@@ -125,7 +133,7 @@ def _classify_special_error(
         )
         return ErrorClassification(
             status_code=408 if context == "batch" else 504,
-            error_type="timeout_error",
+            error_type="worker_timeout" if context == "render" else "timeout_error",
             message=msg,
             retryable=True,
             log_level="error",

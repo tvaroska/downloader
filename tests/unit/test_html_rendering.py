@@ -425,36 +425,101 @@ class TestConfigurableThresholds:
 
         assert not result, "175 chars should not trigger with threshold=150"
 
-    def test_playwright_fallback_uses_config_threshold(self, monkeypatch):
-        """Test that should_use_playwright_fallback respects config threshold."""
+    def test_playwright_fallback_uses_unified_needs_js_render(self, monkeypatch):
+        """Test that should_use_playwright_fallback uses unified needs_js_render logic."""
         from downloader import config, content_converter
+        from downloader.content_converter import needs_js_render, should_use_playwright_fallback
 
-        # Set a custom threshold via environment variable
-        monkeypatch.setenv("CONTENT_MIN_BODY_TEXT_THRESHOLD", "50")
-        config._settings = None  # Reset singleton
+        monkeypatch.setenv("CONTENT_MIN_JS_FRAMEWORK_CONTENT_THRESHOLD", "150")
+        config._settings = None
+        content_converter._js_heavy_cache.clear()
+        content_converter._static_html_cache.clear()
 
-        # Clear caches
-        content_converter._empty_content_cache.clear()
-        content_converter._fallback_bypass_cache.clear()
-
-        # HTML with 75 chars of body text (between 50 and 100)
-        body_content = "x" * 75
-        html = f"""<html><body>
-            <article>
-                <p>{body_content}</p>
-            </article>
+        # SPA shell with 175 chars of body text and complete OG metadata:
+        # triggers at default threshold (200), does NOT trigger at custom threshold (150).
+        body_content = "x" * 175
+        html = f"""<html><head>
+            <meta property="og:title" content="App">
+            <meta property="og:description" content="App Desc">
+        </head><body>
+            <div id="root"><p>{body_content}</p></div>
         </body></html>""".encode()
 
         url = "https://example.com/test-threshold"
         content_type = "text/html"
 
-        # With default threshold (100): 75 < 100 = False (caches as empty)
-        # With custom threshold (50): 75 >= 50 = True (allows fallback)
-        from downloader.content_converter import should_use_playwright_fallback
+        try:
+            assert not needs_js_render(url, html, content_type)
+            assert not should_use_playwright_fallback(url, html, content_type)
+        finally:
+            config._settings = None
 
-        result = should_use_playwright_fallback(url, html, content_type)
+    @pytest.mark.asyncio
+    async def test_spa_shell_text_and_html_agree_on_rendering(self):
+        """SPA app shells trigger JS rendering consistently across html, text, and markdown."""
+        from unittest.mock import AsyncMock
 
-        # Cleanup
-        config._settings = None
+        from downloader import content_converter
+        from downloader.content_converter import (
+            needs_js_render,
+            should_use_playwright_fallback,
+            should_use_playwright_for_html,
+        )
+        from downloader.models.responses import ResponseMetadata
+        from downloader.services.content_processor import ConversionDeps, ConversionRequest, convert
 
-        assert result, "75 chars should allow fallback with threshold=50"
+        content_converter._js_heavy_cache.clear()
+        content_converter._static_html_cache.clear()
+
+        spa_shell = (
+            b"<!DOCTYPE html><html><head><title>App</title></head>"
+            b'<body><div id="root"></div><script src="/bundle.js"></script></body></html>'
+        )
+        url = "https://example.com/spa-shell"
+        content_type = "text/html; charset=utf-8"
+
+        assert needs_js_render(url, spa_shell, content_type) is True
+        assert should_use_playwright_for_html(url, spa_shell, content_type) is True
+        assert should_use_playwright_fallback(url, spa_shell, content_type) is True
+
+        rendered_html = (
+            b"<html><body><main><h1>Rendered SPA</h1><p>Loaded content</p></main></body></html>"
+        )
+        metadata: ResponseMetadata = {
+            "status_code": 200,
+            "headers": {"content-type": content_type},
+            "url": url,
+            "size": len(spa_shell),
+            "content_type": content_type,
+            "http_version": "HTTP/1.1",
+            "connection_reused": False,
+        }
+
+        renderer = AsyncMock()
+        renderer.render_html.return_value = rendered_html
+        renderer.convert_fallback.return_value = "# Rendered SPA\n\nLoaded content"
+        deps = ConversionDeps(renderer=renderer)
+
+        html_res = await convert(
+            ConversionRequest(url=url, output_format="html", content=spa_shell, metadata=metadata),
+            deps,
+        )
+        text_res = await convert(
+            ConversionRequest(url=url, output_format="text", content=spa_shell, metadata=metadata),
+            deps,
+        )
+        md_res = await convert(
+            ConversionRequest(
+                url=url, output_format="markdown", content=spa_shell, metadata=metadata
+            ),
+            deps,
+        )
+
+        assert html_res.rendered_with_js is True
+        assert text_res.rendered_with_js is True
+        assert md_res.rendered_with_js is True
+        assert b"Rendered SPA" in html_res.body
+        assert b"Rendered SPA" in text_res.body
+        assert b"Rendered SPA" in md_res.body
+        renderer.render_html.assert_awaited_once()
+        assert renderer.convert_fallback.await_count == 2

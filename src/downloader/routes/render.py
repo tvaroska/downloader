@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import logging
 
 from fastapi import APIRouter, Depends, HTTPException, Request, Response
@@ -16,6 +17,7 @@ from ..dependencies import (
 )
 from ..errors import classify_domain_error, log_classified_error
 from ..models.responses import ErrorResponse, HTTPErrorResponse, RenderRequest
+from ..services.content_negotiation import sanitize_original_url_header
 from ..services.content_processor import ConversionDeps, ConversionRequest, convert
 from ..validation import canonical_host, validate_url_async
 
@@ -71,11 +73,18 @@ async def render_url(  # noqa: PLR0913
             full_page=render_request.full_page,
             screenshot_format=render_request.screenshot_format,
         )
-        result = await convert(conv_req, ConversionDeps(renderer=renderer))
+        if render_request.timeout_ms is not None:
+            async with asyncio.timeout(render_request.timeout_ms / 1000.0):
+                result = await convert(conv_req, ConversionDeps(renderer=renderer))
+        else:
+            result = await convert(conv_req, ConversionDeps(renderer=renderer))
+        headers = dict(result.headers)
+        if "X-Original-URL" in headers:
+            headers["X-Original-URL"] = sanitize_original_url_header(headers["X-Original-URL"])
         return Response(
             content=result.body,
             media_type=result.media_type,
-            headers=result.headers,
+            headers=headers,
         )
     except HTTPException:
         raise

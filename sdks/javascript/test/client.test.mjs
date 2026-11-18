@@ -93,6 +93,71 @@ function createMockFetch() {
       );
     }
 
+    if (url.pathname === "/jobs/job-js-1" && init.method === "DELETE") {
+      return new Response(
+        JSON.stringify({ success: true, message: "Job job-js-1 cancelled successfully" }),
+        { status: 200, headers: { "content-type": "application/json" } },
+      );
+    }
+
+    if (url.pathname === "/schedules/sched-js-1" && init.method === "GET") {
+      return new Response(
+        JSON.stringify({
+          id: "sched-js-1",
+          name: "Hourly",
+          url: "https://example.com",
+          cron_expression: "0 * * * *",
+          format: "text",
+          enabled: true,
+          created_at: "2026-11-12T00:00:00Z",
+        }),
+        { status: 200, headers: { "content-type": "application/json" } },
+      );
+    }
+
+    if (url.pathname === "/schedules/sched-js-1/history" && init.method === "GET") {
+      assert.equal(url.searchParams.get("limit"), "10");
+      assert.equal(url.searchParams.get("offset"), "2");
+      return new Response(
+        JSON.stringify({
+          executions: [
+            {
+              execution_id: "exec-js-1",
+              schedule_id: "sched-js-1",
+              status: "completed",
+              started_at: "2026-11-12T09:00:00Z",
+              completed_at: "2026-11-12T09:00:01Z",
+              duration: 1.0,
+              success: true,
+              content_size: 256,
+              attempt: 1,
+            },
+          ],
+          total: 17,
+          limit: 10,
+          offset: 2,
+        }),
+        { status: 200, headers: { "content-type": "application/json" } },
+      );
+    }
+
+    if (url.pathname === "/https://example.com/multi") {
+      const accept = String(headers.Accept ?? "");
+      if (accept.includes(",")) {
+        return new Response(
+          JSON.stringify({
+            url: "https://example.com/multi",
+            formats: { text: "Hello", markdown: "# Hello" },
+          }),
+          { status: 200, headers: { "content-type": "application/json" } },
+        );
+      }
+      return new Response("Single format body", {
+        status: 200,
+        headers: { "content-type": "text/plain; charset=utf-8" },
+      });
+    }
+
     if (url.pathname === "/https://rate.limit") {
       return new Response(
         JSON.stringify({
@@ -140,6 +205,30 @@ test("DownloaderClient handles download, render, OCR, screenshot, batch, and API
   });
   const results = await client.waitForBatch(batch.job_id, { pollIntervalMs: 5 });
   assert.equal(results.summary.successful_requests, 1);
+
+  const cancelled = await client.cancelJob("job-js-1");
+  assert.equal(cancelled.success, true);
+
+  const sched = await client.getSchedule("sched-js-1");
+  assert.equal(sched.name, "Hourly");
+
+  const history = await client.getScheduleHistory("sched-js-1", { limit: 10, offset: 2 });
+  assert.equal(history.total, 17);
+  assert.equal(history.limit, 10);
+  assert.equal(history.offset, 2);
+  assert.equal(history.executions[0].execution_id, "exec-js-1");
+
+  const multi = await client.downloadMulti("https://example.com/multi", ["text", "markdown"]);
+  assert.deepEqual(multi.formats, { text: "Hello", markdown: "# Hello" });
+
+  await assert.rejects(
+    () => client.downloadMulti("https://example.com/multi", ["text"]),
+    (err) => {
+      assert.ok(err instanceof DownloaderApiError);
+      assert.equal(err.errorType, "unexpected_content_type");
+      return true;
+    },
+  );
 
   await assert.rejects(
     () => client.download("https://rate.limit"),

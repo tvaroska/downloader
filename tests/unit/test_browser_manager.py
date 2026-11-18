@@ -108,49 +108,12 @@ class TestBrowserPoolInit:
 
 
 class TestBrowserPoolProcessManagement:
-    """Test process management and zombie cleanup."""
+    """Test browser close timeout management."""
 
     def test_custom_close_timeout(self):
         """Test custom close timeout configuration."""
-        config = BrowserConfig(close_timeout=10.0, force_kill_timeout=3.0)
+        config = BrowserConfig(close_timeout=10.0)
         assert config.close_timeout == 10.0
-        assert config.force_kill_timeout == 3.0
-
-    def test_get_browser_pid_with_valid_mock(self):
-        """Test PID extraction from mock browser with valid structure."""
-        pool = BrowserPool()
-
-        mock_browser = Mock()
-        mock_browser._impl_obj._browser_process.pid = 12345
-
-        pid = pool._get_browser_pid(mock_browser)
-        assert pid == 12345
-
-    def test_get_browser_pid_returns_none_on_missing_impl(self):
-        """Test PID extraction returns None when _impl_obj is missing."""
-        pool = BrowserPool()
-
-        mock_browser = Mock(spec=[])  # No _impl_obj attribute
-
-        pid = pool._get_browser_pid(mock_browser)
-        assert pid is None
-
-    def test_get_browser_pid_returns_none_on_missing_process(self):
-        """Test PID extraction returns None when _browser_process is missing."""
-        pool = BrowserPool()
-
-        mock_browser = Mock()
-        mock_browser._impl_obj = Mock(spec=[])  # No _browser_process attribute
-
-        pid = pool._get_browser_pid(mock_browser)
-        assert pid is None
-
-    @pytest.mark.asyncio
-    async def test_force_kill_handles_missing_process(self):
-        """Test force kill handles ProcessLookupError gracefully."""
-        pool = BrowserPool()
-        # PID that doesn't exist - should not raise
-        await pool._force_kill_process(999999999)
 
     @pytest.mark.asyncio
     async def test_close_browser_with_timeout_graceful_success(self):
@@ -166,7 +129,7 @@ class TestBrowserPoolProcessManagement:
 
         mock_browser.close = mock_close
 
-        result = await pool._close_browser_with_timeout(mock_browser, pid=None)
+        result = await pool._close_browser_with_timeout(mock_browser)
         assert result is True
 
     @pytest.mark.asyncio
@@ -177,7 +140,7 @@ class TestBrowserPoolProcessManagement:
         mock_browser = Mock()
         mock_browser.is_connected.return_value = False
 
-        result = await pool._close_browser_with_timeout(mock_browser, pid=None)
+        result = await pool._close_browser_with_timeout(mock_browser)
         # Returns False because browser wasn't connected
         assert result is False
 
@@ -194,31 +157,8 @@ class TestBrowserPoolProcessManagement:
 
         mock_browser.close = mock_close
 
-        result = await pool._close_browser_with_timeout(mock_browser, pid=None)
+        result = await pool._close_browser_with_timeout(mock_browser)
         assert result is False
-
-    @pytest.mark.asyncio
-    async def test_force_kill_process_sigterm_then_sigkill(self):
-        """Test force kill sends SIGTERM then SIGKILL."""
-        config = BrowserConfig(force_kill_timeout=0.01)
-        pool = BrowserPool(config)
-
-        with patch("os.kill") as mock_kill:
-            # Process survives SIGTERM, needs SIGKILL
-            mock_kill.side_effect = [None, None, None]  # SIGTERM, check, SIGKILL
-            await pool._force_kill_process(12345)
-
-            # Should have called kill at least twice
-            assert mock_kill.call_count >= 2
-
-    @pytest.mark.asyncio
-    async def test_force_kill_process_permission_error(self):
-        """Test force kill handles PermissionError."""
-        pool = BrowserPool()
-
-        with patch("os.kill", side_effect=PermissionError("Permission denied")):
-            # Should not raise
-            await pool._force_kill_process(12345)
 
 
 class TestBrowserPoolStart:
@@ -690,3 +630,58 @@ class TestBrowserPoolContext:
 
         call_kwargs = mock_browser.new_context.call_args[1]
         assert call_kwargs["viewport"] == custom_viewport
+
+
+@pytest.mark.asyncio
+async def test_pool_regains_capacity_after_failed_replacement(mock_playwright):
+    """R28: get_browser() replenishes capacity when prior replacement failed."""
+    _, playwright_instance, first_browser = mock_playwright
+    replacement_browser = AsyncMock()
+    replacement_browser.is_connected = Mock(return_value=True)
+    replacement_browser.close = AsyncMock()
+
+    playwright_instance.chromium.launch = AsyncMock(
+        side_effect=[
+            first_browser,
+            RuntimeError("transient launch failure"),
+            replacement_browser,
+        ]
+    )
+
+    pool = BrowserPool(BrowserConfig(pool_size=1, acquire_timeout=0.2))
+    await pool.start()
+    try:
+        acquired = await pool.get_browser()
+        assert acquired is first_browser
+
+        # Unhealthy release triggers replacement which fails on launch
+        first_browser.is_connected.return_value = False
+        await pool.release_browser(acquired)
+        assert len(pool._all_browsers) == 0
+
+        # Subsequent get_browser() must replenish instead of timing out
+        recovered = await pool.get_browser()
+        assert recovered is replacement_browser
+        assert len(pool._all_browsers) == 1
+        assert pool._browser_health[replacement_browser]["usage_count"] == 1
+    finally:
+        await pool.close()
+
+
+@pytest.mark.asyncio
+async def test_start_failure_stops_playwright_driver(mock_playwright):
+    """R28: start() closes already-started browsers and stops Playwright on partial failure."""
+    _, playwright_instance, first_browser = mock_playwright
+    playwright_instance.chromium.launch = AsyncMock(
+        side_effect=[first_browser, RuntimeError("second launch failed")]
+    )
+
+    pool = BrowserPool(BrowserConfig(pool_size=2))
+    with pytest.raises(BrowserPoolError, match="Browser pool initialization failed"):
+        await pool.start()
+
+    first_browser.close.assert_awaited_once()
+    playwright_instance.stop.assert_awaited_once()
+    assert pool._playwright is None
+    assert len(pool._all_browsers) == 0
+    assert pool._available_browsers.empty()

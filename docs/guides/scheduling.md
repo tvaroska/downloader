@@ -29,7 +29,7 @@ export REDIS_URI="redis://localhost:6379"
 export REDIS_URI="redis://:password@redis-host:6379/0"
 ```
 
-Without Redis, the scheduler will fall back to in-memory storage (not recommended for production as schedules are lost on restart).
+Without Redis (`REDIS_URI`), scheduling is disabled (`HTTP 503` on `/schedules`); there is no in-memory scheduler fallback.
 
 ### Start the Service
 

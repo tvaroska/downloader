@@ -215,11 +215,15 @@ async def process_background_batch_job(  # noqa: PLR0913
     *,
     renderer: BrowserRenderer | None = None,
     settings: Settings | None = None,
+    max_result_bytes: int | None = None,
 ) -> tuple[list[dict[str, Any]], dict[str, Any]]:
     """Execute a background batch job with bounded concurrency and incremental `JobStore` updates."""
     started = time.perf_counter()
     cfg = settings or get_settings()
     active_renderer = renderer or LocalBrowserRenderer(pdf_semaphore)
+    max_aggregate_bytes = (
+        max_result_bytes if max_result_bytes is not None else cfg.content.max_download_size
+    )
     concurrency_limit = (
         batch_request.concurrency_limit
         if batch_request.concurrency_limit is not None
@@ -234,10 +238,14 @@ async def process_background_batch_job(  # noqa: PLR0913
     request_semaphore = asyncio.Semaphore(concurrency_limit)
     progress_lock = asyncio.Lock()
     total_urls = max(1, len(batch_request.urls))
-    counts = {"processed": 0, "success": 0, "failed": 0}
+    counts = {"processed": 0, "success": 0, "failed": 0, "result_bytes": 0}
 
     async def _run_item(url_request: BatchURLRequest, index: int) -> BatchURLResult:
         async with request_semaphore, batch_semaphore:
+            current_job = await job_manager.get_job_info(job_id)
+            if current_job is not None and current_job.status == JobStatus.CANCELLED:
+                raise asyncio.CancelledError(f"Job {job_id} was cancelled")
+
             result = await process_single_url_in_batch(
                 url_request=url_request,
                 default_format=batch_request.default_format,
@@ -251,6 +259,21 @@ async def process_background_batch_job(  # noqa: PLR0913
                 settings=cfg,
             )
         async with progress_lock:
+            result_bytes = len(result.model_dump_json().encode("utf-8"))
+            if counts["result_bytes"] + result_bytes > max_aggregate_bytes and (
+                result.content is not None or result.content_base64 is not None
+            ):
+                result = BatchURLResult(
+                    url=result.url,
+                    success=False,
+                    format=result.format,
+                    duration=result.duration,
+                    error=f"Batch aggregate result size exceeded {max_aggregate_bytes} bytes limit",
+                    error_type="content_too_large",
+                    status_code=413,
+                )
+                result_bytes = len(result.model_dump_json().encode("utf-8"))
+            counts["result_bytes"] += result_bytes
             counts["processed"] += 1
             counts["success" if result.success else "failed"] += 1
             try:

@@ -1212,3 +1212,83 @@ class TestBatchEndpointEdgeCases:
             assert data["error_type"] == "job_cancellation_error"
         finally:
             app.dependency_overrides.pop(get_job_manager_dependency, None)
+
+
+@pytest.mark.asyncio
+async def test_batch_result_aggregate_size_is_capped():
+    """Aggregate batch results are bounded so a single Redis SETEX cannot grow unboundedly (R43)."""
+    from datetime import datetime
+
+    from downloader.job_manager import JobInfo, JobManager
+
+    mock_client = AsyncMock()
+    mock_client.download.return_value = (
+        b"<html><body>" + b"A" * 500 + b"</body></html>",
+        {
+            "url": "https://example.com",
+            "status_code": 200,
+            "content_type": "text/html",
+            "size": 526,
+            "headers": {"content-type": "text/html"},
+        },
+    )
+    mock_jm = AsyncMock()
+    mock_jm.get_job_info = AsyncMock(return_value=None)
+    mock_jm.update_job_status = AsyncMock()
+
+    batch_request = BatchRequest(
+        urls=[
+            BatchURLRequest(url="https://example1.com"),
+            BatchURLRequest(url="https://example2.com"),
+            BatchURLRequest(url="https://example3.com"),
+        ],
+        default_format="text",
+        concurrency_limit=1,
+        timeout_per_url=10,
+    )
+
+    results, summary = await process_background_batch_job(
+        job_id="cap-job-1",
+        batch_request=batch_request,
+        job_manager=mock_jm,
+        batch_semaphore=asyncio.Semaphore(1),
+        http_client=mock_client,
+        pdf_semaphore=asyncio.Semaphore(1),
+        max_result_bytes=1200,
+    )
+
+    assert len(results) == 3
+    assert any(r["error_type"] == "content_too_large" and r["status_code"] == 413 for r in results)
+    assert summary["failed_requests"] >= 1
+
+    # Also verify JobManager.store_job_results enforces the cap before SETEX
+    kv: dict[str, str] = {}
+    redis_mock = AsyncMock()
+    redis_mock.get = AsyncMock(
+        return_value=JobInfo(
+            job_id="cap-job-1",
+            status=JobStatus.RUNNING,
+            created_at=datetime.now(UTC),
+            request_data={},
+        ).model_dump_json()
+    )
+    redis_mock.setex = AsyncMock(side_effect=lambda k, _ttl, v: kv.__setitem__(k, v))
+    jm = JobManager("redis://localhost:6379")
+    jm.redis_client = redis_mock
+
+    big_results = [
+        {"url": f"https://example{i}.com", "success": True, "content": "X" * 400, "size": 400}
+        for i in range(3)
+    ]
+    await jm.store_job_results(
+        "cap-job-1",
+        big_results,
+        {"total_requests": 3},
+        status=JobStatus.COMPLETED,
+        total_duration=0.5,
+        max_result_bytes=1100,
+    )
+    stored_payload = kv["job_result:cap-job-1"]
+    assert len(stored_payload.encode("utf-8")) <= 1100
+    parsed = json.loads(stored_payload)
+    assert parsed["summary"]["truncated"] is True

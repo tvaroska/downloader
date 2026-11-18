@@ -54,6 +54,35 @@ steps:
         /workspace/.venv/bin/pytest tests/ --cov=src/downloader -n auto -m "not (integration or e2e or network or requires_redis or requires_playwright)" -v --timeout=30
         /workspace/.venv/bin/pytest sdks/python/tests -c sdks/python/pyproject.toml -v
 
+  - id: redis-integration-tests
+    name: gcr.io/cloud-builders/docker
+    waitFor:
+      - python-lint-typecheck-and-tests
+    entrypoint: bash
+    args:
+      - -c
+      - |
+        set -euo pipefail
+        docker run -d --name downloader-ci-redis --network cloudbuild redis:7-alpine
+        trap "docker rm -f downloader-ci-redis >/dev/null 2>&1 || true" EXIT
+        REDIS_OK=0
+        for i in $$(seq 1 15); do
+          if docker exec downloader-ci-redis redis-cli ping | grep -q PONG; then
+            REDIS_OK=1
+            break
+          fi
+          sleep 1
+        done
+        if [[ "$${REDIS_OK}" -ne 1 ]]; then
+          docker logs downloader-ci-redis || true
+          exit 1
+        fi
+        docker run --rm --network cloudbuild \
+          -v /workspace:/workspace -w /workspace \
+          -e REDIS_URI=redis://downloader-ci-redis:6379 \
+          ghcr.io/astral-sh/uv:0.12.24-python3.13-trixie-slim \
+          /workspace/.venv/bin/pytest tests/ -m requires_redis -v --timeout=30
+
   - id: sdk-go-tests
     name: golang:1.24-bookworm
     waitFor: ["-"]

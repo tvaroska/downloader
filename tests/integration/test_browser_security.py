@@ -1,8 +1,7 @@
 """Integration tests for browser security measures."""
 
 import asyncio
-import signal
-from unittest.mock import AsyncMock, MagicMock, call, patch
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
@@ -136,105 +135,7 @@ class TestMemoryLimitEnforcement:
 
 @pytest.mark.asyncio
 class TestProcessCleanup:
-    """Test zombie process cleanup after timeout."""
-
-    async def test_force_kill_sends_sigterm_first(self):
-        """Test that SIGTERM is sent first before SIGKILL."""
-        pool = BrowserPool()
-        test_pid = 12345
-
-        with patch("downloader.browser.manager.os.kill") as mock_kill:
-            with patch("downloader.browser.manager.asyncio.sleep", new_callable=AsyncMock):
-                # Process terminates after SIGTERM
-                mock_kill.side_effect = [None, ProcessLookupError()]
-
-                await pool._force_kill_process(test_pid)
-
-                # First call should be SIGTERM
-                first_call = mock_kill.call_args_list[0]
-                assert first_call == call(test_pid, signal.SIGTERM)
-
-    async def test_force_kill_waits_before_sigkill(self):
-        """Test that pool waits force_kill_timeout before SIGKILL."""
-        config = BrowserConfig(force_kill_timeout=2.0)
-        pool = BrowserPool(config)
-        test_pid = 12345
-
-        with patch("downloader.browser.manager.os.kill") as mock_kill:
-            with patch(
-                "downloader.browser.manager.asyncio.sleep", new_callable=AsyncMock
-            ) as mock_sleep:
-                # Process terminates after SIGTERM
-                mock_kill.side_effect = [None, ProcessLookupError()]
-
-                await pool._force_kill_process(test_pid)
-
-                mock_sleep.assert_called_once_with(2.0)
-
-    async def test_force_kill_sends_sigkill_if_process_alive(self):
-        """Test that SIGKILL is sent if process survives SIGTERM."""
-        pool = BrowserPool()
-        test_pid = 12345
-
-        with patch("downloader.browser.manager.os.kill") as mock_kill:
-            with patch("downloader.browser.manager.asyncio.sleep", new_callable=AsyncMock):
-                # Process stays alive: SIGTERM, check (0), then SIGKILL
-                mock_kill.side_effect = [None, None, None]
-
-                await pool._force_kill_process(test_pid)
-
-                calls = mock_kill.call_args_list
-                assert len(calls) >= 3
-                # First: SIGTERM
-                assert calls[0] == call(test_pid, signal.SIGTERM)
-                # Second: check if alive (signal 0)
-                assert calls[1] == call(test_pid, 0)
-                # Third: SIGKILL
-                assert calls[2] == call(test_pid, signal.SIGKILL)
-
-    async def test_force_kill_skips_sigkill_if_process_terminated(self):
-        """Test that SIGKILL is skipped if process already terminated."""
-        pool = BrowserPool()
-        test_pid = 12345
-
-        with patch("downloader.browser.manager.os.kill") as mock_kill:
-            with patch("downloader.browser.manager.asyncio.sleep", new_callable=AsyncMock):
-                # Process terminates: SIGTERM succeeds, check raises ProcessLookupError
-                mock_kill.side_effect = [None, ProcessLookupError()]
-
-                await pool._force_kill_process(test_pid)
-
-                calls = mock_kill.call_args_list
-                # Should only have SIGTERM and check calls, no SIGKILL
-                assert len(calls) == 2
-                assert calls[0] == call(test_pid, signal.SIGTERM)
-                assert calls[1] == call(test_pid, 0)
-
-    async def test_force_kill_handles_permission_error(self):
-        """Test graceful handling when permission to kill is denied."""
-        pool = BrowserPool()
-        test_pid = 12345
-
-        with patch("downloader.browser.manager.os.kill") as mock_kill:
-            with patch("downloader.browser.manager.asyncio.sleep", new_callable=AsyncMock):
-                mock_kill.side_effect = PermissionError("Operation not permitted")
-
-                # Should not raise exception
-                await pool._force_kill_process(test_pid)
-                # Verify kill was attempted
-                mock_kill.assert_called()
-
-    async def test_force_kill_handles_process_not_found_on_sigterm(self):
-        """Test handling when process not found during SIGTERM."""
-        pool = BrowserPool()
-        test_pid = 12345
-
-        with patch("downloader.browser.manager.os.kill") as mock_kill:
-            with patch("downloader.browser.manager.asyncio.sleep", new_callable=AsyncMock):
-                mock_kill.side_effect = ProcessLookupError("No such process")
-
-                # Should not raise exception
-                await pool._force_kill_process(test_pid)
+    """Test browser close timeout cleanup."""
 
     async def test_close_browser_graceful_success(self):
         """Test that browser closes gracefully within timeout."""
@@ -245,14 +146,14 @@ class TestProcessCleanup:
         mock_browser.is_connected.return_value = True
         mock_browser.close = AsyncMock()
 
-        result = await pool._close_browser_with_timeout(mock_browser, pid=12345)
+        result = await pool._close_browser_with_timeout(mock_browser)
 
         assert result is True
         mock_browser.close.assert_called_once()
 
-    async def test_close_browser_timeout_triggers_force_kill(self):
-        """Test that timeout during close triggers force kill."""
-        config = BrowserConfig(close_timeout=0.1, force_kill_timeout=0.1)
+    async def test_close_browser_timeout_returns_false(self):
+        """Test that timeout during close returns False."""
+        config = BrowserConfig(close_timeout=0.1)
         pool = BrowserPool(config)
 
         mock_browser = MagicMock()
@@ -264,11 +165,9 @@ class TestProcessCleanup:
 
         mock_browser.close = slow_close
 
-        with patch.object(pool, "_force_kill_process", new_callable=AsyncMock) as mock_force_kill:
-            result = await pool._close_browser_with_timeout(mock_browser, pid=12345)
+        result = await pool._close_browser_with_timeout(mock_browser)
 
-            assert result is False
-            mock_force_kill.assert_called_once_with(12345)
+        assert result is False
 
     async def test_close_browser_uses_configured_timeout(self):
         """Test that close uses configured timeout value."""
@@ -284,7 +183,7 @@ class TestProcessCleanup:
         ) as mock_wait_for:
             mock_wait_for.return_value = None
 
-            await pool._close_browser_with_timeout(mock_browser, pid=12345)
+            await pool._close_browser_with_timeout(mock_browser)
 
             mock_wait_for.assert_called_once()
             call_args = mock_wait_for.call_args

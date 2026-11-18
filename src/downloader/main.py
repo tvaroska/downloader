@@ -7,10 +7,12 @@ import multiprocessing
 import time
 from collections.abc import AsyncIterator, Awaitable
 from contextlib import asynccontextmanager
+from datetime import datetime
 from typing import Any, cast
 
 import redis.exceptions as redis_exc
 from fastapi import FastAPI, HTTPException, Request, Response
+from fastapi.exceptions import RequestValidationError
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.openapi.docs import (
     get_redoc_html,
@@ -27,11 +29,12 @@ from .auth import get_auth_status
 from .config import Settings, get_settings
 from .crawling import DomainThrottle, RobotsChecker
 from .dependencies import build_browser_renderer
-from .drain import DrainCoordinator, DrainMiddleware
+from .drain import DrainCoordinator, DrainMiddleware, install_sigterm_drain_handler
 from .http_client import HTTPClient, RedirectPolicyHook
 from .job_manager import JobManager
 from .logging_config import get_logger, setup_logging
 from .middleware import MetricsMiddleware, get_system_metrics_collector
+from .models.responses import ErrorResponse
 from .pdf_generator import (
     PDFGeneratorError,
     PlaywrightPDFGenerator,
@@ -238,51 +241,64 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     )
     drain_coordinator.reset()
     app.state.drain_coordinator = drain_coordinator
-    reset_rate_limiter(limiter)
-    configure_telemetry(current_settings.telemetry, app=app, service_version=__version__)
-    _log_startup_validation(current_settings)
+    restore_sigterm = install_sigterm_drain_handler(drain_coordinator)
+    try:
+        active_rl_uri = (
+            current_settings.ratelimit.storage_uri
+            or current_settings.redis.redis_uri
+            or "memory://"
+        )
+        if active_rl_uri.startswith("memory://"):
+            reset_rate_limiter(limiter)
+        configure_telemetry(current_settings.telemetry, app=app, service_version=__version__)
+        _log_startup_validation(current_settings)
 
-    app.state.pdf_semaphore = asyncio.Semaphore(current_settings.pdf.concurrency)
-    app.state.batch_semaphore = asyncio.Semaphore(current_settings.batch.concurrency)
+        app.state.pdf_semaphore = asyncio.Semaphore(current_settings.pdf.concurrency)
+        app.state.batch_semaphore = asyncio.Semaphore(current_settings.batch.concurrency)
 
-    job_manager = await _init_redis_and_crawling(app, current_settings, egress_policy)
-    http_client = HTTPClient(
-        timeout=current_settings.http.request_timeout,
-        max_redirects=current_settings.http.max_redirects,
-        user_agent=current_settings.crawling.user_agent,
-        max_download_size=current_settings.content.max_download_size,
-        max_connections=current_settings.http.max_connections,
-        max_keepalive_connections=current_settings.http.max_keepalive_connections,
-        keepalive_expiry=current_settings.http.keepalive_expiry,
-        http2=current_settings.http.http2_enabled,
-        egress_policy=egress_policy,
-        redirect_policy=_make_redirect_policy(app),
-    )
-    app.state.http_client = http_client
+        job_manager = await _init_redis_and_crawling(app, current_settings, egress_policy)
+        http_client = HTTPClient(
+            timeout=current_settings.http.request_timeout,
+            max_redirects=current_settings.http.max_redirects,
+            user_agent=current_settings.crawling.user_agent,
+            max_download_size=current_settings.content.max_download_size,
+            max_connections=current_settings.http.max_connections,
+            max_keepalive_connections=current_settings.http.max_keepalive_connections,
+            keepalive_expiry=current_settings.http.keepalive_expiry,
+            http2=current_settings.http.http2_enabled,
+            egress_policy=egress_policy,
+            redirect_policy=_make_redirect_policy(app),
+        )
+        app.state.http_client = http_client
 
-    _init_pdf_generator(app, current_settings, egress_policy)
+        _init_pdf_generator(app, current_settings, egress_policy)
 
-    # Choose local vs remote BrowserRenderer adapter once at startup.
-    app.state.browser_renderer = build_browser_renderer(
-        current_settings,
-        pdf_semaphore=app.state.pdf_semaphore,
-        work_queue=app.state.worker_queue,
-    )
-    app.state._browser_renderer_mode = (
-        current_settings.worker.deployment_mode,
-        current_settings.worker.remote_browser_enabled,
-        current_settings.worker.remote_browser_timeout,
-        current_settings.content.max_download_size,
-    )
+        # Choose local vs remote BrowserRenderer adapter once at startup.
+        app.state.browser_renderer = build_browser_renderer(
+            current_settings,
+            pdf_semaphore=app.state.pdf_semaphore,
+            work_queue=app.state.worker_queue,
+        )
+        app.state._browser_renderer_mode = (
+            current_settings.worker.deployment_mode,
+            current_settings.worker.remote_browser_enabled,
+            current_settings.worker.remote_browser_timeout,
+            current_settings.content.max_download_size,
+        )
 
-    await _init_scheduler(app, current_settings, job_manager, http_client)
+        await _init_scheduler(app, current_settings, job_manager, http_client)
 
-    system_metrics = get_system_metrics_collector()
-    await system_metrics.start(app_state=app.state)
+        system_metrics = get_system_metrics_collector()
+        await system_metrics.start(app_state=app.state)
 
-    yield
-
-    await _teardown_services(app, current_settings, drain_coordinator, system_metrics, http_client)
+        try:
+            yield
+        finally:
+            await _teardown_services(
+                app, current_settings, drain_coordinator, system_metrics, http_client
+            )
+    finally:
+        restore_sigterm()
 
 
 app = FastAPI(
@@ -309,6 +325,28 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+
+@app.exception_handler(RequestValidationError)
+async def request_validation_exception_handler(
+    _request: Request, exc: RequestValidationError
+) -> JSONResponse:
+    """Return the standard ErrorResponse envelope for FastAPI request validation errors."""
+    messages: list[str] = []
+    for err in exc.errors():
+        loc = ".".join(str(part) for part in err.get("loc", ()) if part != "body")
+        msg = err.get("msg", "Invalid value")
+        messages.append(f"{loc}: {msg}" if loc else msg)
+    summary = "; ".join(messages) if messages else "Request validation failed"
+    return JSONResponse(
+        status_code=422,
+        content={
+            "detail": ErrorResponse(
+                error=summary,
+                error_type="validation_error",
+            ).model_dump()
+        },
+    )
 
 
 def _require_non_prod_docs(request: Request) -> Settings:
@@ -361,33 +399,44 @@ async def _probe_job_manager_status(job_manager: Any) -> dict[str, Any]:
     try:
         await cast(Awaitable[bool], redis_client.ping())
         status_dict["status"] = "connected"
-    except (redis_exc.RedisError, OSError, RuntimeError) as exc:
+    except (redis_exc.RedisError, OSError, RuntimeError):
         status_dict["status"] = "error"
-        status_dict["error"] = str(exc)
     return status_dict
 
 
 async def _probe_workers_status(
     app_settings: Settings, worker_queue: WorkQueue | None
 ) -> dict[str, Any]:
-    workers_status: dict[str, Any] = {
+    return {
         "deployment_mode": app_settings.worker.deployment_mode,
         "remote_browser_enabled": app_settings.worker.remote_browser_enabled,
+        "queue_configured": worker_queue is not None,
     }
-    if worker_queue is not None:
-        try:
-            active_workers = await worker_queue.list_active_workers()
-            queue_depths = await worker_queue.get_queue_depths()
-            workers_status.update(
-                {
-                    "active_workers": len(active_workers),
-                    "workers": active_workers,
-                    "queues": queue_depths,
-                }
-            )
-        except (redis_exc.RedisError, OSError, RuntimeError) as exc:
-            workers_status["error"] = str(exc)
-    return workers_status
+
+
+async def _get_scheduler_status_nonblocking(scheduler: SchedulerService) -> dict[str, Any]:
+    """Read scheduler status without running synchronous RedisJobStore I/O on the event loop."""
+    inner = getattr(scheduler, "_scheduler", None)
+    started = getattr(scheduler, "_started", None)
+    if inner is None or not isinstance(started, bool):
+        return await scheduler.get_status()
+    if not started:
+        return {"status": "stopped"}
+
+    jobs = await asyncio.to_thread(scheduler.get_jobs)
+    pending_jobs = [job for job in jobs if job.next_run_time is not None]
+    next_run: datetime | None = (
+        min(job.next_run_time for job in pending_jobs if job.next_run_time)
+        if pending_jobs
+        else None
+    )
+    return {
+        "status": "running" if inner.running else "paused",
+        "job_store_type": scheduler.settings.job_store_type,
+        "total_jobs": len(jobs),
+        "pending_jobs": len(pending_jobs),
+        "next_run_time": next_run.isoformat() if next_run else None,
+    }
 
 
 @app.get("/health", response_model=None)
@@ -431,7 +480,7 @@ async def health_check(request: Request) -> dict[str, Any] | Response:
     scheduler: SchedulerService | None = getattr(request.app.state, "scheduler", None)
     scheduler_status: dict[str, Any] = {"available": scheduler is not None}
     if scheduler is not None:
-        scheduler_status.update(await scheduler.get_status())
+        scheduler_status.update(await _get_scheduler_status_nonblocking(scheduler))
     else:
         scheduler_status["reason"] = "Redis connection required"
 

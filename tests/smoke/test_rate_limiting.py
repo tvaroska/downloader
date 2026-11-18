@@ -10,18 +10,8 @@ def test_rate_limiting_config():
 
     settings = get_settings()
 
-    # Verify rate limiting configuration exists
-    assert hasattr(settings, "ratelimit")
-    assert hasattr(settings.ratelimit, "enabled")
-    assert hasattr(settings.ratelimit, "default_limit")
-    assert hasattr(settings.ratelimit, "download_limit")
-    assert hasattr(settings.ratelimit, "batch_limit")
-    assert hasattr(settings.ratelimit, "status_limit")
-
-    # Verify default values
-    assert isinstance(settings.ratelimit.enabled, bool)
-    assert isinstance(settings.ratelimit.default_limit, str)
-    assert "/" in settings.ratelimit.default_limit  # Format: "count/period"
+    # Verify default format: "count/period"
+    assert "/" in settings.ratelimit.default_limit
 
 
 @pytest.mark.smoke
@@ -46,10 +36,8 @@ def test_rate_limiting_middleware_initialization():
     # Should initialize without errors
     middleware = RateLimitMiddleware(app, limiter)
 
-    # Verify middleware has required attributes
-    assert hasattr(middleware, "limiter")
-    assert hasattr(middleware, "settings")
-    assert hasattr(middleware, "rate_limits")
+    assert middleware.limiter is limiter
+    assert middleware.settings is not None
 
 
 @pytest.mark.smoke
@@ -71,20 +59,12 @@ def test_rate_limiting_patterns():
     batch_limit = middleware._get_rate_limit_for_path("/batch/jobs")
     download_limit = middleware._get_rate_limit_for_path("/https://example.com")
 
-    # Verify appropriate limits are applied
-    # If rate limiting is enabled, limits should be strings
-    if middleware.settings.ratelimit.enabled:
-        assert health_limit is not None
-        assert metrics_limit is not None
-        assert batch_limit is not None
-        assert download_limit is not None
-
-        # Status endpoints should have higher limits
-        assert "/" in health_limit
-        assert "/" in metrics_limit
-    else:
-        # If disabled, all should be None
-        assert health_limit is None
+    assert health_limit is not None
+    assert metrics_limit is not None
+    assert batch_limit is not None
+    assert download_limit is not None
+    assert "/" in health_limit
+    assert "/" in metrics_limit
 
 
 @pytest.mark.smoke
@@ -92,8 +72,6 @@ def test_main_app_has_rate_limiter():
     """Test that main app has rate limiter configured."""
     from downloader.main import app
 
-    # App should have limiter in state
-    assert hasattr(app.state, "limiter")
     assert app.state.limiter is not None
 
 
@@ -124,7 +102,6 @@ def test_rate_limiting_limits_are_valid():
     ]
 
     for limit in limits:
-        assert isinstance(limit, str)
         assert "/" in limit
         parts = limit.split("/")
         assert len(parts) == 2

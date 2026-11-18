@@ -25,7 +25,7 @@ from .models import (
     DownloadResult,
     HealthStatus,
     ScheduleCreateRequest,
-    ScheduleExecution,
+    ScheduleHistory,
     ScheduleInfo,
 )
 
@@ -61,28 +61,28 @@ def _raise_for_api_error(response: httpx.Response) -> None:
             error_type = detail.get("error_type")
         elif isinstance(detail, str):
             message = detail
-    except Exception:
+    except Exception:  # noqa: BLE001
         if response.text:
             message = response.text[:500]
 
     retry_after_raw = response.headers.get("retry-after")
     retry_after = int(retry_after_raw) if retry_after_raw and retry_after_raw.isdigit() else None
 
-    if response.status_code in (400, 422):
+    if response.status_code in (400, 422) and error_type != "http_error":
         raise ValidationError(
             message,
             status_code=response.status_code,
             error_type=error_type,
             retry_after=retry_after,
         )
-    if response.status_code == 429:
+    if response.status_code == 429 and error_type != "http_error":
         raise RateLimitError(
             message,
             status_code=response.status_code,
             error_type=error_type,
             retry_after=retry_after,
         )
-    if response.status_code == 503:
+    if response.status_code == 503 and error_type != "http_error":
         raise ServiceUnavailableError(
             message,
             status_code=response.status_code,
@@ -103,7 +103,7 @@ def _encode_target_url_path(url: str) -> str:
     return stripped.replace("%", "%25").replace("?", "%3F").replace("#", "%23")
 
 
-def _download_request_args(
+def _download_request_args(  # noqa: PLR0913
     url: str,
     *,
     format: str = "text",
@@ -152,7 +152,32 @@ def _to_download_result(url: str, response: httpx.Response) -> DownloadResult:
     )
 
 
-def _serialize_batch_payload(
+def _parse_multi_format_response(response: httpx.Response) -> dict[str, Any]:
+    content_type = response.headers.get("content-type", "").split(";", 1)[0].strip().lower()
+    if content_type and content_type != "application/json" and not content_type.endswith("+json"):
+        raise APIError(
+            f"Expected JSON multi-format response, got {content_type}",
+            status_code=response.status_code,
+            error_type="unexpected_content_type",
+        )
+    try:
+        data = response.json()
+    except (ValueError, json.JSONDecodeError) as exc:
+        raise APIError(
+            f"Expected JSON multi-format response, got invalid JSON ({content_type or 'unknown'})",
+            status_code=response.status_code,
+            error_type="invalid_json_response",
+        ) from exc
+    if not isinstance(data, dict):
+        raise APIError(
+            "Expected JSON object in multi-format response",
+            status_code=response.status_code,
+            error_type="invalid_json_response",
+        )
+    return dict(data)
+
+
+def _serialize_batch_payload(  # noqa: PLR0913
     urls: Sequence[str | BatchURLItem | dict[str, Any]],
     *,
     default_format: str = "text",
@@ -217,7 +242,7 @@ class DownloaderClient:
         _raise_for_api_error(resp)
         return HealthStatus.model_validate(resp.json())
 
-    def download(
+    def download(  # noqa: PLR0913
         self,
         url: str,
         *,
@@ -247,7 +272,7 @@ class DownloaderClient:
         _raise_for_api_error(resp)
         return _to_download_result(url, resp)
 
-    def download_multi(
+    def download_multi(  # noqa: PLR0913
         self,
         url: str,
         formats: Sequence[str],
@@ -267,7 +292,7 @@ class DownloaderClient:
         )
         resp = self._client.get(path, headers={"Accept": accept}, params=params)
         _raise_for_api_error(resp)
-        return dict(resp.json())
+        return _parse_multi_format_response(resp)
 
     def screenshot(
         self,
@@ -305,7 +330,7 @@ class DownloaderClient:
     ) -> DownloadResult:
         return self.download(image_url, format=format, ocr=True, ocr_lang=language)
 
-    def render(
+    def render(  # noqa: PLR0913
         self,
         url: str,
         *,
@@ -330,7 +355,7 @@ class DownloaderClient:
         _raise_for_api_error(resp)
         return _to_download_result(url, resp)
 
-    def submit_batch(
+    def submit_batch(  # noqa: PLR0913
         self,
         urls: Sequence[str | BatchURLItem | dict[str, Any]],
         *,
@@ -407,14 +432,13 @@ class DownloaderClient:
 
     def get_schedule_history(
         self, schedule_id: str, *, limit: int = 20, offset: int = 0
-    ) -> list[ScheduleExecution]:
+    ) -> ScheduleHistory:
         resp = self._client.get(
             f"/schedules/{schedule_id}/history",
             params={"limit": limit, "offset": offset},
         )
         _raise_for_api_error(resp)
-        data = resp.json()
-        return [ScheduleExecution.model_validate(item) for item in data.get("executions", [])]
+        return ScheduleHistory.model_validate(resp.json())
 
     def delete_schedule(self, schedule_id: str) -> dict[str, Any]:
         resp = self._client.delete(f"/schedules/{schedule_id}")
@@ -455,7 +479,7 @@ class AsyncDownloaderClient:
         _raise_for_api_error(resp)
         return HealthStatus.model_validate(resp.json())
 
-    async def download(
+    async def download(  # noqa: PLR0913
         self,
         url: str,
         *,
@@ -484,6 +508,28 @@ class AsyncDownloaderClient:
         resp = await self._client.get(path, headers=headers, params=params)
         _raise_for_api_error(resp)
         return _to_download_result(url, resp)
+
+    async def download_multi(  # noqa: PLR0913
+        self,
+        url: str,
+        formats: Sequence[str],
+        *,
+        render: bool = False,
+        wait_for: str | None = None,
+        full_page: bool = False,
+        actions: Sequence[BrowserAction | dict[str, Any]] | None = None,
+    ) -> dict[str, Any]:
+        accept = ", ".join(_FORMAT_TO_ACCEPT.get(f, f) for f in formats)
+        path, _, params = _download_request_args(
+            url,
+            render=render,
+            wait_for=wait_for,
+            full_page=full_page,
+            actions=actions,
+        )
+        resp = await self._client.get(path, headers={"Accept": accept}, params=params)
+        _raise_for_api_error(resp)
+        return _parse_multi_format_response(resp)
 
     async def screenshot(
         self,
@@ -521,7 +567,7 @@ class AsyncDownloaderClient:
     ) -> DownloadResult:
         return await self.download(image_url, format=format, ocr=True, ocr_lang=language)
 
-    async def render(
+    async def render(  # noqa: PLR0913
         self,
         url: str,
         *,
@@ -546,7 +592,7 @@ class AsyncDownloaderClient:
         _raise_for_api_error(resp)
         return _to_download_result(url, resp)
 
-    async def submit_batch(
+    async def submit_batch(  # noqa: PLR0913
         self,
         urls: Sequence[str | BatchURLItem | dict[str, Any]],
         *,
@@ -577,6 +623,11 @@ class AsyncDownloaderClient:
         resp = await self._client.get(f"/jobs/{job_id}/results")
         _raise_for_api_error(resp)
         return BatchJobResults.model_validate(resp.json())
+
+    async def cancel_job(self, job_id: str) -> dict[str, Any]:
+        resp = await self._client.delete(f"/jobs/{job_id}")
+        _raise_for_api_error(resp)
+        return dict(resp.json())
 
     async def wait_for_batch(
         self,
@@ -610,6 +661,21 @@ class AsyncDownloaderClient:
         _raise_for_api_error(resp)
         data = resp.json()
         return [ScheduleInfo.model_validate(item) for item in data.get("schedules", [])]
+
+    async def get_schedule(self, schedule_id: str) -> ScheduleInfo:
+        resp = await self._client.get(f"/schedules/{schedule_id}")
+        _raise_for_api_error(resp)
+        return ScheduleInfo.model_validate(resp.json())
+
+    async def get_schedule_history(
+        self, schedule_id: str, *, limit: int = 20, offset: int = 0
+    ) -> ScheduleHistory:
+        resp = await self._client.get(
+            f"/schedules/{schedule_id}/history",
+            params={"limit": limit, "offset": offset},
+        )
+        _raise_for_api_error(resp)
+        return ScheduleHistory.model_validate(resp.json())
 
     async def delete_schedule(self, schedule_id: str) -> dict[str, Any]:
         resp = await self._client.delete(f"/schedules/{schedule_id}")

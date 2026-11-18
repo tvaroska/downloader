@@ -22,6 +22,7 @@ from downloader.models.schedule import (
     ScheduleCreate,
     ScheduleExecution,
     ScheduleResponse,
+    cron_trigger_from_unix_crontab,
 )
 from downloader.scheduler.executor import (
     MAX_ATTEMPTS,
@@ -353,6 +354,42 @@ class TestCronExpressionValidation:
             )
         assert "at least 9 characters" in str(exc_info.value)
 
+    def test_weekday_range_fires_monday_to_friday(self):
+        """Test UNIX 0=Sunday semantics: 0 9 * * 1-5 fires Mon-Fri, not Tue-Sat."""
+        trigger = cron_trigger_from_unix_crontab("0 9 * * 1-5")
+        # Sunday 2026-11-15 00:00 UTC
+        cursor = datetime(2026, 11, 15, 0, 0, tzinfo=UTC)
+        fired_weekdays: list[int] = []
+        for _ in range(5):
+            next_fire = trigger.get_next_fire_time(None, cursor)
+            assert next_fire is not None
+            fired_weekdays.append(next_fire.weekday())  # Python: Mon=0 .. Sun=6
+            cursor = next_fire + timedelta(minutes=1)
+        assert fired_weekdays == [0, 1, 2, 3, 4]
+
+        # Weekend list 0,6 -> Sun (6) and Sat (5)
+        weekend = cron_trigger_from_unix_crontab("0 9 * * 0,6")
+        sat_fire = weekend.get_next_fire_time(None, datetime(2026, 11, 16, 0, 0, tzinfo=UTC))
+        assert sat_fire is not None and sat_fire.weekday() == 5
+        sun_fire = weekend.get_next_fire_time(None, sat_fire + timedelta(minutes=1))
+        assert sun_fire is not None and sun_fire.weekday() == 6
+
+        # Stepped range 1-5/2 -> Mon (0), Wed (2), Fri (4)
+        stepped = cron_trigger_from_unix_crontab("0 9 * * 1-5/2")
+        stepped_days: list[int] = []
+        cursor = datetime(2026, 11, 15, 0, 0, tzinfo=UTC)
+        for _ in range(3):
+            next_fire = stepped.get_next_fire_time(None, cursor)
+            assert next_fire is not None
+            stepped_days.append(next_fire.weekday())
+            cursor = next_fire + timedelta(minutes=1)
+        assert stepped_days == [0, 2, 4]
+
+        # Sunday alias 7 -> Sun (6)
+        sun_seven = cron_trigger_from_unix_crontab("0 9 * * 7")
+        fire_seven = sun_seven.get_next_fire_time(None, datetime(2026, 11, 16, 0, 0, tzinfo=UTC))
+        assert fire_seven is not None and fire_seven.weekday() == 6
+
 
 # ============= ExecutionStorage Tests =============
 
@@ -510,6 +547,87 @@ class TestExecutionStorageOperations:
         key = storage._get_executions_list_key("sched-123")
         assert key == "schedule:executions:sched-123"
 
+    @pytest.mark.asyncio
+    async def test_total_excludes_expired_executions(self):
+        """Test get_execution_count and get_executions trim expired IDs from sorted set."""
+
+        class _InMemoryZSetRedis:
+            def __init__(self) -> None:
+                self.kv: dict[str, tuple[str, float]] = {}
+                self.zsets: dict[str, dict[str, float]] = {}
+
+            async def setex(self, key: str, ttl: int, value: str) -> bool:
+                self.kv[key] = (value, ttl)
+                return True
+
+            async def get(self, key: str) -> str | None:
+                entry = self.kv.get(key)
+                return entry[0] if entry else None
+
+            async def zadd(self, key: str, mapping: dict[str, float]) -> int:
+                zset = self.zsets.setdefault(key, {})
+                zset.update(mapping)
+                return len(mapping)
+
+            async def zremrangebyscore(self, key: str, min_score: str, max_score: float) -> int:
+                zset = self.zsets.get(key, {})
+                to_remove = [
+                    k for k, score in zset.items() if min_score == "-inf" and score <= max_score
+                ]
+                for k in to_remove:
+                    del zset[k]
+                return len(to_remove)
+
+            async def zrevrange(self, key: str, start: int, end: int) -> list[bytes]:
+                zset = self.zsets.get(key, {})
+                ordered = sorted(zset.items(), key=lambda item: item[1], reverse=True)
+                sliced = ordered[start : end + 1]
+                return [k.encode("utf-8") for k, _ in sliced]
+
+            async def zcard(self, key: str) -> int:
+                return len(self.zsets.get(key, {}))
+
+            async def expire(self, key: str, ttl: int) -> bool:
+                return key in self.zsets
+
+        fake_redis = _InMemoryZSetRedis()
+        storage = ExecutionStorage(fake_redis, ttl=3600)  # type: ignore[arg-type]
+        now = datetime.now(UTC)
+
+        expired_exec = ScheduleExecution(
+            execution_id="exec-expired",
+            schedule_id="sched-1",
+            status=ExecutionStatus.COMPLETED,
+            started_at=now - timedelta(seconds=7200),
+            completed_at=now - timedelta(seconds=7199),
+            duration=1.0,
+            success=True,
+            content_size=100,
+            error_message=None,
+            attempt=1,
+        )
+        fresh_exec = ScheduleExecution(
+            execution_id="exec-fresh",
+            schedule_id="sched-1",
+            status=ExecutionStatus.COMPLETED,
+            started_at=now,
+            completed_at=now,
+            duration=1.0,
+            success=True,
+            content_size=200,
+            error_message=None,
+            attempt=1,
+        )
+
+        await storage.store_execution(expired_exec)
+        await storage.store_execution(fresh_exec)
+        # Simulate Redis TTL expiring the old execution record key
+        fake_redis.kv.pop(storage._get_execution_key("sched-1", "exec-expired"), None)
+
+        assert await storage.get_execution_count("sched-1") == 1
+        executions = await storage.get_executions("sched-1")
+        assert [e.execution_id for e in executions] == ["exec-fresh"]
+
 
 # ============= SchedulerService Tests =============
 
@@ -656,6 +774,42 @@ class TestSchedulerServiceLifecycle:
     def test_is_running_false_when_stopped(self, service):
         """Test is_running returns False before start."""
         assert service.is_running() is False
+
+    @pytest.mark.asyncio
+    async def test_job_added_by_paused_scheduler_is_run_by_active_scheduler(self):
+        """Test a job added via a paused API scheduler is discovered and run by an active worker."""
+        import asyncio
+
+        from apscheduler.jobstores.memory import MemoryJobStore
+        from apscheduler.triggers.date import DateTrigger
+
+        shared_store = MemoryJobStore()
+        settings = SchedulerConfig(job_store_type="memory", misfire_grace_time=60)
+
+        active_svc = SchedulerService(redis_uri=None, settings=settings, wakeup_interval=0.05)
+        paused_svc = SchedulerService(redis_uri=None, settings=settings, wakeup_interval=0.05)
+        active_svc.scheduler._jobstores["default"] = shared_store
+        paused_svc.scheduler._jobstores["default"] = shared_store
+
+        ran_event = asyncio.Event()
+
+        async def _mark_ran() -> None:
+            ran_event.set()
+
+        await active_svc.start(paused=False)
+        await paused_svc.start(paused=True)
+        try:
+            paused_svc.scheduler.add_job(
+                func=_mark_ran,
+                trigger=DateTrigger(run_date=datetime.now(UTC) + timedelta(milliseconds=20)),
+                id="cross-pod-job",
+                replace_existing=True,
+            )
+            await asyncio.wait_for(ran_event.wait(), timeout=2.0)
+            assert ran_event.is_set()
+        finally:
+            await paused_svc.shutdown(wait=False)
+            await active_svc.shutdown(wait=False)
 
 
 @pytest.mark.unit
@@ -921,3 +1075,104 @@ class TestScheduledJobExecutorProcessContent:
         )
 
         assert result == content
+
+
+@pytest.mark.unit
+@pytest.mark.asyncio
+async def test_list_schedules_round_trips_cron_expression():
+    """Test POST -> GET /schedules and GET /schedules/{id} preserve submitted cron_expression."""
+    from fastapi import FastAPI
+    from fastapi.testclient import TestClient
+
+    from downloader.config import Settings
+    from downloader.routes import schedules as schedules_routes
+
+    svc = SchedulerService(redis_uri=None, settings=SchedulerConfig(job_store_type="memory"))
+    await svc.start(paused=True)
+
+    app = FastAPI()
+    app.include_router(schedules_routes.router)
+    app.state.scheduler = svc
+    app.state.execution_storage = AsyncMock(spec=ExecutionStorage)
+    app.state.settings = Settings()
+
+    try:
+        with (
+            patch(
+                "downloader.routes.schedules.validate_url_async",
+                new=AsyncMock(side_effect=lambda u, _s: u),
+            ),
+            TestClient(app) as client,
+        ):
+            submitted = "30 9 1 6 *"
+            create_resp = client.post(
+                "/schedules",
+                json={
+                    "name": "Annual June 1st",
+                    "url": "https://example.com/report",
+                    "cron_expression": submitted,
+                    "format": "text",
+                },
+            )
+            assert create_resp.status_code == 200
+            created = create_resp.json()
+            assert created["cron_expression"] == submitted
+
+            list_resp = client.get("/schedules")
+            assert list_resp.status_code == 200
+            listed = list_resp.json()
+            assert listed["total"] == 1
+            assert listed["schedules"][0]["cron_expression"] == submitted
+
+            get_resp = client.get(f"/schedules/{created['id']}")
+            assert get_resp.status_code == 200
+            assert get_resp.json()["cron_expression"] == submitted
+
+            del_resp = client.delete(f"/schedules/{created['id']}")
+            assert del_resp.status_code == 200
+            app.state.execution_storage.delete_executions.assert_awaited_once_with(created["id"])
+    finally:
+        await svc.shutdown(wait=False)
+
+
+@pytest.mark.unit
+@pytest.mark.asyncio
+async def test_scheduled_download_job_skips_when_run_lock_held():
+    """Test two active schedulers do not duplicate a run when Redis SET NX EX lock is held."""
+    from downloader.routes import schedules as schedules_routes
+
+    mock_redis = AsyncMock()
+    mock_redis.set = AsyncMock(side_effect=[True, None])
+    mock_storage = AsyncMock(spec=ExecutionStorage)
+    mock_storage.redis = mock_redis
+
+    mock_executor = AsyncMock()
+    mock_executor.storage = mock_storage
+    mock_executor.execute = AsyncMock(
+        return_value=ScheduleExecution(
+            execution_id="exec-1",
+            schedule_id="sched-lock",
+            status=ExecutionStatus.COMPLETED,
+            started_at=datetime.now(UTC),
+            completed_at=datetime.now(UTC),
+            duration=0.1,
+            success=True,
+            content_size=10,
+            error_message=None,
+            attempt=1,
+        )
+    )
+
+    prev_executor = schedules_routes._executor
+    schedules_routes.set_executor(mock_executor)
+    try:
+        await schedules_routes.scheduled_download_job(
+            "sched-lock", "https://example.com", "text", None
+        )
+        await schedules_routes.scheduled_download_job(
+            "sched-lock", "https://example.com", "text", None
+        )
+        assert mock_executor.execute.await_count == 1
+        assert mock_redis.set.await_count == 2
+    finally:
+        schedules_routes.set_executor(prev_executor)

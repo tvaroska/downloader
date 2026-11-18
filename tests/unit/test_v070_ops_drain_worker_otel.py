@@ -5,19 +5,31 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import os
+import signal
+import socket
+import subprocess
+import sys
+import time
 from datetime import UTC, datetime
 from unittest.mock import AsyncMock, MagicMock, patch
 
+import httpx
 import pytest
 from fastapi.testclient import TestClient
 from opentelemetry.sdk.trace.export.in_memory_span_exporter import InMemorySpanExporter
 
 from downloader.config import Settings, TelemetryConfig, reload_settings
-from downloader.dependencies import get_job_manager_dependency
-from downloader.drain import DrainCoordinator
+from downloader.dependencies import (
+    get_http_client,
+    get_job_manager_dependency,
+    get_robots_checker,
+)
+from downloader.drain import DrainCoordinator, install_sigterm_drain_handler
 from downloader.job_manager import JobInfo, JobManager, JobStatus
 from downloader.logging_config import CustomJsonFormatter
 from downloader.main import app
+from downloader.ports import BrowserCapacityError
 from downloader.telemetry import (
     configure_telemetry,
     extract_trace_context,
@@ -31,119 +43,7 @@ from downloader.worker_queue import (
     BrowserTaskResponse,
     WorkerQueue,
 )
-
-
-class _FakeAsyncRedis:
-    """In-memory async Redis stand-in supporting WorkerQueue list/heartbeat operations."""
-
-    def __init__(self) -> None:
-        self.lists: dict[str, list[str]] = {}
-        self.kv: dict[str, str] = {}
-
-    async def lpush(self, key: str, value: str) -> int:
-        bucket = self.lists.setdefault(key, [])
-        bucket.insert(0, value)
-        return len(bucket)
-
-    async def rpush(self, key: str, value: str) -> int:
-        bucket = self.lists.setdefault(key, [])
-        bucket.append(value)
-        return len(bucket)
-
-    async def blmove(
-        self,
-        first_list: str,
-        second_list: str,
-        timeout: int = 0,
-        src: str = "RIGHT",
-        dest: str = "LEFT",
-    ) -> str | None:
-        src_bucket = self.lists.get(first_list) or []
-        if not src_bucket:
-            return None
-        item = src_bucket.pop() if src == "RIGHT" else src_bucket.pop(0)
-        dst_bucket = self.lists.setdefault(second_list, [])
-        if dest == "LEFT":
-            dst_bucket.insert(0, item)
-        else:
-            dst_bucket.append(item)
-        return item
-
-    async def lmove(
-        self,
-        first_list: str,
-        second_list: str,
-        src: str = "RIGHT",
-        dest: str = "LEFT",
-    ) -> str | None:
-        return await self.blmove(first_list, second_list, timeout=0, src=src, dest=dest)
-
-    async def lrem(self, key: str, count: int, value: str) -> int:
-        bucket = self.lists.get(key) or []
-        removed = 0
-        while value in bucket and (count == 0 or removed < count):
-            bucket.remove(value)
-            removed += 1
-        return removed
-
-    async def blpop(self, keys: list[str], timeout: float = 0) -> tuple[str, str] | None:
-        for key in keys:
-            bucket = self.lists.get(key) or []
-            if bucket:
-                return key, bucket.pop(0)
-        return None
-
-    async def brpop(self, keys: list[str], timeout: float = 0) -> tuple[str, str] | None:
-        for key in keys:
-            bucket = self.lists.get(key) or []
-            if bucket:
-                return key, bucket.pop()
-        return None
-
-    async def llen(self, key: str) -> int:
-        return len(self.lists.get(key) or [])
-
-    async def setex(self, key: str, ttl: int, value: str) -> bool:
-        self.kv[key] = value
-        return True
-
-    async def delete(self, key: str) -> int:
-        return 1 if self.kv.pop(key, None) is not None else 0
-
-    async def scan(self, cursor: int = 0, match: str = "*", count: int = 100):
-        prefix = match.rstrip("*")
-        keys = [k for k in self.kv if k.startswith(prefix)]
-        return 0, keys
-
-    async def mget(self, keys: list[str]) -> list[str | None]:
-        return [self.kv.get(k) for k in keys]
-
-    def pipeline(self, transaction: bool = True):
-        parent = self
-
-        class _Pipe:
-            def __init__(self) -> None:
-                self._ops: list[tuple[str, tuple[object, ...]]] = []
-
-            async def __aenter__(self):
-                return self
-
-            async def __aexit__(self, *args):
-                return None
-
-            def rpush(self, key: str, value: str) -> None:
-                self._ops.append(("rpush", (key, value)))
-
-            def expire(self, key: str, ttl: int) -> None:
-                self._ops.append(("expire", (key, ttl)))
-
-            async def execute(self):
-                for op, args in self._ops:
-                    if op == "rpush":
-                        await parent.rpush(str(args[0]), str(args[1]))
-                return [True] * len(self._ops)
-
-        return _Pipe()
+from tests.fixtures.mock_fixtures import FakeRedis
 
 
 class TestGracefulShutdownAndDrain:
@@ -201,10 +101,182 @@ class TestGracefulShutdownAndDrain:
         assert await jm.wait_for_active_jobs(0.005) is False
         assert await jm.wait_for_active_jobs(1.0) is True
 
+    async def test_middleware_counts_in_flight_requests(self) -> None:
+        started = asyncio.Event()
+        release = asyncio.Event()
+
+        async def _slow_download(*_args, **_kwargs):
+            started.set()
+            await release.wait()
+            return (
+                b"<html><body>ok</body></html>",
+                {
+                    "url": "https://example.com",
+                    "status_code": 200,
+                    "content_type": "text/html",
+                    "size": 28,
+                    "headers": {"content-type": "text/html"},
+                },
+            )
+
+        mock_http = AsyncMock()
+        mock_http.download = _slow_download
+        mock_http.close = AsyncMock()
+        mock_robots = AsyncMock()
+        mock_robots.check_allowed = AsyncMock(return_value=None)
+        mock_robots.close = AsyncMock()
+
+        app.dependency_overrides[get_http_client] = lambda: mock_http
+        app.dependency_overrides[get_robots_checker] = lambda: mock_robots
+        try:
+            app.state.drain_coordinator.reset()
+            app.state.settings = Settings()
+            transport = httpx.ASGITransport(app=app)
+            async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
+                inflight = asyncio.create_task(client.get("/https://example.com"))
+                await asyncio.wait_for(started.wait(), timeout=2.0)
+
+                assert app.state.drain_coordinator.active_requests == 1
+                assert await app.state.drain_coordinator.wait_until_drained(0.01) is False
+
+                app.state.drain_coordinator.start_drain()
+                rejected = await client.get("/https://example.com")
+                assert rejected.status_code == 503
+                assert rejected.json()["detail"]["error_type"] == "service_draining"
+
+                release.set()
+                ok_resp = await inflight
+                assert ok_resp.status_code == 200
+                assert app.state.drain_coordinator.active_requests == 0
+                assert await app.state.drain_coordinator.wait_until_drained(1.0) is True
+        finally:
+            app.state.drain_coordinator.reset()
+            app.dependency_overrides.pop(get_http_client, None)
+            app.dependency_overrides.pop(get_robots_checker, None)
+
+    async def test_lifespan_shutdown_drains_before_closing_clients(self) -> None:
+        from downloader.main import _teardown_services
+
+        events: list[str] = []
+        coord = DrainCoordinator()
+        orig_wait = coord.wait_until_drained
+
+        async def _tracked_wait(timeout: float) -> bool:
+            events.append("wait_until_drained")
+            return await orig_wait(timeout)
+
+        coord.wait_until_drained = _tracked_wait  # type: ignore[method-assign]
+
+        fake_http = AsyncMock()
+        fake_http.close = AsyncMock(side_effect=lambda: events.append("http_client.close"))
+        fake_robots = AsyncMock()
+        fake_robots.close = AsyncMock(side_effect=lambda: events.append("robots_checker.close"))
+        fake_jm = AsyncMock()
+        fake_jm.wait_for_active_jobs = AsyncMock(
+            side_effect=lambda _t: events.append("wait_for_active_jobs")
+        )
+        fake_jm.disconnect = AsyncMock(side_effect=lambda: events.append("job_manager.disconnect"))
+        fake_metrics = AsyncMock()
+        fake_metrics.stop = AsyncMock(side_effect=lambda: events.append("metrics.stop"))
+
+        fake_app = MagicMock()
+        fake_app.state.job_manager = fake_jm
+        fake_app.state.scheduler = None
+        fake_app.state.robots_checker = fake_robots
+        fake_app.state.pdf_generator = None
+
+        await _teardown_services(fake_app, Settings(), coord, fake_metrics, fake_http)
+        assert events[0] == "wait_until_drained"
+        assert events.index("wait_until_drained") < events.index("http_client.close")
+        assert events.index("wait_until_drained") < events.index("robots_checker.close")
+        assert events.index("wait_until_drained") < events.index("job_manager.disconnect")
+
+    def test_sigterm_handler_triggers_drain_and_chains_previous(self) -> None:
+        coord = DrainCoordinator()
+        chained: list[int] = []
+        orig_handler = signal.getsignal(signal.SIGTERM)
+
+        def _prev(signum: int, _frame: object) -> None:
+            chained.append(signum)
+
+        signal.signal(signal.SIGTERM, _prev)
+        try:
+            restore = install_sigterm_drain_handler(coord)
+            try:
+                assert coord.is_draining is False
+                os.kill(os.getpid(), signal.SIGTERM)
+                assert coord.is_draining is True
+                assert chained == [signal.SIGTERM]
+            finally:
+                restore()
+            assert signal.getsignal(signal.SIGTERM) is _prev
+        finally:
+            signal.signal(signal.SIGTERM, orig_handler)
+
+    def test_uvicorn_subprocess_enters_drain_on_sigterm(self) -> None:
+        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
+            sock.bind(("127.0.0.1", 0))
+            port = sock.getsockname()[1]
+
+        env = {
+            **os.environ,
+            "ENVIRONMENT": "development",
+            "REDIS_URI": "",
+            "OTEL_ENABLED": "false",
+        }
+        proc = subprocess.Popen(
+            [
+                sys.executable,
+                "-m",
+                "uvicorn",
+                "downloader.main:app",
+                "--host",
+                "127.0.0.1",
+                "--port",
+                str(port),
+                "--log-level",
+                "info",
+            ],
+            env=env,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            text=True,
+        )
+        try:
+            deadline = time.monotonic() + 10.0
+            healthy = False
+            with httpx.Client(trust_env=False, timeout=0.5) as client:
+                while time.monotonic() < deadline:
+                    if proc.poll() is not None:
+                        break
+                    try:
+                        resp = client.get(f"http://127.0.0.1:{port}/health")
+                        if resp.status_code == 200:
+                            healthy = True
+                            break
+                    except httpx.HTTPError:
+                        time.sleep(0.1)
+            if not healthy:
+                proc.terminate()
+                out, _ = proc.communicate(timeout=5.0)
+                pytest.fail(
+                    f"Uvicorn subprocess did not become healthy (rc={proc.returncode}):\n{out}"
+                )
+
+            proc.send_signal(signal.SIGTERM)
+            output, _ = proc.communicate(timeout=10.0)
+            assert proc.returncode in (0, -signal.SIGTERM), output
+            assert "Entering connection drain mode" in output
+            assert "All services shut down successfully" in output
+        finally:
+            if proc.poll() is None:
+                proc.kill()
+                proc.communicate(timeout=5.0)
+
 
 class TestSplitWorkerArchitecture:
     async def test_worker_queue_batch_browser_and_heartbeat_operations(self) -> None:
-        redis_stub = _FakeAsyncRedis()
+        redis_stub = FakeRedis()
         queue = WorkerQueue(redis_stub)  # type: ignore[arg-type]
 
         await queue.enqueue_batch_job("job-42", trace_headers={"traceparent": "00-abc-def-01"})
@@ -248,7 +320,7 @@ class TestSplitWorkerArchitecture:
         assert resp.decode_bytes().startswith(b"\x89PNG")
 
     def test_api_mode_enqueues_batch_job_instead_of_in_process_execution(self) -> None:
-        redis_stub = _FakeAsyncRedis()
+        redis_stub = FakeRedis()
         mock_jm = MagicMock()
         mock_jm.redis_client = redis_stub
         mock_jm.create_job = AsyncMock(return_value="job-split-99")
@@ -273,7 +345,7 @@ class TestSplitWorkerArchitecture:
             app.dependency_overrides.pop(get_job_manager_dependency, None)
 
     async def test_worker_processes_batch_envelope_and_browser_task(self) -> None:
-        redis_stub = _FakeAsyncRedis()
+        redis_stub = FakeRedis()
         queue = WorkerQueue(redis_stub)  # type: ignore[arg-type]
         await queue.enqueue_batch_job("job-w1")
         env = await queue.pop_batch_job(timeout=1.0)
@@ -340,6 +412,246 @@ class TestSplitWorkerArchitecture:
         assert tls.redis.connection_pool.connection_kwargs["host"] == "secure-redis"
         assert tls.redis.connection_pool.connection_kwargs["port"] == 6381
         assert tls.redis.connection_pool.connection_kwargs["db"] == 1
+
+    async def test_second_worker_start_does_not_take_inflight_job(self) -> None:
+        """A starting worker must not reclaim processing lists of live workers (R12)."""
+        redis_stub = FakeRedis()
+        q1 = WorkerQueue(redis_stub, worker_id="worker-1")  # type: ignore[arg-type]
+        await q1.publish_heartbeat("worker-1", {"active_tasks": 1}, ttl=30)
+        await q1.enqueue_batch_job("job-inflight")
+        env1 = await q1.pop_batch_job(timeout=1.0)
+        assert env1 is not None
+
+        # Starting worker-2 sees worker-1's live heartbeat and leaves job-inflight untouched
+        q2 = WorkerQueue(redis_stub, worker_id="worker-2")  # type: ignore[arg-type]
+        assert await q2.requeue_processing_jobs() == 0
+        assert await q2.pop_batch_job(timeout=0.05) is None
+        assert (await q2.get_queue_depths())["batch_processing"] == 1
+
+        # Once worker-1's heartbeat expires/is removed, worker-2 can reclaim it
+        await q1.remove_heartbeat("worker-1")
+        assert await q2.requeue_processing_jobs() == 1
+        reclaimed = await q2.pop_batch_job(timeout=1.0)
+        assert reclaimed is not None
+        assert reclaimed.job_id == "job-inflight"
+
+    async def test_shutdown_cancel_requeues_instead_of_acking(self) -> None:
+        """Worker shutdown cancellation requeues the job with attempt+1 instead of acking (R12)."""
+        redis_stub = FakeRedis()
+        queue = WorkerQueue(redis_stub, worker_id="worker-1")  # type: ignore[arg-type]
+        await queue.enqueue_batch_job("job-shutdown")
+        env = await queue.pop_batch_job(timeout=1.0)
+        assert env is not None
+        assert env.attempt == 1
+
+        mock_jm = MagicMock()
+        mock_jm.get_job_info = AsyncMock(
+            return_value=JobInfo(
+                job_id="job-shutdown",
+                status=JobStatus.RUNNING,
+                created_at=datetime.now(UTC),
+                total_urls=1,
+                request_data={"urls": [{"url": "https://example.com"}], "default_format": "text"},
+            )
+        )
+        mock_jm.update_job_status = AsyncMock()
+        mock_jm.store_job_results = AsyncMock()
+
+        started = asyncio.Event()
+        gate = asyncio.Event()
+
+        async def _slow_batch(*_args, **_kwargs):
+            started.set()
+            await gate.wait()
+            return [], {}
+
+        with patch("downloader.worker.process_background_batch_job", new=_slow_batch):
+            task = asyncio.create_task(
+                process_worker_batch_envelope(
+                    env,
+                    job_manager=mock_jm,
+                    worker_queue=queue,
+                    http_client=MagicMock(),
+                    batch_semaphore=asyncio.Semaphore(2),
+                    pdf_semaphore=asyncio.Semaphore(1),
+                )
+            )
+            await started.wait()
+            task.cancel()
+            with pytest.raises(asyncio.CancelledError):
+                await task
+
+        depths = await queue.get_queue_depths()
+        assert depths["batch_processing"] == 0
+        assert depths["batch_pending"] == 1
+        requeued = await queue.pop_batch_job(timeout=1.0)
+        assert requeued is not None
+        assert requeued.job_id == "job-shutdown"
+        assert requeued.attempt == 2
+        # Must NOT have marked the job CANCELLED on worker shutdown
+        for call in mock_jm.update_job_status.call_args_list:
+            assert call.args[1] != JobStatus.CANCELLED
+
+    async def test_worker_failure_marks_failed_fires_failed_webhook_and_acks(self) -> None:
+        """Batch processor failure marks job FAILED, fires failed webhook, and acks (R22)."""
+        redis_stub = FakeRedis()
+        queue = WorkerQueue(redis_stub, worker_id="worker-1")  # type: ignore[arg-type]
+        await queue.enqueue_batch_job("job-fail")
+        env = await queue.pop_batch_job(timeout=1.0)
+        assert env is not None
+
+        mock_jm = MagicMock()
+        mock_jm.get_job_info = AsyncMock(
+            return_value=JobInfo(
+                job_id="job-fail",
+                status=JobStatus.PENDING,
+                created_at=datetime.now(UTC),
+                total_urls=1,
+                request_data={
+                    "urls": [{"url": "https://example.com"}],
+                    "default_format": "text",
+                    "webhook_url": "https://hooks.example.com/fail",
+                },
+            )
+        )
+        mock_jm.update_job_status = AsyncMock()
+        mock_jm.store_job_results = AsyncMock()
+
+        with (
+            patch(
+                "downloader.worker.process_background_batch_job",
+                new=AsyncMock(side_effect=RuntimeError("boom")),
+            ),
+            patch("downloader.worker.notify_batch_webhook", new=AsyncMock()) as mock_hook,
+        ):
+            await process_worker_batch_envelope(
+                env,
+                job_manager=mock_jm,
+                worker_queue=queue,
+                http_client=MagicMock(),
+                batch_semaphore=asyncio.Semaphore(2),
+                pdf_semaphore=asyncio.Semaphore(1),
+            )
+
+        assert (await queue.get_queue_depths())["batch_processing"] == 0
+        assert mock_jm.update_job_status.call_args_list[-1].args[1] == JobStatus.FAILED
+        mock_hook.assert_awaited_once()
+        assert mock_hook.call_args.args[2] == JobStatus.FAILED
+
+    async def test_worker_skips_missing_and_cancelled_jobs(self) -> None:
+        """Worker skips missing or already-terminal jobs and acks their envelopes (R22)."""
+        redis_stub = FakeRedis()
+        queue = WorkerQueue(redis_stub, worker_id="worker-1")  # type: ignore[arg-type]
+        await queue.enqueue_batch_job("job-missing")
+        await queue.enqueue_batch_job("job-cancelled")
+
+        env_missing = await queue.pop_batch_job(timeout=1.0)
+        env_cancelled = await queue.pop_batch_job(timeout=1.0)
+        assert env_missing is not None and env_cancelled is not None
+
+        mock_jm = MagicMock()
+        mock_jm.get_job_info = AsyncMock(
+            side_effect=[
+                None,
+                JobInfo(
+                    job_id="job-cancelled",
+                    status=JobStatus.CANCELLED,
+                    created_at=datetime.now(UTC),
+                    request_data={},
+                ),
+            ]
+        )
+        mock_jm.update_job_status = AsyncMock()
+
+        with patch("downloader.worker.process_background_batch_job", new=AsyncMock()) as mock_proc:
+            await process_worker_batch_envelope(
+                env_missing,
+                job_manager=mock_jm,
+                worker_queue=queue,
+                http_client=MagicMock(),
+                batch_semaphore=asyncio.Semaphore(2),
+                pdf_semaphore=asyncio.Semaphore(1),
+            )
+            await process_worker_batch_envelope(
+                env_cancelled,
+                job_manager=mock_jm,
+                worker_queue=queue,
+                http_client=MagicMock(),
+                batch_semaphore=asyncio.Semaphore(2),
+                pdf_semaphore=asyncio.Semaphore(1),
+            )
+            mock_proc.assert_not_awaited()
+
+        mock_jm.update_job_status.assert_not_awaited()
+        assert (await queue.get_queue_depths())["batch_processing"] == 0
+
+    async def test_batch_queue_is_fifo(self) -> None:
+        """Batch queue dequeues jobs in FIFO order (R22)."""
+        redis_stub = FakeRedis()
+        queue = WorkerQueue(redis_stub)  # type: ignore[arg-type]
+        await queue.enqueue_batch_job("job-1")
+        await queue.enqueue_batch_job("job-2")
+        await queue.enqueue_batch_job("job-3")
+
+        popped = [
+            (await queue.pop_batch_job(timeout=1.0)),
+            (await queue.pop_batch_job(timeout=1.0)),
+            (await queue.pop_batch_job(timeout=1.0)),
+        ]
+        assert [item.job_id for item in popped if item is not None] == [
+            "job-1",
+            "job-2",
+            "job-3",
+        ]
+
+    async def test_remote_browser_calls_are_bounded_and_expired_tasks_skipped(self) -> None:
+        """Remote browser calls reject overflow with BrowserCapacityError and skip expired tasks (R38)."""
+        redis_stub = FakeRedis()
+        blpop_started = asyncio.Event()
+        release_blpop = asyncio.Event()
+        original_blpop = redis_stub.blpop
+
+        async def _blocking_blpop(keys: list[str], timeout: float = 0):
+            blpop_started.set()
+            await release_blpop.wait()
+            return await original_blpop(keys, timeout=timeout)
+
+        redis_stub.blpop = _blocking_blpop  # type: ignore[method-assign]
+        queue = WorkerQueue(redis_stub, max_remote_browser_calls=1)  # type: ignore[arg-type]
+
+        req1 = BrowserTaskRequest(kind="render_html", url="https://example.com/1")
+        await queue.publish_browser_result(
+            BrowserTaskResponse(
+                task_id=req1.task_id, success=True, content_base64="PGh0bWw+PC9odG1sPg=="
+            )
+        )
+        t1 = asyncio.create_task(queue.enqueue_browser_task(req1, timeout=5.0))
+        await blpop_started.wait()
+
+        req2 = BrowserTaskRequest(kind="render_html", url="https://example.com/2")
+        with pytest.raises(BrowserCapacityError):
+            await queue.enqueue_browser_task(req2, timeout=5.0)
+
+        release_blpop.set()
+        resp1 = await t1
+        assert resp1.success is True
+
+        # Expired task must be skipped by worker without invoking Playwright
+        expired_req = BrowserTaskRequest(
+            kind="pdf",
+            url="https://example.com/expired",
+            deadline=1.0,
+        )
+        with patch("downloader.worker.generate_pdf_from_url", new=AsyncMock()) as mock_pdf:
+            expired_resp = await process_worker_browser_task(
+                expired_req,
+                worker_queue=queue,
+                pdf_semaphore=asyncio.Semaphore(1),
+            )
+            mock_pdf.assert_not_awaited()
+        assert expired_resp.success is False
+        assert expired_resp.status_code == 408
+        assert expired_resp.error_type == "timeout_error"
 
 
 class TestOpenTelemetryIntegration:

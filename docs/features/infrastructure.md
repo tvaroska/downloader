@@ -24,7 +24,7 @@ Completed: 2026-11-12
 
 ### Split Worker Architecture (Priority: P2)
 - [x] `DEPLOYMENT_MODE=all|api|worker` (`all` default preserves zero-overhead single-pod stateless behavior)
-- [x] `src/downloader/worker_queue.py`: reliable Redis `BLMOVE` batch queue (`downloader:queue:batch` -> `:processing`), remote Playwright/PDF/screenshot RPC queue (`downloader:queue:browser`), and TTL-expiring worker heartbeats (`downloader:worker:heartbeat:*`)
+- [x] `src/downloader/worker_queue.py`: reliable Redis `BLMOVE` batch queue (`queue:batch:pending` -> `queue:batch:processing`), remote Playwright/PDF/screenshot RPC queue (`queue:browser:pending` + `browser_result:*`), and TTL-expiring worker heartbeats (`worker:heartbeat:*`)
 - [x] `src/downloader/worker.py`: dedicated worker runtime with `--healthcheck`, APScheduler execution, graceful shutdown drain, and `just worker` / `just split` recipes
 - [x] `api` mode starts APScheduler paused for CRUD-only schedule management while offloading batch jobs and Playwright rendering to workers over Redis
 - [x] Updated `docker-compose.yml` (`profiles: ["split"]`), `docker-compose.split.yml`, and `docker-compose.prod.yml`
