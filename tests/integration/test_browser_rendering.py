@@ -46,7 +46,7 @@ def mock_playwright_for_rendering():
         yield mock_generator, mock_browser, mock_context, mock_page
 
 
-@pytest.mark.integration
+@pytest.mark.unit
 @pytest.mark.asyncio
 class TestBrowserRenderingJSContent:
     """Test browser rendering for JavaScript-heavy content."""
@@ -161,7 +161,7 @@ class TestBrowserRenderingJSContent:
         mock_page.wait_for_load_state.assert_called_once_with("networkidle", timeout=2500)
 
 
-@pytest.mark.integration
+@pytest.mark.unit
 @pytest.mark.asyncio
 class TestWaitForSelectorFunctionality:
     """Test wait_for CSS selector functionality."""
@@ -263,7 +263,7 @@ class TestWaitForSelectorFunctionality:
         mock_generator.pool.release_browser.assert_called_once_with(mock_browser)
 
 
-@pytest.mark.integration
+@pytest.mark.unit
 @pytest.mark.asyncio
 class TestBrowserRenderingTimeouts:
     """Test timeout handling for browser rendering."""
@@ -310,7 +310,7 @@ class TestBrowserRenderingTimeouts:
         mock_generator.pool.release_browser.assert_called_once_with(mock_browser)
 
 
-@pytest.mark.integration
+@pytest.mark.unit
 @pytest.mark.asyncio
 class TestBrowserRenderingErrorHandling:
     """Test error handling for network and browser failures."""

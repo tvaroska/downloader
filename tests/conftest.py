@@ -122,8 +122,15 @@ def pytest_collection_modifyitems(config, items):
     """Ensure every test has a tier marker and apply tier-based timeouts."""
     tier_markers = ("smoke", "unit", "integration", "e2e")
     for item in items:
-        rel_parts = item.path.parts
-        if "integration" in rel_parts and not item.get_closest_marker("integration"):
+        rel_parts = item.path.relative_to(config.rootpath).parts
+        needs_external = any(
+            item.get_closest_marker(m) for m in ("requires_playwright", "requires_redis", "network")
+        )
+        if (
+            "integration" in rel_parts
+            and needs_external
+            and not item.get_closest_marker("integration")
+        ):
             item.add_marker(pytest.mark.integration)
         elif "e2e" in rel_parts and not item.get_closest_marker("e2e"):
             item.add_marker(pytest.mark.e2e)

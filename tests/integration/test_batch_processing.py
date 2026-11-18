@@ -12,7 +12,7 @@ from src.downloader.dependencies import (
 from src.downloader.main import app
 
 
-@pytest.mark.integration
+@pytest.mark.unit
 class TestBatchProcessing:
     """Test core batch processing functionality."""
 

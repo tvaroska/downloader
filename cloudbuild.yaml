@@ -51,13 +51,44 @@ steps:
         /workspace/.venv/bin/ruff check src/ tests/ examples/
         /workspace/.venv/bin/ruff format --check src/ tests/ examples/
         /workspace/.venv/bin/mypy src/
-        /workspace/.venv/bin/pytest tests/ -m "not (integration or e2e or network or requires_redis or requires_playwright)" -v --timeout=30
+        /workspace/.venv/bin/pytest tests/ -n auto -m "not (integration or e2e or network or requires_redis or requires_playwright)" -v --timeout=30
+        /workspace/.venv/bin/pytest sdks/python/tests -c sdks/python/pyproject.toml -v
+
+  - id: sdk-go-tests
+    name: golang:1.24-bookworm
+    waitFor: ["-"]
+    entrypoint: bash
+    args:
+      - -c
+      - |
+        set -euo pipefail
+        UNFORMATTED="$$(gofmt -s -l sdks/go)"
+        if [[ -n "$${UNFORMATTED}" ]]; then
+          echo "ERROR: Unformatted Go SDK files:" >&2
+          echo "$${UNFORMATTED}" >&2
+          exit 1
+        fi
+        go -C sdks/go vet ./...
+        go -C sdks/go test -race -v ./...
+
+  - id: sdk-js-tests
+    name: node:22-bookworm-slim
+    waitFor: ["-"]
+    entrypoint: bash
+    args:
+      - -c
+      - |
+        set -euo pipefail
+        node --test sdks/javascript/test/client.test.mjs
+        npx --yes --package=typescript@5.8.2 tsc --noEmit -p sdks/javascript/tsconfig.json
 
   - id: docker-build-and-push
     name: gcr.io/cloud-builders/docker
     waitFor:
       - resolve-git-metadata
       - python-lint-typecheck-and-tests
+      - sdk-go-tests
+      - sdk-js-tests
     entrypoint: bash
     env:
       - DOCKER_BUILDKIT=1

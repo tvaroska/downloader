@@ -28,7 +28,7 @@ from src.downloader.scheduler.storage import ExecutionStorage
 # ============= Route Tests =============
 
 
-@pytest.mark.integration
+@pytest.mark.unit
 class TestScheduleRoutes:
     """Integration tests for schedule CRUD endpoints."""
 
@@ -300,7 +300,7 @@ class TestScheduleRoutes:
 # ============= Execution History Tests =============
 
 
-@pytest.mark.integration
+@pytest.mark.unit
 class TestExecutionHistory:
     """Integration tests for execution history endpoint."""
 
@@ -430,7 +430,7 @@ class TestExecutionHistory:
 # ============= Job Execution Tests =============
 
 
-@pytest.mark.integration
+@pytest.mark.unit
 class TestJobExecution:
     """Integration tests for ScheduledJobExecutor.execute()."""
 
@@ -591,7 +591,7 @@ class TestJobExecution:
 # ============= Retry Logic Tests =============
 
 
-@pytest.mark.integration
+@pytest.mark.unit
 class TestRetryLogic:
     """Integration tests for retry behavior in ScheduledJobExecutor."""
 
@@ -760,7 +760,7 @@ class TestRetryLogic:
 # ============= Schedule Persistence Tests =============
 
 
-@pytest.mark.integration
+@pytest.mark.unit
 class TestSchedulePersistence:
     """Integration tests for schedule persistence via real APScheduler."""
 

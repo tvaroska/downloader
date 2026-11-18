@@ -58,7 +58,7 @@ def mock_http_client():
 
 @pytest.fixture
 async def api_client(mock_pdf_semaphore, mock_batch_semaphore, mock_job_manager, mock_http_client):
-    """Create async test client with mocked dependencies."""
+    """Create async test client with lifespan context and restored app.state."""
 
     async def mock_get_pdf_semaphore():
         return mock_pdf_semaphore
@@ -66,19 +66,22 @@ async def api_client(mock_pdf_semaphore, mock_batch_semaphore, mock_job_manager,
     async def mock_get_batch_semaphore():
         return mock_batch_semaphore
 
-    app.dependency_overrides[get_pdf_semaphore] = mock_get_pdf_semaphore
-    app.dependency_overrides[get_batch_semaphore] = mock_get_batch_semaphore
-
-    # Mock app.state
-    app.state.job_manager = mock_job_manager
-    app.state.http_client = mock_http_client
-
-    transport = ASGITransport(app=app)
-    async with AsyncClient(transport=transport, base_url="http://test") as client:
-        yield client
-
-    app.dependency_overrides.pop(get_pdf_semaphore, None)
-    app.dependency_overrides.pop(get_batch_semaphore, None)
+    async with app.router.lifespan_context(app):
+        prev_jm = getattr(app.state, "job_manager", None)
+        prev_http = getattr(app.state, "http_client", None)
+        app.dependency_overrides[get_pdf_semaphore] = mock_get_pdf_semaphore
+        app.dependency_overrides[get_batch_semaphore] = mock_get_batch_semaphore
+        app.state.job_manager = mock_job_manager
+        app.state.http_client = mock_http_client
+        try:
+            transport = ASGITransport(app=app)
+            async with AsyncClient(transport=transport, base_url="http://test") as client:
+                yield client
+        finally:
+            app.state.job_manager = prev_jm
+            app.state.http_client = prev_http
+            app.dependency_overrides.pop(get_pdf_semaphore, None)
+            app.dependency_overrides.pop(get_batch_semaphore, None)
 
 
 @pytest.mark.asyncio
@@ -193,44 +196,45 @@ class TestLiveMetricsEndpoint:
         async def mock_get_batch_semaphore():
             return mock_batch_semaphore
 
-        prev_settings = getattr(app.state, "settings", None)
-        app.dependency_overrides[get_pdf_semaphore] = mock_get_pdf_semaphore
-        app.dependency_overrides[get_batch_semaphore] = mock_get_batch_semaphore
-        app.state.job_manager = mock_job_manager
-        app.state.http_client = mock_http_client
-        app.state.settings = Settings(
-            pdf=PDFConfig(concurrency=12),
-            batch=BatchConfig(concurrency=50),
-        )
+        async with app.router.lifespan_context(app):
+            prev_settings = getattr(app.state, "settings", None)
+            prev_jm = getattr(app.state, "job_manager", None)
+            prev_http = getattr(app.state, "http_client", None)
+            app.dependency_overrides[get_pdf_semaphore] = mock_get_pdf_semaphore
+            app.dependency_overrides[get_batch_semaphore] = mock_get_batch_semaphore
+            app.state.job_manager = mock_job_manager
+            app.state.http_client = mock_http_client
+            app.state.settings = Settings(
+                pdf=PDFConfig(concurrency=12),
+                batch=BatchConfig(concurrency=50),
+            )
 
-        try:
-            transport = ASGITransport(app=app)
-            async with AsyncClient(transport=transport, base_url="http://test") as client:
-                response = await client.get("/metrics/live")
+            try:
+                transport = ASGITransport(app=app)
+                async with AsyncClient(transport=transport, base_url="http://test") as client:
+                    response = await client.get("/metrics/live")
 
-            data = response.json()
-            pdf = data["concurrency"]["pdf"]
-            batch = data["concurrency"]["batch"]
+                data = response.json()
+                pdf = data["concurrency"]["pdf"]
+                batch = data["concurrency"]["batch"]
 
-            # PDF: 12 limit, 8 available, 4 in use
-            assert pdf["limit"] == 12
-            assert pdf["available"] == 8
-            assert pdf["active"] == 4
-            assert pdf["utilization_percent"] == pytest.approx(33.3, abs=0.1)
+                # PDF: 12 limit, 8 available, 4 in use
+                assert pdf["limit"] == 12
+                assert pdf["available"] == 8
+                assert pdf["active"] == 4
+                assert pdf["utilization_percent"] == pytest.approx(33.3, abs=0.1)
 
-            # Batch: 50 limit, 40 available, 10 in use
-            assert batch["limit"] == 50
-            assert batch["available"] == 40
-            assert batch["active"] == 10
-            assert batch["utilization_percent"] == pytest.approx(20.0, abs=0.1)
-        finally:
-            if prev_settings is None:
-                if hasattr(app.state, "settings"):
-                    delattr(app.state, "settings")
-            else:
+                # Batch: 50 limit, 40 available, 10 in use
+                assert batch["limit"] == 50
+                assert batch["available"] == 40
+                assert batch["active"] == 10
+                assert batch["utilization_percent"] == pytest.approx(20.0, abs=0.1)
+            finally:
                 app.state.settings = prev_settings
-            app.dependency_overrides.pop(get_pdf_semaphore, None)
-            app.dependency_overrides.pop(get_batch_semaphore, None)
+                app.state.job_manager = prev_jm
+                app.state.http_client = prev_http
+                app.dependency_overrides.pop(get_pdf_semaphore, None)
+                app.dependency_overrides.pop(get_batch_semaphore, None)
 
     async def test_get_live_metrics_connections_structure(self, api_client):
         """Test live metrics connections section structure."""
@@ -272,24 +276,29 @@ class TestLiveMetricsErrorHandling:
         async def mock_get_batch_semaphore():
             return mock_batch_semaphore
 
-        app.dependency_overrides[get_pdf_semaphore] = mock_get_pdf_semaphore
-        app.dependency_overrides[get_batch_semaphore] = mock_get_batch_semaphore
-        app.state.job_manager = mock_job_manager
-        app.state.http_client = mock_http_client
+        async with app.router.lifespan_context(app):
+            prev_jm = getattr(app.state, "job_manager", None)
+            prev_http = getattr(app.state, "http_client", None)
+            app.dependency_overrides[get_pdf_semaphore] = mock_get_pdf_semaphore
+            app.dependency_overrides[get_batch_semaphore] = mock_get_batch_semaphore
+            app.state.job_manager = mock_job_manager
+            app.state.http_client = mock_http_client
 
-        try:
-            transport = ASGITransport(app=app)
-            async with AsyncClient(transport=transport, base_url="http://test") as client:
-                response = await client.get("/metrics/live")
+            try:
+                transport = ASGITransport(app=app)
+                async with AsyncClient(transport=transport, base_url="http://test") as client:
+                    response = await client.get("/metrics/live")
 
-            # Should still return 200, with error in redis stats
-            assert response.status_code == 200
-            data = response.json()
-            assert data["connections"]["redis"]["status"] == "error"
-            assert "Redis connection failed" in data["connections"]["redis"]["error"]
-        finally:
-            app.dependency_overrides.pop(get_pdf_semaphore, None)
-            app.dependency_overrides.pop(get_batch_semaphore, None)
+                # Should still return 200, with error in redis stats
+                assert response.status_code == 200
+                data = response.json()
+                assert data["connections"]["redis"]["status"] == "error"
+                assert "Redis connection failed" in data["connections"]["redis"]["error"]
+            finally:
+                app.state.job_manager = prev_jm
+                app.state.http_client = prev_http
+                app.dependency_overrides.pop(get_pdf_semaphore, None)
+                app.dependency_overrides.pop(get_batch_semaphore, None)
 
     async def test_get_live_metrics_http_error_handling(
         self, mock_pdf_semaphore, mock_batch_semaphore, mock_job_manager
@@ -307,24 +316,29 @@ class TestLiveMetricsErrorHandling:
         async def mock_get_batch_semaphore():
             return mock_batch_semaphore
 
-        app.dependency_overrides[get_pdf_semaphore] = mock_get_pdf_semaphore
-        app.dependency_overrides[get_batch_semaphore] = mock_get_batch_semaphore
-        app.state.job_manager = mock_job_manager
-        app.state.http_client = mock_http_client
+        async with app.router.lifespan_context(app):
+            prev_jm = getattr(app.state, "job_manager", None)
+            prev_http = getattr(app.state, "http_client", None)
+            app.dependency_overrides[get_pdf_semaphore] = mock_get_pdf_semaphore
+            app.dependency_overrides[get_batch_semaphore] = mock_get_batch_semaphore
+            app.state.job_manager = mock_job_manager
+            app.state.http_client = mock_http_client
 
-        try:
-            transport = ASGITransport(app=app)
-            async with AsyncClient(transport=transport, base_url="http://test") as client:
-                response = await client.get("/metrics/live")
+            try:
+                transport = ASGITransport(app=app)
+                async with AsyncClient(transport=transport, base_url="http://test") as client:
+                    response = await client.get("/metrics/live")
 
-            # Should still return 200, with error in http stats
-            assert response.status_code == 200
-            data = response.json()
-            assert data["connections"]["http_client"]["status"] == "error"
-            assert "HTTP client error" in data["connections"]["http_client"]["error"]
-        finally:
-            app.dependency_overrides.pop(get_pdf_semaphore, None)
-            app.dependency_overrides.pop(get_batch_semaphore, None)
+                # Should still return 200, with error in http stats
+                assert response.status_code == 200
+                data = response.json()
+                assert data["connections"]["http_client"]["status"] == "error"
+                assert "HTTP client error" in data["connections"]["http_client"]["error"]
+            finally:
+                app.state.job_manager = prev_jm
+                app.state.http_client = prev_http
+                app.dependency_overrides.pop(get_pdf_semaphore, None)
+                app.dependency_overrides.pop(get_batch_semaphore, None)
 
 
 @pytest.mark.asyncio

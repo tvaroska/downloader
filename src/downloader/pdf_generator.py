@@ -13,10 +13,15 @@ from urllib.parse import urlparse
 from playwright.async_api import TimeoutError as PlaywrightTimeoutError
 
 from .browser import BrowserConfig, BrowserPool, BrowserPoolError
-from .browser.actions import BrowserAction, execute_browser_actions
+from .browser.actions import BrowserAction, BrowserActionError, execute_browser_actions
 from .config import get_settings
 from .telemetry import get_tracer
-from .validation import URLValidationError, sanitize_user_agent, validate_url_async
+from .validation import (
+    SSRFProtectionError,
+    URLValidationError,
+    sanitize_user_agent,
+    validate_url_async,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -83,11 +88,110 @@ async def _ssrf_route_guard(route: Any) -> None:
     await _maybe_await(route.continue_())
 
 
+def _collect_redirect_chain_urls(request_obj: Any) -> list[str]:
+    """Walk `request.redirected_from` backwards and return all string hop URLs oldest-first."""
+    hops: list[str] = []
+    seen_ids: set[int] = set()
+    curr = request_obj
+    while curr is not None and id(curr) not in seen_ids and len(hops) < 32:
+        seen_ids.add(id(curr))
+        hop_url = getattr(curr, "url", None)
+        if not isinstance(hop_url, str) or not hop_url:
+            break
+        hops.append(hop_url)
+        curr = getattr(curr, "redirected_from", None)
+    hops.reverse()
+    return hops
+
+
+async def _validate_browser_url_candidate(candidate_url: str) -> None:
+    """Validate a single browser navigation or redirect URL against scheme and SSRF policy."""
+    parsed = urlparse(candidate_url)
+    scheme = parsed.scheme.lower()
+    if scheme in _ALLOWED_INLINE_SCHEMES:
+        return
+    if scheme not in ("http", "https"):
+        raise SSRFProtectionError(
+            f"Browser navigated to disallowed scheme '{scheme}': {candidate_url}"
+        )
+    await validate_url_async(candidate_url, get_settings())
+
+
 async def install_ssrf_route_guard(context: Any) -> None:
-    """Register SSRF route interception on a Playwright BrowserContext."""
+    """Register SSRF route interception and subresource redirect tracking on a BrowserContext."""
     route_fn = getattr(context, "route", None)
     if callable(route_fn):
         await _maybe_await(route_fn("**/*", _ssrf_route_guard))
+
+    on_fn = getattr(context, "on", None)
+    if callable(on_fn):
+        violations: list[URLValidationError] = []
+        pending_checks: set[asyncio.Task[None]] = set()
+        try:
+            context._ssrf_redirect_violations = violations
+            context._ssrf_redirect_tasks = pending_checks
+        except Exception:
+            return
+
+        async def _check_redirected_request(req: Any) -> None:
+            for hop_url in _collect_redirect_chain_urls(req):
+                try:
+                    await _validate_browser_url_candidate(hop_url)
+                except URLValidationError as exc:
+                    logger.warning(f"Blocked redirected browser request ({hop_url}): {exc}")
+                    violations.append(exc)
+                    return
+
+        def _on_request(req: Any) -> None:
+            prev = getattr(req, "redirected_from", None)
+            if prev is None or not isinstance(getattr(req, "url", None), str):
+                return
+            try:
+                loop = asyncio.get_running_loop()
+            except RuntimeError:
+                return
+            task = loop.create_task(_check_redirected_request(req))
+            pending_checks.add(task)
+            task.add_done_callback(pending_checks.discard)
+
+        try:
+            await _maybe_await(on_fn("request", _on_request))
+        except Exception:
+            pass
+
+
+async def validate_browser_navigation(
+    page: Any,
+    response: Any = None,
+    context: Any = None,
+) -> None:
+    """Re-validate every redirect hop in `response.request.redirected_from` and final `page.url`."""
+    if context is not None:
+        pending = getattr(context, "_ssrf_redirect_tasks", None)
+        if isinstance(pending, set) and pending:
+            await asyncio.gather(*list(pending), return_exceptions=True)
+        recorded = getattr(context, "_ssrf_redirect_violations", None)
+        if isinstance(recorded, list) and recorded:
+            raise recorded[0]
+
+    candidates: list[str] = []
+    if response is not None:
+        candidates.extend(_collect_redirect_chain_urls(getattr(response, "request", None)))
+        resp_url = getattr(response, "url", None)
+        if isinstance(resp_url, str) and resp_url:
+            candidates.append(resp_url)
+
+    if page is not None:
+        page_url = getattr(page, "url", None)
+        if isinstance(page_url, str) and page_url:
+            candidates.append(page_url)
+
+    seen: set[str] = set()
+    for url_str in candidates:
+        if url_str in seen:
+            continue
+        seen.add(url_str)
+        await _validate_browser_url_candidate(url_str)
 
 
 class PDFGeneratorError(Exception):
@@ -248,6 +352,7 @@ class PlaywrightPDFGenerator:
                 ignore_https_errors=False,  # Security: don't ignore HTTPS errors
                 java_script_enabled=True,
                 bypass_csp=False,  # Security: respect Content Security Policy
+                service_workers="block",
             )
             await install_ssrf_route_guard(context)
 
@@ -340,6 +445,8 @@ class PlaywrightPDFGenerator:
                         except (PlaywrightTimeoutError, TimeoutError):
                             raise PDFGeneratorError(f"Timeout loading page: {url}")
 
+                        await validate_browser_navigation(page, response, context)
+
                         await page.wait_for_load_state(
                             "networkidle",
                             timeout=timeout_ms,
@@ -358,6 +465,7 @@ class PlaywrightPDFGenerator:
                             )
 
                         await self._close_modals(page)
+                        await validate_browser_navigation(page, None, context)
 
                         logger.info("Generating PDF...")
 
@@ -388,7 +496,7 @@ class PlaywrightPDFGenerator:
                             except Exception:
                                 pass
 
-            except PDFGeneratorError:
+            except (PDFGeneratorError, BrowserActionError, URLValidationError):
                 raise
             except Exception as e:
                 logger.error(f"Unexpected error generating PDF: {e}")
@@ -442,6 +550,8 @@ class PlaywrightPDFGenerator:
                                 status_code=response.status,
                             )
 
+                        await validate_browser_navigation(page, response, context)
+
                         settle_ms = min(timeout_ms, 2500)
                         try:
                             await page.wait_for_load_state("networkidle", timeout=settle_ms)
@@ -463,6 +573,7 @@ class PlaywrightPDFGenerator:
                             )
 
                         await self._close_modals(page)
+                        await validate_browser_navigation(page, None, context)
 
                         screenshot_kwargs: dict[str, Any] = {
                             "type": image_type,
@@ -483,7 +594,7 @@ class PlaywrightPDFGenerator:
                                 await page.close()
                             except Exception:
                                 pass
-            except PDFGeneratorError:
+            except (PDFGeneratorError, BrowserActionError, URLValidationError):
                 raise
             except Exception as e:
                 logger.error(f"Unexpected error capturing screenshot: {e}")

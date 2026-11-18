@@ -6,8 +6,8 @@ FastAPI web service for programmatic URL content downloading, DOM article extrac
 
 - **4-Stage SSRF Defense-in-Depth (`SSRFSafeHTTPTransport`)**:
   - Resolves hostnames via non-blocking `asyncio.to_thread` and pins the verified IP address directly at socket connect time (`connect_tcp` in `SSRFSafeNetworkBackend` with `trust_env=False`), closing DNS-rebinding TOCTOU windows.
-  - Enforces private/reserved IP blocks across initial DNS pre-flight, every `3xx` HTTP redirect hop, `/robots.txt` fetches, outbound webhooks (`follow_redirects=False`), `/schedules` and `/batch` creation, and Playwright subresource routes (`context.route("**/*", ...)`).
-  - Blocks `127.0.0.1`, `*.localhost`, RFC1918 private ranges, link-local / cloud metadata (`169.254.169.254`), `file://` URIs, and hex/octal/integer/IPv4-mapped-IPv6 encodings.
+  - Enforces private, shared (`100.64.0.0/10`), and non-global IP blocks across initial DNS pre-flight, every `3xx` HTTP redirect hop, `/robots.txt` fetches, outbound webhooks (`follow_redirects=False`), `/schedules` and `/batch` creation, and Chromium rendering (combining `context.route("**/*", ...)`, `service_workers="block"`, post-navigation `redirected_from` / `page.url` re-validation, and an in-process loopback SSRF-pinning HTTP/CONNECT proxy).
+  - Blocks `127.0.0.1`, `*.localhost`, RFC1918 private ranges, RFC 6598 shared address space (`100.64.0.0/10`), link-local / cloud metadata (`169.254.169.254`), `file://` URIs, and hex/octal/integer/IPv4-mapped-IPv6 encodings.
 - **Single-Fetch Bounded Chromium Pool (`pdf_semaphore`) & Allowlisted Actions**:
   - Unifies all headless Chromium pathways (`Accept: application/pdf`, `Accept: image/png|jpeg`, `?output=screenshot|pdf`, `?render=true`, `?wait_for=`, and `POST /render`) under a single `pdf_semaphore` (`PDF_CONCURRENCY`, default `CPUx2`, max `12`) without redundant pre-flight HTTP fetches.
   - Uses single-pass `domcontentloaded` navigation with a bounded non-fatal `networkidle` settle (`min(timeout_ms, 2500)`), eliminating `10s-20s` hangs on tracker-heavy origins (`v0.6.2`).

@@ -21,6 +21,8 @@ from ..content_converter import (
     should_use_playwright_fallback,
     should_use_playwright_for_html,
 )
+from ..content_encoding import is_text_convertible_content_type, resolve_charset_and_decode
+from ..http_client import UnsupportedMediaTypeError
 from ..metrics import (
     record_html_rendering_detection,
     record_html_rendering_duration,
@@ -134,8 +136,10 @@ async def _playwright_fallback_for_content(
                     f"{len(fallback_content)} characters in {fallback_duration:.2f}s"
                 )
                 return fallback_content
+            except URLValidationError:
+                raise
             except Exception as e:
-                logger.error(f"❌ Playwright {output_format} fallback failed for {url}: {e}")
+                logger.warning(f"Playwright {output_format} auto-fallback failed for {url}: {e}")
                 logger.info(f"Falling back to original empty {output_format} for {url}")
 
     return processed_content
@@ -296,7 +300,13 @@ async def _handle_converted_text_response(
                     "X-Rendered-With-JS": "true",
                 },
             )
-        except (SelectorTimeoutError, BrowserActionError, HTTPException):
+        except (
+            SelectorTimeoutError,
+            BrowserActionError,
+            URLValidationError,
+            UnsupportedMediaTypeError,
+            HTTPException,
+        ):
             raise
         except Exception as e:
             logger.error(f"❌ Playwright {output_format} rendering failed for {validated_url}: {e}")
@@ -508,7 +518,7 @@ async def handle_html_response(
         orig_len = str(metadata["size"] if metadata is not None else len(content))
         return Response(
             content=content,
-            media_type=orig_ct,
+            media_type="text/html; charset=utf-8",
             headers={
                 "X-Original-URL": orig_url,
                 "X-Original-Content-Type": orig_ct,
@@ -538,7 +548,7 @@ async def handle_html_response(
             orig_len = str(metadata["size"] if metadata is not None else len(rendered_html))
             return Response(
                 content=rendered_html,
-                media_type=orig_ct,
+                media_type="text/html; charset=utf-8",
                 headers={
                     "X-Original-URL": orig_url,
                     "X-Original-Content-Type": orig_ct,
@@ -546,7 +556,13 @@ async def handle_html_response(
                     "X-Rendered-With-JS": "true",
                 },
             )
-        except (SelectorTimeoutError, BrowserActionError, HTTPException):
+        except (
+            SelectorTimeoutError,
+            BrowserActionError,
+            URLValidationError,
+            UnsupportedMediaTypeError,
+            HTTPException,
+        ):
             raise
         except Exception as e:
             logger.error(f"❌ Playwright HTML rendering failed for {validated_url}: {e}")
@@ -556,11 +572,17 @@ async def handle_html_response(
                 if http_fallback is None:
                     raise
                 content, metadata = await http_fallback()
+            if not is_text_convertible_content_type(
+                metadata["content_type"],
+                allow_ocr_images=False,
+                sample_bytes=content,
+            ):
+                raise UnsupportedMediaTypeError(metadata["content_type"], target_format="html")
             if "html" in metadata["content_type"].lower():
                 degraded_body: bytes | str = content
                 resp_ct = metadata["content_type"]
             else:
-                degraded_body = content.decode("utf-8", errors="ignore")
+                degraded_body, _ = resolve_charset_and_decode(content, metadata["content_type"])
                 resp_ct = "text/html; charset=utf-8"
             return Response(
                 content=degraded_body,
@@ -577,6 +599,13 @@ async def handle_html_response(
         if http_fallback is None:
             raise ValueError("content and metadata or http_fallback must be provided")
         content, metadata = await http_fallback()
+
+    if not is_text_convertible_content_type(
+        metadata["content_type"],
+        allow_ocr_images=False,
+        sample_bytes=content,
+    ):
+        raise UnsupportedMediaTypeError(metadata["content_type"], target_format="html")
 
     rendered_with_js = False
     html_content: bytes | str
@@ -607,13 +636,13 @@ async def handle_html_response(
                         record_html_rendering_success(len(content), len(rendered_html))
                         html_content = rendered_html
                         rendered_with_js = True
-                    except SelectorTimeoutError:
+                    except (SelectorTimeoutError, URLValidationError):
                         raise
                     except Exception as e:
-                        logger.error(
-                            f"❌ Playwright HTML rendering failed for {validated_url}: {e}"
+                        logger.warning(
+                            f"Auto-detected Playwright HTML rendering failed for {validated_url}, "
+                            f"serving static HTML: {e}"
                         )
-                        logger.info(f"Falling back to raw HTML for {validated_url}")
                         record_html_rendering_failure()
                         html_content = content
                 else:
@@ -621,9 +650,11 @@ async def handle_html_response(
         else:
             html_content = content
 
-        response_content_type = metadata["content_type"]
+        response_content_type = (
+            "text/html; charset=utf-8" if rendered_with_js else metadata["content_type"]
+        )
     else:
-        html_content = content.decode("utf-8", errors="ignore")
+        html_content, _ = resolve_charset_and_decode(content, metadata["content_type"])
         response_content_type = "text/html; charset=utf-8"
 
     return Response(

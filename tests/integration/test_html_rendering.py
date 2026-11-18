@@ -8,7 +8,7 @@ from src.downloader.content_converter import render_html_with_playwright
 from src.downloader.services.content_processor import handle_html_response
 
 
-@pytest.mark.integration
+@pytest.mark.unit
 @pytest.mark.asyncio
 class TestPlaywrightHTMLRendering:
     """Test Playwright HTML rendering functionality."""
@@ -136,7 +136,7 @@ class TestPlaywrightHTMLRendering:
             await render_html_with_playwright(url)
 
 
-@pytest.mark.integration
+@pytest.mark.unit
 @pytest.mark.asyncio
 class TestHandleHTMLResponse:
     """Test the handle_html_response function integration."""

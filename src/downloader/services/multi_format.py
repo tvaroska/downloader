@@ -17,8 +17,11 @@ from ..content_converter import (
     convert_content_to_markdown,
     convert_content_to_text,
 )
+from ..content_encoding import is_text_convertible_content_type, resolve_charset_and_decode
+from ..http_client import UnsupportedMediaTypeError
 from ..metrics import record_html_rendering_failure
 from ..models.responses import ResponseMetadata
+from ..validation import URLValidationError
 from .content_negotiation import _format_to_mime_type
 
 if TYPE_CHECKING:
@@ -134,7 +137,14 @@ async def _process_single_format_for_multi(
             if degraded_force_render:
                 if content is None or metadata is None:
                     raise Exception("Raw content required for degraded HTML response")
-                return ("text/html", content.decode("utf-8", errors="ignore"))
+                if not is_text_convertible_content_type(
+                    metadata["content_type"],
+                    allow_ocr_images=False,
+                    sample_bytes=content,
+                ):
+                    raise UnsupportedMediaTypeError(metadata["content_type"], target_format="html")
+                decoded_html, _ = resolve_charset_and_decode(content, metadata["content_type"])
+                return ("text/html", decoded_html)
             response = await cp.handle_html_response(
                 url,
                 content,
@@ -147,7 +157,11 @@ async def _process_single_format_for_multi(
                 worker_queue=worker_queue,
                 remote_timeout=remote_timeout,
             )
-            return ("text/html", bytes(response.body).decode("utf-8", errors="ignore"))
+            decoded_body, _ = resolve_charset_and_decode(
+                bytes(response.body),
+                response.headers.get("content-type"),
+            )
+            return ("text/html", decoded_body)
 
         else:
             raise Exception(f"Unsupported format: {format_type}")
@@ -202,7 +216,7 @@ async def process_multiple_formats(
                 "http_version": "HTTP/1.1",
                 "connection_reused": False,
             }
-        except (SelectorTimeoutError, BrowserActionError, HTTPException):
+        except (SelectorTimeoutError, BrowserActionError, URLValidationError, HTTPException):
             raise
         except Exception as e:
             logger.error(f"❌ Multi-format Playwright rendering failed for {url}: {e}")

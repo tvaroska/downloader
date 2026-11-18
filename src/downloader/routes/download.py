@@ -2,7 +2,7 @@
 
 import logging
 from typing import Literal
-from urllib.parse import urlparse
+from urllib.parse import unquote, urlparse
 
 from fastapi import APIRouter, Depends, Header, HTTPException, Path, Query, Request, Response
 
@@ -21,9 +21,11 @@ from ..dependencies import (
 from ..http_client import (
     ContentTooLargeError,
     DownloadError,
+    HTTPClient,
     HTTPClientError,
     HTTPTimeoutError,
     RequestPriority,
+    UnsupportedMediaTypeError,
 )
 from ..models.responses import ErrorResponse, HTTPErrorResponse, ResponseMetadata
 from ..pdf_generator import PDFGeneratorError
@@ -46,6 +48,19 @@ logger = logging.getLogger(__name__)
 
 router = APIRouter()
 
+_ALLOWED_DOWNLOAD_QUERY_PARAMS = frozenset(
+    {
+        "render",
+        "wait_for",
+        "output",
+        "full_page",
+        "screenshot_format",
+        "actions",
+        "ocr",
+        "ocr_lang",
+    }
+)
+
 
 @router.get(
     "/{url:path}",
@@ -54,6 +69,7 @@ router = APIRouter()
         403: {"model": HTTPErrorResponse, "description": "Disallowed by origin robots.txt"},
         408: {"model": HTTPErrorResponse, "description": "Request timeout"},
         413: {"model": HTTPErrorResponse, "description": "Response content exceeds size limit"},
+        415: {"model": HTTPErrorResponse, "description": "Unsupported binary content type"},
         422: {"model": HTTPErrorResponse, "description": "OCR image processing error"},
         429: {"model": HTTPErrorResponse, "description": "Rate limit exceeded"},
         500: {"model": HTTPErrorResponse, "description": "Internal server error"},
@@ -109,7 +125,24 @@ async def download_url(
     """Download content from a single URL with content negotiation, OCR, and ethical crawling."""
     active_settings = getattr(request.app.state, "settings", None) or settings
     try:
-        validated_url = await validate_url_async(url, active_settings)
+        unexpected_params = [
+            key for key in request.query_params if key not in _ALLOWED_DOWNLOAD_QUERY_PARAMS
+        ]
+        if unexpected_params:
+            bad_keys = ", ".join(sorted(set(unexpected_params)))
+            raise URLValidationError(
+                f"Unsupported query parameter(s): {bad_keys}. "
+                "Percent-encode '?', '#', and '%' in the target URL (%3F, %23, %25)."
+            )
+
+        scope = getattr(request, "scope", None)
+        raw_path = scope.get("raw_path") if isinstance(scope, dict) else None
+        if isinstance(raw_path, bytes) and raw_path:
+            raw_target = unquote(raw_path.decode("latin-1").lstrip("/"))
+        else:
+            raw_target = url
+
+        validated_url = await validate_url_async(raw_target, active_settings)
         parsed_actions = parse_actions_param(actions)
         validated_ocr_lang = (
             validate_ocr_language(ocr_lang, active_settings.ocr.default_language)
@@ -126,12 +159,42 @@ async def download_url(
             domain = urlparse(validated_url).netloc
             await domain_throttle.wait_if_needed(domain, crawl_delay)
 
+        formats = parse_accept_headers(request.headers.getlist("accept"))
+        format_type = parse_accept_header(accept)
+        if ocr and format_type not in {"text", "markdown"}:
+            format_type = "text"
+
+        require_text_http = False
+        allow_ocr_http = False
+        target_fmt_label = format_type
+        if len(formats) > 1:
+            http_formats = [f for f in formats if f not in {"pdf", "screenshot", "screenshot_jpeg"}]
+            if http_formats and "json" not in http_formats:
+                require_text_http = True
+                allow_ocr_http = any(f in {"text", "markdown"} for f in http_formats)
+                target_fmt_label = ",".join(http_formats)
+        elif format_type in {"text", "markdown", "html"}:
+            require_text_http = True
+            allow_ocr_http = format_type in {"text", "markdown"}
+
         cached_http_result: tuple[bytes, ResponseMetadata] | None = None
 
         async def fetch_via_http() -> tuple[bytes, ResponseMetadata]:
             nonlocal cached_http_result
             if cached_http_result is None:
-                cached_http_result = await http_client.download(validated_url, RequestPriority.HIGH)
+                if require_text_http and isinstance(http_client, HTTPClient):
+                    cached_http_result = await http_client.download(
+                        validated_url,
+                        RequestPriority.HIGH,
+                        require_text_convertible=True,
+                        allow_ocr_images=allow_ocr_http,
+                        target_format=target_fmt_label,
+                    )
+                else:
+                    cached_http_result = await http_client.download(
+                        validated_url,
+                        RequestPriority.HIGH,
+                    )
             return cached_http_result
 
         remote_queue = (
@@ -169,7 +232,6 @@ async def download_url(
             )
 
         effective_render = render or (wait_for is not None) or bool(parsed_actions)
-        formats = parse_accept_headers(request.headers.getlist("accept"))
 
         if len(formats) > 1:
             logger.info(f"Multi-format request: {formats} (Accept: {accept})")
@@ -189,9 +251,6 @@ async def download_url(
                 remote_timeout=remote_timeout,
             )
 
-        format_type = parse_accept_header(accept)
-        if ocr and format_type not in {"text", "markdown"}:
-            format_type = "text"
         logger.info(f"Requested format: {format_type} (Accept: {accept})")
 
         if format_type == "pdf":
@@ -341,6 +400,13 @@ async def download_url(
             detail=ErrorResponse(error=str(e), error_type="content_too_large").model_dump(),
         )
 
+    except UnsupportedMediaTypeError as e:
+        logger.warning(f"Unsupported media type for {url}: {e}")
+        raise HTTPException(
+            status_code=415,
+            detail=ErrorResponse(error=str(e), error_type="unsupported_media_type").model_dump(),
+        )
+
     except HTTPTimeoutError as e:
         logger.error(f"Timeout error for {url}: {e}")
         raise HTTPException(
@@ -356,8 +422,11 @@ async def download_url(
         )
 
     except HTTPClientError as e:
-        logger.error(f"HTTP client error for {url}: {e}")
         status_code = e.status_code if e.status_code else 502
+        if 400 <= status_code < 500:
+            logger.warning(f"Upstream HTTP {status_code} for {url}: {e}")
+        else:
+            logger.error(f"HTTP client error for {url}: {e}")
 
         raise HTTPException(
             status_code=status_code,

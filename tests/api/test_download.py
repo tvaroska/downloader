@@ -576,3 +576,46 @@ class TestWaitForParameter:
         )
         # FastAPI returns 422 for validation errors
         assert response.status_code == 422
+
+
+def test_target_query_string_reaches_http_client(api_client, env_no_auth):
+    """Percent-encoded target query and fragment reach HTTPClient intact while unencoded keys return 400 (`R2`)."""
+    captured_urls: list[str] = []
+
+    async def fake_download(url: str, *_args, **_kwargs):
+        captured_urls.append(url)
+        return (
+            b"<html><body>Search page 2</body></html>",
+            {
+                "url": url,
+                "status_code": 200,
+                "content_type": "text/html; charset=utf-8",
+                "size": 39,
+                "headers": {"content-type": "text/html; charset=utf-8"},
+            },
+        )
+
+    mock_client = AsyncMock()
+    mock_client.download.side_effect = fake_download
+    app.dependency_overrides[get_http_client] = lambda: mock_client
+    try:
+        # 1. Properly percent-encoded target query + fragment reaches http_client.download intact
+        encoded_resp = api_client.get(
+            "/https://example.com/search%3Fq=hello%2520world&page=2%23top",
+            headers={"Accept": "text/plain"},
+        )
+        assert encoded_resp.status_code == 200
+        assert captured_urls == ["https://example.com/search?q=hello%20world&page=2#top"]
+
+        # 2. Unencoded target query parameter is rejected with 400 validation_error instead of dropped
+        unencoded_resp = api_client.get(
+            "/https://example.com/search?q=test&page=2",
+            headers={"Accept": "text/plain"},
+        )
+        assert unencoded_resp.status_code == 400
+        detail = unencoded_resp.json()["detail"]
+        assert detail["error_type"] == "validation_error"
+        assert "page" in detail["error"]
+        assert "q" in detail["error"]
+    finally:
+        app.dependency_overrides.pop(get_http_client, None)

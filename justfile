@@ -12,6 +12,24 @@ fmt:
     uv run ruff check --fix src/ tests/ examples/
     uv run ruff format src/ tests/ examples/
 
+# Read-only verification gate (Python + typed SDK suites)
+check:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    uv lock --check --offline --no-config
+    uv run --no-sync ruff check src/ tests/ examples/
+    uv run --no-sync ruff format --check src/ tests/ examples/
+    uv run --no-sync mypy src/
+    uv run --no-sync pytest -p no:cacheprovider -n auto -m "not (integration or e2e or network or requires_redis or requires_playwright)"
+    uv run --no-sync pytest -p no:cacheprovider sdks/python/tests -c sdks/python/pyproject.toml
+    node --test sdks/javascript/test/client.test.mjs
+    if command -v tsc >/dev/null 2>&1; then
+        tsc --noEmit -p sdks/javascript/tsconfig.json
+    fi
+    test -z "$(gofmt -s -l sdks/go)"
+    go -C sdks/go vet ./...
+    go -C sdks/go test -race ./...
+
 # Run tests
 test:
     uv run pytest tests/ -v

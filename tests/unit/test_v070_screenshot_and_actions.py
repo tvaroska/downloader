@@ -183,7 +183,9 @@ class TestScreenshotAndRenderEndpoints:
         return mock_robots
 
     def teardown_method(self) -> None:
-        app.dependency_overrides.clear()
+        app.dependency_overrides.pop(get_robots_checker, None)
+        app.dependency_overrides.pop(get_domain_throttle, None)
+        app.dependency_overrides.pop(get_http_client, None)
 
     def test_download_output_screenshot_toggle_png_and_jpeg(self) -> None:
         self._setup_mock_dependencies()

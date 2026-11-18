@@ -7,6 +7,11 @@ from typing import Any
 
 import httpx
 
+from .content_encoding import (
+    is_text_convertible_content_type,
+    make_stateless_cookies,
+    read_bounded_response_bytes,
+)
 from .models.responses import ResponseMetadata
 from .ssrf_transport import SSRFSafeHTTPTransport
 from .validation import (
@@ -64,6 +69,23 @@ class ContentTooLargeError(DownloadError):
         super().__init__(message)
         self.max_size: int = resolved_max
         self.actual_size: int | None = actual_size
+
+
+class UnsupportedMediaTypeError(DownloadError):
+    """Raised when an upstream binary Content-Type cannot be converted to text/HTML/markdown."""
+
+    def __init__(
+        self,
+        content_type: str,
+        target_format: str = "text",
+        message: str | None = None,
+    ) -> None:
+        self.content_type = content_type
+        self.target_format = target_format
+        resolved = message or (
+            f"Unsupported binary content type '{content_type}' for {target_format} conversion"
+        )
+        super().__init__(resolved)
 
 
 class RequestPriority(Enum):
@@ -161,6 +183,7 @@ class HTTPClient:
             max_redirects=max_redirects,
             transport=transport,
             trust_env=False,
+            cookies=make_stateless_cookies(),
             event_hooks={"response": [self._on_response_hook]},
             headers={
                 "User-Agent": self.user_agent,
@@ -200,6 +223,10 @@ class HTTPClient:
         url: str,
         priority: RequestPriority = RequestPriority.HIGH,
         headers: Mapping[str, str] | None = None,
+        *,
+        require_text_convertible: bool = False,
+        allow_ocr_images: bool = False,
+        target_format: str = "text",
     ) -> tuple[bytes, ResponseMetadata]:
         """
         Download content from a URL.
@@ -208,23 +235,37 @@ class HTTPClient:
             url: The URL to download from
             priority: Request priority (kept for API compatibility, not used)
             headers: Optional sanitized custom HTTP headers
+            require_text_convertible: Reject binary non-text Content-Types before buffering
+            allow_ocr_images: Permit OCR-supported image MIME types when require_text_convertible=True
+            target_format: Target conversion format label for error reporting
 
         Returns:
             Tuple of (content_bytes, metadata_dict)
 
         Raises:
             ContentTooLargeError: When content exceeds max_download_size
+            UnsupportedMediaTypeError: When binary Content-Type is rejected for text conversion
             URLValidationError: When a redirect target or header fails validation
             HTTPClientError: For HTTP-related errors
             HTTPTimeoutError: For timeout errors
             DownloadError: For other download errors
         """
-        return await self._do_download(url, headers=headers)
+        return await self._do_download(
+            url,
+            headers=headers,
+            require_text_convertible=require_text_convertible,
+            allow_ocr_images=allow_ocr_images,
+            target_format=target_format,
+        )
 
     async def _do_download(
         self,
         url: str,
         headers: Mapping[str, str] | None = None,
+        *,
+        require_text_convertible: bool = False,
+        allow_ocr_images: bool = False,
+        target_format: str = "text",
     ) -> tuple[bytes, ResponseMetadata]:
         """Internal streaming download implementation."""
         logger.info(f"Starting download from: {url}")
@@ -232,10 +273,12 @@ class HTTPClient:
         try:
             req_headers = sanitize_custom_headers(headers)
 
-            # Ensure hook remains attached even if a caller replaced _client with a custom AsyncClient
+            # Ensure hook and stateless cookie jar remain enforced even if _client was swapped
             hooks = self._client.event_hooks.setdefault("response", [])
             if self._on_response_hook not in hooks:
                 hooks.append(self._on_response_hook)
+            if isinstance(self._client, httpx.AsyncClient):
+                self._client._cookies = make_stateless_cookies()
 
             stream_cm = (
                 self._client.stream("GET", url, headers=req_headers)
@@ -256,18 +299,31 @@ class HTTPClient:
                         actual_size=cl_val,
                     )
 
-                chunks: list[bytes] = []
-                total_bytes = 0
-                async for chunk in response.aiter_bytes():
-                    total_bytes += len(chunk)
-                    if total_bytes > self.max_download_size:
-                        raise ContentTooLargeError(
-                            max_size=self.max_download_size,
-                            actual_size=total_bytes,
-                        )
-                    chunks.append(chunk)
+                resp_ct = (
+                    _extract_header_case_insensitive(response.headers, "content-type") or "unknown"
+                )
+                if require_text_convertible and not is_text_convertible_content_type(
+                    resp_ct,
+                    allow_ocr_images=allow_ocr_images,
+                ):
+                    raise UnsupportedMediaTypeError(resp_ct, target_format=target_format)
 
-                content = b"".join(chunks)
+                content = await read_bounded_response_bytes(
+                    response,
+                    max_bytes=self.max_download_size,
+                    on_too_large=lambda actual: ContentTooLargeError(
+                        max_size=self.max_download_size,
+                        actual_size=actual,
+                    ),
+                    on_decode_error=lambda msg: HTTPClientError(msg),
+                )
+
+                if require_text_convertible and not is_text_convertible_content_type(
+                    resp_ct,
+                    allow_ocr_images=allow_ocr_images,
+                    sample_bytes=content,
+                ):
+                    raise UnsupportedMediaTypeError(resp_ct, target_format=target_format)
 
             content_type = (
                 _extract_header_case_insensitive(response.headers, "content-type") or "unknown"

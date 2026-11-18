@@ -15,6 +15,11 @@ from urllib.robotparser import RobotFileParser
 
 import httpx
 
+from ..content_encoding import (
+    make_stateless_cookies,
+    read_bounded_response_bytes,
+    resolve_charset_and_decode,
+)
 from ..metrics import (
     record_robots_cache_hit,
     record_robots_disallowed,
@@ -272,25 +277,36 @@ class RobotsChecker:
                 follow_redirects=True,
                 max_redirects=5,
                 trust_env=False,
+                cookies=make_stateless_cookies(),
                 event_hooks={"response": [self._on_redirect_hook]},
-                headers={"User-Agent": self.user_agent, "Accept": "text/plain,*/*"},
+                headers={
+                    "User-Agent": self.user_agent,
+                    "Accept": "text/plain,*/*",
+                    "Accept-Encoding": "gzip, deflate, br",
+                },
             )
+        elif isinstance(self._http_client, httpx.AsyncClient):
+            self._http_client._cookies = make_stateless_cookies()
         return self._http_client
 
     async def _default_fetch(self, robots_url: str) -> tuple[int, str]:
         client = self._ensure_http_client()
         async with client.stream("GET", robots_url) as response:
-            chunks: list[bytes] = []
-            total = 0
             # RFC 9309 §2.5 requires crawlers to parse at least 500 KiB of robots.txt
             max_robots_bytes = 512 * 1024
-            async for chunk in response.aiter_bytes():
-                remaining = max_robots_bytes - total
-                if remaining <= 0:
-                    break
-                chunks.append(chunk[:remaining])
-                total += len(chunks[-1])
-            body = b"".join(chunks).decode("utf-8", errors="replace")
+            raw_bytes = await read_bounded_response_bytes(
+                response,
+                max_bytes=max_robots_bytes,
+                on_too_large=lambda actual: ValueError(
+                    f"robots.txt exceeded {max_robots_bytes} bytes ({actual})"
+                ),
+                on_decode_error=lambda msg: ValueError(msg),
+                truncate_on_limit=True,
+            )
+            body, _ = resolve_charset_and_decode(
+                raw_bytes,
+                response.headers.get("content-type"),
+            )
             return response.status_code, body
 
     async def _fetch_and_cache(self, scheme: str, netloc: str) -> tuple[str, bool]:

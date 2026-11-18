@@ -330,11 +330,17 @@ def _validate_ip_address(
         )
 
     # 7. Check for private IPs (10.0.0.0/8, 172.16.0.0/12, 192.168.0.0/16, fd00::/8)
-    #    This is the broadest category and catches many IPs, so it must come LAST
     if settings.ssrf.block_private_ips and ip_obj.is_private:
         logger.warning(f"SSRF attempt blocked: {original_hostname} -> {ip_str} (private IP)")
         raise SSRFProtectionError(
             f"Access to private IP and private addresses is not allowed (hostname: {original_hostname}, IP: {ip_str})"
+        )
+
+    # RFC 6598 100.64.0.0/10 has is_private=False in stdlib ipaddress; deny all non-global IPs.
+    if settings.ssrf.block_private_ips and not ip_obj.is_global:
+        logger.warning(f"SSRF attempt blocked: {original_hostname} -> {ip_str} (non-global IP)")
+        raise SSRFProtectionError(
+            f"Access to non-global IP addresses is not allowed (hostname: {original_hostname}, IP: {ip_str})"
         )
 
     logger.debug(f"IP address {ip_str} (from {original_hostname}) passed SSRF checks")

@@ -18,8 +18,9 @@ from urllib.parse import urlparse
 
 from ..config import get_settings
 from ..content_converter import convert_content_to_markdown, convert_content_to_text
+from ..content_encoding import is_text_convertible_content_type, resolve_charset_and_decode
 from ..crawling import DomainThrottle, RobotsChecker
-from ..http_client import RequestPriority
+from ..http_client import RequestPriority, UnsupportedMediaTypeError
 from ..models.schedule import ExecutionStatus, ScheduleExecution
 from ..pdf_generator import generate_pdf_from_url, generate_screenshot_from_url
 from ..services.webhooks import deliver_webhook
@@ -45,6 +46,7 @@ _NON_RETRYABLE_PREFIXES = (
     "URLValidationError:",
     "SSRFProtectionError:",
     "RobotsDisallowedError:",
+    "UnsupportedMediaTypeError:",
 )
 
 
@@ -291,7 +293,14 @@ class ScheduledJobExecutor:
             return convert_content_to_markdown(content, content_type)
 
         elif format == "html":
-            return content.decode("utf-8", errors="ignore")
+            if not is_text_convertible_content_type(
+                content_type,
+                allow_ocr_images=False,
+                sample_bytes=content,
+            ):
+                raise UnsupportedMediaTypeError(content_type, target_format="html")
+            decoded_html, _ = resolve_charset_and_decode(content, content_type)
+            return decoded_html
 
         elif format == "pdf":
             if self.pdf_semaphore is None:

@@ -6,6 +6,20 @@ history — supersede an old decision with a new entry that references it.
 
 ---
 
+## 2026-11-18 — `v0.7.1` stateless production hardening, browser redirect SSRF proxy & SDK query encoding
+
+- **Decision (Multi-layer Chromium redirect SSRF protection — supersedes `2026-11-01` route-only browser claim):**
+  Added `BrowserEgressProxy` (`src/downloader/browser/egress_proxy.py`), `service_workers="block"` on all Playwright contexts (`src/downloader/browser/manager.py`, `src/downloader/pdf_generator.py`), and post-navigation `response.request.redirected_from` + `page.url` + subresource redirect validation (`validate_browser_navigation`), plus `not ip_obj.is_global` blocking (`100.64.0.0/10` shared address space) in `src/downloader/validation.py` (`R1`, `R5`).
+  - **Why:** Playwright's `context.route("**/*", ...)` handler (`2026-11-01` entry below) does not re-fire when Chromium follows a `3xx` redirect hop (`crNetworkManager.js`). Running Chromium behind an in-process loopback HTTP/CONNECT proxy that resolves and pins validated IPs at connect time — reinforced by post-navigation redirect-chain checks and blocked service workers — closes both `3xx` redirect SSRF and DNS-rebinding TOCTOU in headless browser captures.
+- **Decision (Bounded raw-stream decompression, stateless cookie jar, charset decoding & binary `415` guard):**
+  Added `src/downloader/content_encoding.py` (`read_bounded_response_bytes`, `make_stateless_cookies`, `resolve_charset_and_decode`, `is_text_convertible_content_type`) shared across `http_client.py`, `crawling/robots.py`, `content_converter.py`, and format services (`R3`, `R4`, `R6`, `F-2026-11-16-002`).
+  - **Why:** `httpx.Response.aiter_bytes()` decompressed full brotli/gzip chunks before checking `CONTENT_MAX_DOWNLOAD_SIZE`, `httpx.AsyncClient` replayed `Set-Cookie` across callers, `.decode("utf-8", errors="ignore")` dropped non-UTF-8 characters, and binary `audio/*`/`video/*`/`application/octet-stream` responses caused `OOMKilled` pod restarts when decoded across parallel text/markdown/HTML tasks. Non-text binary media types now fail fast with `HTTP 415` (`unsupported_media_type`) before buffering body chunks.
+- **Decision (`GET /{url}` target query percent-encoding & strict query-key allowlist):**
+  Updated the Python, JavaScript/TypeScript, and Go SDKs to percent-encode `%` (`%25`), `?` (`%3F`), and `#` (`%23`) in the `GET /{url}` path segment, and rejected undocumented query keys on `GET /{url}` with `HTTP 400` (`validation_error`) (`R2`).
+  - **Why:** Unencoded `?` in `GET /https://example.com/search?q=1` was parsed as FastAPI endpoint query parameters and silently stripped from the upstream fetch.
+
+---
+
 ## 2026-11-12 — `v0.6.2` single-pass browser settle & `v0.7.0` extended features and operations
 
 - **Decision (`v0.6.2` single-pass `domcontentloaded` + bounded settle — `F-2026-11-05-002`):**

@@ -97,6 +97,12 @@ def _raise_for_api_error(response: httpx.Response) -> None:
     )
 
 
+def _encode_target_url_path(url: str) -> str:
+    """Percent-encode '%', '?' and '#' so target query/fragment survive GET /{url:path}."""
+    stripped = url.lstrip("/")
+    return stripped.replace("%", "%25").replace("?", "%3F").replace("#", "%23")
+
+
 def _download_request_args(
     url: str,
     *,
@@ -110,7 +116,7 @@ def _download_request_args(
     ocr: bool = False,
     ocr_lang: str | None = None,
 ) -> tuple[str, dict[str, str], dict[str, Any]]:
-    path = f"/{url.lstrip('/')}"
+    path = f"/{_encode_target_url_path(url)}"
     headers = {"Accept": _FORMAT_TO_ACCEPT.get(format, format)}
     params: dict[str, Any] = {}
     if render:

@@ -123,3 +123,38 @@ func TestDownloaderClientEndToEnd(t *testing.T) {
 		t.Fatalf("expected 400 validation_error APIError, got %v", err)
 	}
 }
+
+func TestDownloadEncodesTargetQueryAndFragment(t *testing.T) {
+	var gotRequestURI string
+	var gotDecodedPath string
+	var gotRenderParam string
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotRequestURI = r.RequestURI
+		gotDecodedPath = r.URL.Path
+		gotRenderParam = r.URL.Query().Get("render")
+		w.Header().Set("Content-Type", "text/plain")
+		_, _ = w.Write([]byte("query-preserved"))
+	}))
+	defer srv.Close()
+
+	client := New(srv.URL, "go-secret")
+	target := "https://example.com/search?q=hello%20world&page=2#sec"
+	res, err := client.Download(context.Background(), target, &DownloadOptions{Render: true})
+	if err != nil {
+		t.Fatalf("Download failed: %v", err)
+	}
+	if res.Text() != "query-preserved" {
+		t.Fatalf("unexpected body: %q", res.Text())
+	}
+	wantURI := "/https://example.com/search%3Fq=hello%2520world&page=2%23sec?render=true"
+	if gotRequestURI != wantURI {
+		t.Fatalf("expected RequestURI %q, got %q", wantURI, gotRequestURI)
+	}
+	if gotDecodedPath != "/https://example.com/search?q=hello%20world&page=2#sec" {
+		t.Fatalf("unexpected decoded URL.Path: %q", gotDecodedPath)
+	}
+	if gotRenderParam != "true" {
+		t.Fatalf("expected render=true query param, got %q", gotRenderParam)
+	}
+}

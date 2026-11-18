@@ -217,3 +217,40 @@ async def test_async_client_end_to_end() -> None:
         )
         results = await client.wait_for_batch(job.job_id, poll_interval=0.01)
         assert results.job_id == "job-123"
+
+
+@pytest.mark.asyncio
+async def test_download_encodes_target_query() -> None:
+    captured_raw_paths: list[bytes] = []
+    captured_params: list[dict[str, str]] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        captured_raw_paths.append(request.url.raw_path)
+        captured_params.append(dict(request.url.params))
+        return httpx.Response(200, content=b"encoded-ok", headers={"content-type": "text/plain"})
+
+    target = "https://example.com/search?q=hello%20world&page=2#results"
+    with DownloaderClient(
+        "http://test.local",
+        api_key="test-key",  # pragma: allowlist secret
+        transport=httpx.MockTransport(handler),
+    ) as sync_client:
+        res = sync_client.download(target, render=True)
+        assert res.text == "encoded-ok"
+
+    async with AsyncDownloaderClient(
+        "http://test.local",
+        api_key="test-key",  # pragma: allowlist secret
+        transport=httpx.MockTransport(handler),
+    ) as async_client:
+        ares = await async_client.download(target, wait_for="#main")
+        assert ares.text == "encoded-ok"
+
+    assert captured_raw_paths[0] == (
+        b"/https://example.com/search%3Fq=hello%2520world&page=2%23results?render=true"
+    )
+    assert captured_params[0] == {"render": "true"}
+    assert captured_raw_paths[1] == (
+        b"/https://example.com/search%3Fq=hello%2520world&page=2%23results?wait_for=%23main"
+    )
+    assert captured_params[1] == {"wait_for": "#main"}

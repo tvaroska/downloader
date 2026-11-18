@@ -17,12 +17,14 @@ from ..content_converter import (
     convert_content_to_text,
     render_html_with_playwright,
 )
+from ..content_encoding import is_text_convertible_content_type, resolve_charset_and_decode
 from ..crawling import DomainThrottle, RobotsChecker, RobotsDisallowedError
 from ..http_client import (
     ContentTooLargeError,
     HTTPClientError,
     HTTPTimeoutError,
     RequestPriority,
+    UnsupportedMediaTypeError,
 )
 from ..job_manager import JobStatus
 from ..models.responses import BatchRequest, BatchURLRequest, BatchURLResult
@@ -163,7 +165,7 @@ async def process_single_url_in_batch(
                     timeout=timeout,
                 )
             if format_to_use == "html":
-                processed = rendered_html.decode("utf-8", errors="ignore")
+                processed = rendered_html.decode("utf-8", errors="replace")
             elif format_to_use == "markdown":
                 processed = convert_content_to_markdown(rendered_html, "text/html")
             else:
@@ -267,7 +269,13 @@ async def process_single_url_in_batch(
             )
 
         elif format_to_use == "html":
-            processed_content = content.decode("utf-8", errors="ignore")
+            if not is_text_convertible_content_type(
+                metadata["content_type"],
+                allow_ocr_images=False,
+                sample_bytes=content,
+            ):
+                raise UnsupportedMediaTypeError(metadata["content_type"], target_format="html")
+            processed_content, _ = resolve_charset_and_decode(content, metadata["content_type"])
             duration = asyncio.get_event_loop().time() - start_time
             return BatchURLResult(
                 url=url_request.url,
@@ -349,6 +357,17 @@ async def process_single_url_in_batch(
             error=str(e),
             error_type="content_too_large",
             status_code=413,
+        )
+
+    except UnsupportedMediaTypeError as e:
+        return BatchURLResult(
+            url=url_request.url,
+            success=False,
+            format=format_to_use,
+            duration=asyncio.get_event_loop().time() - start_time,
+            error=str(e),
+            error_type="unsupported_media_type",
+            status_code=415,
         )
 
     except TimeoutError:

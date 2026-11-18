@@ -106,6 +106,12 @@ func (c *Client) Health(ctx context.Context) (*HealthStatus, error) {
 	return &status, nil
 }
 
+func encodeTargetURLPath(targetURL string) string {
+	trimmed := strings.TrimLeft(targetURL, "/")
+	r := strings.NewReplacer("%", "%25", "?", "%3F", "#", "%23")
+	return r.Replace(trimmed)
+}
+
 // Download fetches a URL with optional content negotiation, screenshot/PDF toggle, actions, or OCR.
 func (c *Client) Download(ctx context.Context, targetURL string, opts *DownloadOptions) (*DownloadResult, error) {
 	if opts == nil {
@@ -141,7 +147,7 @@ func (c *Client) Download(ctx context.Context, targetURL string, opts *DownloadO
 		q.Set("ocr_lang", opts.OCRLang)
 	}
 
-	endpoint := c.BaseURL + "/" + strings.TrimLeft(targetURL, "/")
+	endpoint := c.BaseURL + "/" + encodeTargetURLPath(targetURL)
 	if encoded := q.Encode(); encoded != "" {
 		endpoint += "?" + encoded
 	}

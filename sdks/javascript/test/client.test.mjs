@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { DownloaderApiError, DownloaderClient } from "../dist/index.js";
+import { DownloaderApiError, DownloaderClient, encodeTargetUrlPath } from "../src/index.js";
 
 function createMockFetch() {
   return async (input, init = {}) => {
@@ -151,4 +151,37 @@ test("DownloaderClient handles download, render, OCR, screenshot, batch, and API
       return true;
     },
   );
+});
+
+test("download percent-encodes target %, ?, and # without producing duplicate ?", async () => {
+  let capturedInput = "";
+  const client = new DownloaderClient({
+    baseUrl: "http://mock.local",
+    apiKey: "secret-123", // pragma: allowlist secret
+    fetch: async (input) => {
+      capturedInput = String(input);
+      return new Response("search results", {
+        status: 200,
+        headers: { "content-type": "text/plain; charset=utf-8" },
+      });
+    },
+  });
+
+  assert.equal(
+    encodeTargetUrlPath("https://example.com/search?q=hello%20world&page=2#top"),
+    "https://example.com/search%3Fq=hello%2520world&page=2%23top",
+  );
+
+  const res = await client.download("https://example.com/search?q=hello%20world&page=2#top", {
+    render: true,
+  });
+  assert.equal(res.text(), "search results");
+  assert.equal(
+    capturedInput,
+    "http://mock.local/https://example.com/search%3Fq=hello%2520world&page=2%23top?render=true",
+  );
+  const parsed = new URL(capturedInput);
+  assert.equal(parsed.pathname, "/https://example.com/search%3Fq=hello%2520world&page=2%23top");
+  assert.equal(parsed.search, "?render=true");
+  assert.equal(parsed.hash, "");
 });

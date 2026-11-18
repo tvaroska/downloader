@@ -3,7 +3,7 @@ import pytest
 from src.downloader import __version__
 
 
-@pytest.mark.integration
+@pytest.mark.unit
 class TestHealthEndpoint:
     """Test health endpoint service availability reporting."""
 

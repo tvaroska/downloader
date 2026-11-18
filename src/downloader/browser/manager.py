@@ -15,6 +15,8 @@ from playwright.async_api import (
     async_playwright,
 )
 
+from .egress_proxy import BrowserEgressProxy
+
 logger = logging.getLogger(__name__)
 
 
@@ -91,6 +93,7 @@ class BrowserPool:
         self._all_browsers: set[Browser] = set()
         self._browser_health: dict[Browser, dict[str, Any]] = {}
         self._playwright: Playwright | None = None
+        self._egress_proxy: BrowserEgressProxy | None = None
         self._lock = asyncio.Lock()
         self._closed = False
         self._recycled_count: int = 0
@@ -103,6 +106,9 @@ class BrowserPool:
     async def start(self):
         """Initialize the browser pool with queue-based management."""
         try:
+            proxy = BrowserEgressProxy()
+            await proxy.start()
+            self._egress_proxy = proxy
             self._playwright = await async_playwright().start()
             self._closed = False
 
@@ -124,17 +130,26 @@ class BrowserPool:
                 f"(memory limit: {self.config.memory_limit_mb}MB)"
             )
         except Exception as e:
+            if self._egress_proxy is not None:
+                await self._egress_proxy.close()
+                self._egress_proxy = None
             logger.error(f"Failed to initialize browser pool: {e}")
             raise BrowserPoolError(f"Browser pool initialization failed: {e}")
 
     async def _launch_browser(self) -> Browser:
-        """Launch a single browser instance with memory limits."""
+        """Launch a single browser instance with memory limits and connect-time SSRF proxy."""
         if self._playwright is None:
             raise BrowserPoolError("Playwright instance is not initialized")
-        return await self._playwright.chromium.launch(
-            headless=self.config.headless,
-            args=self.config.get_launch_args(),
-        )
+        launch_kwargs: dict[str, Any] = {
+            "headless": self.config.headless,
+            "args": self.config.get_launch_args(),
+        }
+        if self._egress_proxy is not None and self._egress_proxy.port > 0:
+            launch_kwargs["proxy"] = {
+                "server": self._egress_proxy.server_url,
+                "bypass": "<-loopback>",
+            }
+        return await self._playwright.chromium.launch(**launch_kwargs)
 
     def _get_browser_pid(self, browser: Browser) -> int | None:
         """Extract the process ID from a Playwright browser instance.
@@ -346,6 +361,10 @@ class BrowserPool:
                 await self._playwright.stop()
                 self._playwright = None
 
+            if self._egress_proxy is not None:
+                await self._egress_proxy.close()
+                self._egress_proxy = None
+
             logger.info("Browser pool closed")
         except Exception as e:
             logger.error(f"Error closing browser pool: {e}")
@@ -394,4 +413,5 @@ class BrowserPool:
             ignore_https_errors=False,
             java_script_enabled=True,
             bypass_csp=False,
+            service_workers="block",
         )

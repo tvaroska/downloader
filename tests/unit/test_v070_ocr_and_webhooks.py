@@ -195,7 +195,9 @@ class TestOCRTransformer:
                 r_bad = client.get("/https://example.com/page.html?ocr=true")
                 assert r_bad.status_code == 400
         finally:
-            app.dependency_overrides.clear()
+            app.dependency_overrides.pop(get_robots_checker, None)
+            app.dependency_overrides.pop(get_domain_throttle, None)
+            app.dependency_overrides.pop(get_http_client, None)
 
     async def test_batch_ocr_image_extraction(self) -> None:
         png = _make_tiny_png()
@@ -445,7 +447,9 @@ class TestWebhookDeliveryAndIntegration:
                 assert listed.status_code == 200
                 assert "never-leak-this" not in listed.text
         finally:
-            app.dependency_overrides.clear()
+            app.dependency_overrides.pop(get_robots_checker, None)
+            app.dependency_overrides.pop(get_domain_throttle, None)
+            app.dependency_overrides.pop(get_http_client, None)
 
     def test_batch_endpoint_rejects_ssrf_webhook_url(self) -> None:
         mock_jm = MagicMock()
@@ -462,4 +466,6 @@ class TestWebhookDeliveryAndIntegration:
                 assert resp.status_code == 400
                 assert resp.json()["detail"]["error_type"] == "validation_error"
         finally:
-            app.dependency_overrides.clear()
+            app.dependency_overrides.pop(get_robots_checker, None)
+            app.dependency_overrides.pop(get_domain_throttle, None)
+            app.dependency_overrides.pop(get_http_client, None)

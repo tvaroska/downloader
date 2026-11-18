@@ -270,7 +270,7 @@ class TestSplitWorkerArchitecture:
                 mock_jm.start_background_job.assert_not_awaited()
                 assert len(redis_stub.lists["queue:batch:pending"]) == 1
         finally:
-            app.dependency_overrides.clear()
+            app.dependency_overrides.pop(get_job_manager_dependency, None)
 
     async def test_worker_processes_batch_envelope_and_browser_task(self) -> None:
         redis_stub = _FakeAsyncRedis()
