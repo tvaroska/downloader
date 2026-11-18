@@ -1,10 +1,9 @@
 {
   "config": [
     "mypy:not-strict",
-    "python:below-3.12",
     "ruff-ignore:B904",
-    "ruff-ignore:E722",
     "ruff:ANN",
+    "ruff:BLE",
     "ruff:C90",
     "ruff:PLR0911",
     "ruff:PLR0912",

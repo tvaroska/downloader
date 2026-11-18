@@ -183,26 +183,26 @@ Key variables (see `.env.example` for full list):
 - Active moving-window rate limiting (`60/min` download, `20/min` batch, `200/min` status/jobs/metrics, `100/min` default -> `HTTP 429` + `Retry-After`, right-to-left trusted-proxy `X-Forwarded-For` resolution, and auth vs unauth bucket isolation)
 - Non-root Docker container listening on unprivileged port `:8000` with isolated, auto-recycling Playwright browser contexts
 
-## Planning & Backlog Workflow (Roadmap-First)
+## Planning & Backlog Workflow (Roadmap-First, No `TODO.md`)
 
-Milestones and deferred backlog items live in [`docs/roadmap.md`](docs/roadmap.md) (optional root `TODO.md <= 15 KB` is created only during multi-task active sprints and removed once `0` open items remain); `spec/` stays status-free.
+All upcoming milestones, open `- [ ]` tasks, and unscheduled backlog items live in [`docs/roadmap.md`](docs/roadmap.md). Never create a `TODO.md`; `spec/` stays status-free, and shipped milestones or completed `- [x]` items move into [`docs/archive/roadmap-history.md`](docs/archive/roadmap-history.md) via `proj-test roadmap-archive downloader --done` (verified with `proj-test roadmap-archive downloader --check`).
 
 ### Layout
 
 | Path | Purpose |
 |------|---------|
-| [`docs/roadmap.md`](docs/roadmap.md) | Canonical release milestones, phase status, and deferred backlog |
+| [`docs/roadmap.md`](docs/roadmap.md) | Ordered upcoming release milestones (`- [ ]` tasks), unscheduled backlog (plain bullets/tables), and `## Shipped` one-liners |
+| [`docs/archive/roadmap-history.md`](docs/archive/roadmap-history.md) | Archived milestone and release implementation history moved out of `docs/roadmap.md` |
 | [`DECISIONS.md`](DECISIONS.md) | Append-only architectural decision and learning log (`<= 25 KB`) |
 | [`CRITICAL.md`](CRITICAL.md) | Registry of security-, contract-, and CI-critical paths (mandatory review before commit) |
 | [`skills/downloader-ops/SKILL.md`](skills/downloader-ops/SKILL.md) | Operational runbooks (`Accept` contract, offline verification, Redis/Playwright E2E, Cloud Build releases, `.secrets.baseline`) |
 | `spec/` | THE WHAT — requirements and public wire contracts ([`spec/contracts.md`](spec/contracts.md)). Status-free, **protected** |
-| `docs/` | Guides & completed sprint archives — `docs/guides/*.md`, `docs/features/*.md` (e.g., [`docs/features/ethical-crawling.md`](docs/features/ethical-crawling.md)) |
-| `.claude/plans/` | Optional machine-local scratch plans (gitignored via `.claude/*`, while `.claude/skills` and `.claude/settings.json` stay tracked; archive lasting decisions in `docs/features/*.md` + `DECISIONS.md`, never link `.claude/plans/...`) |
+| `docs/` | Guides & completed feature baselines — `docs/guides/*.md`, `docs/features/*.md` (e.g., [`docs/features/ethical-crawling.md`](docs/features/ethical-crawling.md)) |
 
 ### Verification Ladder
-- **T1 (every change — gates commit):** `ruff check`, `ruff format --check` (or `just fmt`), `mypy src/`, and offline fast `pytest` suite (`not (integration or e2e or network or requires_redis or requires_playwright)`).
-- **T2 (gates milestone completion in `docs/roadmap.md`):** Exercise the changed behavior against acceptance criteria (including `integration` / `requires_playwright` / Redis suites when relevant); archive completed sprint batches into `docs/features/*.md` + `DECISIONS.md`.
-- **T3 (release gate):** Full container + Redis verification (`just e2e` / `cloudbuild.yaml`) against [`spec/contracts.md`](spec/contracts.md).
+- **T1 (every change — gates commit):** `proj-test downloader` (`ruff check`, `ruff format --check`, `mypy src/`, and offline fast `pytest` suite `not (integration or e2e or network or requires_redis or requires_playwright)`).
+- **T2 (gates milestone completion in `docs/roadmap.md`):** Exercise the changed behavior against acceptance criteria (including `integration` / `requires_playwright` / Redis suites and SDK suites when relevant); move shipped milestones into `docs/archive/roadmap-history.md` (`proj-test roadmap-archive downloader --done`) and record decisions in `DECISIONS.md`.
+- **T3 (release gate):** Full container + Trivy `os,library` + Playwright smoke verification (`cloudbuild.yaml` / `proj-release downloader`) against [`spec/contracts.md`](spec/contracts.md).
 
 ### `CRITICAL.md` Escalation
 Any change touching a path listed in [`CRITICAL.md`](CRITICAL.md) requires explicit security/contract review before commit. `spec/` is protected — propose changes to `spec/contracts.md` for review rather than editing it unprompted.

@@ -13,10 +13,11 @@ The archive preserves historical records of:
 
 These documents are kept for reference and learning, not as active documentation.
 
-## Archived Issues
+## Archived Records
 
-| Document | Issue | Status | Date |
+| Document | Topic | Status | Date |
 |----------|-------|--------|------|
+| [roadmap-history.md](roadmap-history.md) | Shipped roadmap milestones and release summaries (`v0.3.0`–`v0.7.0`) | **ARCHIVED** | 2026-11-18 |
 | [DOWNLOADER_BUG.md](DOWNLOADER_BUG.md) | Missing metadata for JS-heavy sites (Substack, Medium) | **RESOLVED** | 2026-01-02 |
 | [TEST_RESULTS.md](TEST_RESULTS.md) | Test findings confirming Brotli decompression issue | **RESOLVED** | 2026-01-02 |
 | [BUG_FIX_SUMMARY.md](BUG_FIX_SUMMARY.md) | Solution: Added `brotli` library dependency | **RESOLVED** | 2026-01-02 |

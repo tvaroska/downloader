@@ -172,7 +172,7 @@ async def generate_pdf_request(
                 error_msg = error_data.get("detail", {}).get(
                     "error", f"HTTP {response.status_code}"
                 )
-            except:
+            except (ValueError, AttributeError):
                 error_msg = f"HTTP {response.status_code}: {response.text[:100]}"
 
             result.finish(

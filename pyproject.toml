@@ -3,32 +3,51 @@ name = "downloader"
 version = "0.7.0"
 description = "REST API Downloader - High-performance web service for programmatic URL content downloading"
 readme = "README.md"
-requires-python = ">=3.10"
+requires-python = ">=3.13"
 dependencies = [
     "fastapi>=0.136.3",
     "starlette>=1.0.1",
     "uvicorn[standard]>=0.24.0",
     "httpx[http2]>=0.25.0",
     "pydantic>=2.0.0",
-    "pydantic-settings>=2.0.0",
-    "python-multipart>=0.0.6",
+    "pydantic-settings>=2.14.2",
+    "python-multipart>=0.0.30",
     "python-json-logger>=2.0.0",
     "beautifulsoup4>=4.13.5",
     "markdownify>=0.11.0",
-    "lxml>=6.0.1",
+    "lxml>=6.1.0",
     "playwright>=1.40.0",
     "redis>=5.0.0",
     "slowapi>=0.1.9",
-    "brotli>=1.2.0",
+    "brotli>=1.2.1",
     "apscheduler>=3.10.0",
     "pytesseract>=0.3.10",
-    "pillow>=10.0.0",
+    "pillow>=13.0.0",
     "opentelemetry-api>=1.28.0",
     "opentelemetry-sdk>=1.28.0",
     "opentelemetry-exporter-otlp-proto-http>=1.28.0",
     "opentelemetry-instrumentation-fastapi>=0.49b0",
     "opentelemetry-instrumentation-httpx>=0.49b0",
     "opentelemetry-instrumentation-redis>=0.49b0",
+]
+
+[tool.uv]
+required-version = ">=0.12.24"
+constraint-dependencies = [
+    "anyio>=4.14.2",
+    "certifi>=2026.10.18",
+    "h2>=4.4.1",
+    "hpack>=4.2.0",
+    "idna>=3.15",
+    "msgpack>=1.2.3",
+    "pip>=26.1.2",
+    "pygments>=2.20.0",
+    "python-dotenv>=1.2.2",
+    "requests>=2.33.0",
+    "setuptools>=78.1.1",
+    "soupsieve>=4.0.0",
+    "urllib3>=2.8.0",
+    "virtualenv>=21.14.9",
 ]
 
 [build-system]
@@ -51,7 +70,6 @@ select = [
 ]
 ignore = [
     "E501",  # Line too long (handled by formatter)
-    "E722",  # Bare except
     "B008",  # Function call in argument defaults (FastAPI Depends pattern)
     "B904",  # Exception chaining
 ]
@@ -107,7 +125,7 @@ ignore_missing_imports = true
 dev = [
     "ruff>=0.12.0",
     "mypy>=1.17.1",
-    "pytest>=8.4.1",
+    "pytest>=9.0.3",
     "pytest-asyncio>=1.1.0",
     "pytest-cov>=6.2.1",
     "pytest-timeout>=2.4.0",

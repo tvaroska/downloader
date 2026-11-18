@@ -1,7 +1,7 @@
 # Optimized production image
 FROM python:3.13-slim
 
-COPY --from=ghcr.io/astral-sh/uv:0.9.1 /uv /uvx /bin/
+COPY --from=ghcr.io/astral-sh/uv:0.12.24 /uv /uvx /bin/
 
 # Set environment variables
 ENV PYTHONUNBUFFERED=1 \
@@ -39,6 +39,12 @@ RUN uv sync --frozen --no-dev --no-editable \
     && apt-get remove -y gcc libxml2-dev libxslt-dev \
     && apt-get autoremove -y \
     && apt-get autoclean \
+    && /usr/local/bin/python3 -m pip uninstall -y pip setuptools wheel \
+    && rm -rf /usr/local/lib/python3.13/site-packages/pip* \
+              /usr/local/lib/python3.13/site-packages/setuptools* \
+              /usr/local/lib/python3.13/site-packages/wheel* \
+              /usr/local/lib/python3.13/ensurepip \
+              /usr/local/bin/pip* \
     && rm -f /bin/uv /bin/uvx \
     && rm -rf /var/lib/apt/lists/* \
     && rm -rf /tmp/* \

@@ -16,8 +16,9 @@ Technical documentation for the REST API Downloader.
 - **[Scheduling Guide](./guides/scheduling.md)** - Cron-based scheduled download setup and usage
 
 ### Strategic Planning
-- **[Product Roadmap](./roadmap.md)** - Canonical strategic priorities, release milestones, and deferred backlog
-- **[Feature History](./features/)** - Completed sprint and feature archives
+- **[Product Roadmap](./roadmap.md)** - Ordered upcoming milestones, open `- [ ]` tasks, unscheduled backlog, and shipped index
+- **[Roadmap History Archive](./archive/roadmap-history.md)** - Shipped milestone details moved via `proj-test roadmap-archive downloader --done`
+- **[Feature History](./features/)** - Completed capability baselines
 
 ### Quick Links
 - **[README](../README.md)** - Project overview and getting started guide

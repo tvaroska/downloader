@@ -1,99 +1,33 @@
-# REST API Downloader - Strategic Roadmap
+# REST API Downloader — Roadmap
 
-**Last Updated:** 2026-11-18
+The ordered list of upcoming work. Each milestone ends in a tagged release; there is no `TODO.md`. Hard invariants live in [`CRITICAL.md`](../CRITICAL.md), architectural rationale in [`DECISIONS.md`](../DECISIONS.md), public wire contracts in [`spec/contracts.md`](../spec/contracts.md), capability baselines in [`features/`](features/), and implemented release history in [`archive/roadmap-history.md`](archive/roadmap-history.md) (move completed milestones or `- [x]` items with `proj-test roadmap-archive downloader --done`, verified via `proj-test roadmap-archive downloader --check`).
 
-## Overview
+## Where we are
 
-This document outlines the strategic priorities, completed releases, and deferred backlog for the REST API Downloader service. Milestones are aligned with stateless-first Kubernetes operations (`REDIS_URI` optional for single-URL extraction, PDF rendering, rate limiting, and ethical crawling; required only for `/batch` and `/schedules`). Architectural rationale lives in [DECISIONS.md](../DECISIONS.md) and public wire contracts live in [spec/contracts.md](../spec/contracts.md).
+`v0.7.0` (`d5e6d6a`) is live at `https://download.tvaroska.sk` across two stateless regional GKE Autopilot replicas (`ENVIRONMENT=production`, single `DOWNLOADER_KEY`, no `REDIS_URI`). On `main`, post-`v0.7.0` dependency CVE upgrades (`fastapi`, `starlette`, `anyio`, `brotli`, `certifi`, `lxml`, `msgpack`, `pillow`, `python-multipart`, `soupsieve`, `urllib3`, `pip`, `virtualenv`, plus production base-image `pip`/`setuptools` stripping for Trivy `--pkg-types os,library`), `uv` `0.12.24` builder/CI parity, GHCR release mirroring (`cloudbuild.yaml`), `requires-python = ">=3.13"`, and the `_selects()` / `ruff:BLE` standards-ratchet fix are **implemented locally (pending `v0.7.1` release)**. Milestone 1 (`v0.7.1`) tracks the three live GKE operational findings plus all 76 items (`R1`–`R76`) from the 2026-11-18 architecture, security, and test review (`79` open `- [ ]` tasks).
 
----
+## Milestones at a glance
 
-## Current Status
+| # | Milestone | Done when | Size / Target |
+| :--- | :--- | :--- | :--- |
+| 1 | `v0.7.1` — Production Reliability, Security & Review Remediation | All 3 live production findings and `R1`–`R76` are resolved, offline `proj-test downloader` (including SDKs & hermetic suites) and Cloud Build (`downloader-tag`) are green, and `v0.7.1` is live on GKE and mirrored to GHCR | `79` open `- [ ]` tasks → `v0.7.1` |
+| Next | `v0.8.0+` — Promote selected items from [`## Unscheduled backlog`](#unscheduled-backlog) | Multi-key quota accounting or stateless Streamable HTTP MCP `2026-07-28` demand triggers scheduling | Unscheduled |
 
-| Phase | Status | Completion |
-|-------|--------|------------|
-| Phase 1: Core Functionality | ✅ Complete | 100% |
-| Phase 2: Batch Processing | ✅ Complete | 100% |
-| Phase 3: Performance & Reliability | ✅ Complete | 100% |
-| Phase 4: Security & Production | ✅ Complete | 100% |
-| Phase 5: Content Transformation | ✅ Complete (`v0.7.0` — OCR delivered) | 100% |
-| Phase 6: Browser Rendering | ✅ Complete (`v0.7.0` — Screenshots, actions & `v0.6.2` timeout fix) | 100% |
-| Phase 7: Ethical Crawling & Stateless Safety | ✅ Complete (`v0.6.0` — Sprint 4) | 100% |
-| Phase 8: Scheduling & Multi-Tenant Quotas | 🚧 Partial (Scheduling & Webhooks ✅; Quotas deferred past `v0.7.0`) | 60% |
+## Milestone 1 — `v0.7.1`: Production Reliability, Security & Review Remediation
 
----
+Architecture, code-quality, and test review of `main` (`2026-11-18`) combined with the three open production findings from `services/docs/ops-log.md`. No `src/` or `sdks/` change exists after the `v0.7.0` tag, so every item below is older debt or shipped in `v0.7.0`.
 
-## Current Focus
+- **Severity:** `P0` wrong output, broken security control or data loss · `P1` bugs on error and load paths, missing invariant tests, gate drift · `P2` Ports, Adapters and Contracts boundaries, contract drift, refactor-blocking coupling · `P3` dead code, duplication, docs · `P4` optional.
+- **Evidence:** `[run]` reproduced against the real library or route · `[fake]` reproduced with a fake Redis or fake browser · `[read]` code reading only (no Chromium, Redis or Docker was available). Every `P0` was reproduced or re-read independently by a second reviewer; none was refuted.
+- **Exposure:** production runs stateless pods behind one API key with no `REDIS_URI` ([`DECISIONS.md`](../DECISIONS.md)). Items tagged `(Redis)` or `(split)` cannot occur there today.
+- **Mutation check:** 45 one-line mutants in a scratch copy; 15 killed, 30 survived the offline gate. Survivors are named in the items below.
+- **Suggested order inside `v0.7.1`:** `R1`–`R6` first (production path), next to the binary `Content-Type` guard; `R7`–`R13` before any deployment sets `REDIS_URI` or `DEPLOYMENT_MODE=api|worker`; `R15`, `R16` and `R24` are test-only and small (`R24` adds 104 tests to the gate for about 2 s); then the rest of `P1`, `P2`, `P3`, `P4` in that order, ending with `proj-release downloader patch`.
 
-### Completed: Release `v0.6.2` — Playwright Navigation Timeout Resilience (`F-2026-11-05-002`) ✅
-
-**Release `v0.6.2`** (Complete — 2026-11-12 — P1 Reliability):
-- [x] **S6-br-1 (P1 — Single-Pass `domcontentloaded` + Bounded Network Settle in `src/downloader/content_converter.py`):** Replaced the two-pass `networkidle` retry pattern in `convert_content_with_playwright_fallback` and `render_html_with_playwright` with a single `page.goto(url, wait_until="domcontentloaded", timeout=timeout_ms)` followed by a bounded non-fatal settle (`page.wait_for_load_state("networkidle", timeout=min(timeout_ms, 2500))`), eliminating `10s–20s` navigation timeouts on ad- and tracker-heavy origins (`F-2026-11-05-002`), verified by `tests/unit/test_v062_playwright_timeout.py`.
-
-### Completed: Release `v0.7.0` — Extended Features & Operations ✅
-
-**Release `v0.7.0`** (Complete — 2026-11-12 — Extended Features & Operations/Infrastructure):
-- **Extended Features (5/5 Complete):**
-  - Screenshot/PDF output toggle (`?output=screenshot|pdf`, `?full_page=bool`, `?screenshot_format=png|jpeg`, `Accept: image/png` / `image/jpeg`, `POST /render`, and `/batch` + `/schedules` `"screenshot"` format)
-  - SSRF-safe HMAC-SHA256 webhook notifications (`src/downloader/services/webhooks.py`) firing post-persistence on batch completion/failure and schedule execution (`X-Downloader-Signature-256`, `trust_env=False`, `follow_redirects=False`, creation-time SSRF validation, secret redaction)
-  - Image-to-text OCR (`src/downloader/transformers/ocr.py` via `pytesseract` + `Pillow` + `tesseract-ocr`, decompression-bomb pixel cap, language validation, `HTTP 503` `ocr_unavailable` graceful degradation)
-  - Typed client SDKs for Python (`sdks/python`), JavaScript/TypeScript (`sdks/javascript`), and Go (`sdks/go`) with automated test suites
-  - Declarative allowlisted browser interaction scripting (`src/downloader/browser/actions.py`: 8 action types, max 20 steps, zero raw JS evaluation) across `GET /{url}?actions=`, `POST /render`, and `POST /batch`
-- **Operations & Infrastructure (3/3 Complete):**
-  - Graceful shutdown with active-request and background-job connection drain (`src/downloader/drain.py`: `DrainCoordinator`, `DrainMiddleware`, `HTTP 503 service_draining` + `Connection: close` + `Retry-After: 5`, `/health` draining state, uvicorn `--timeout-graceful-shutdown 35`)
-  - Split Worker Architecture (`DEPLOYMENT_MODE=all|api|worker`, `src/downloader/worker_queue.py` reliable Redis `BLMOVE` queue + browser RPC + heartbeats, `src/downloader/worker.py` with `--healthcheck`, `docker-compose.split.yml`)
-  - Opt-in OpenTelemetry distributed tracing (`src/downloader/telemetry.py`, `OTEL_ENABLED=false` default, OTLP HTTP/console exporters, FastAPI/httpx/Redis/Playwright/OCR/webhook/worker spans, `trace_id`/`span_id` log correlation, `X-Trace-ID` response header, W3C `traceparent` propagation)
-
-### Completed: Release `v0.6.1` — Security, Single-Fetch Browser & Stateful Pipeline Hardening ✅
-
-**Release `v0.6.1`** (Complete — 2026-11-02): Defense-in-Depth SSRF Pinning, Single-Fetch Playwright Pipeline & Stateful Parity
-- **Track A (Browser & Single-Fetch Pipeline):** Eliminated redundant pre-flight HTTP fetches on `Accept: application/pdf` and `?render=true` / `?wait_for=` across `text/html`, `text/plain`, `text/markdown`, and multi-format requests; unified all Chromium pathways under `pdf_semaphore` (`503` fail-fast on explicit `?render=true`/PDF, graceful static degradation on auto-detect/empty-body fallback); removed the unconditional `2s` sleep in `generate_pdf`; wired `ContentConfig` flags and monotonic-TTL `BoundedCache`
-- **Track B (Auth, SSRF Pinning & Rate Limits):** Restored `.env` loading in `AuthConfig` with `secrets.compare_digest` verification; required API key auth on `/metrics*` when `DOWNLOADER_KEY` is set and disabled `/docs`, `/redoc`, and `/openapi.json` (`HTTP 404`) in `ENVIRONMENT=production`; implemented `SSRFSafeNetworkBackend` / `SSRFSafeHTTPTransport` (`trust_env=False`, DNS-pinned `connect_tcp` preventing DNS-rebinding TOCTOU, non-blocking `asyncio.to_thread` DNS resolution, and hex/octal/int/mapped-IPv6/`*.localhost` blocks); added right-to-left `RATELIMIT_TRUSTED_PROXIES` `X-Forwarded-For` client IP resolution and auth vs unauth bucket isolation
-- **Track C & D (Stateful `/batch`, `/schedules` & Redis Atomicity):** Added creation-time SSRF & custom header sanitization (`HTTP 400`) on `POST /schedules` and `POST /batch`, `robots.txt` + `DomainThrottle` + non-retryable policy short-circuit + per-attempt `SCHEDULER_MAX_WORKERS` semaphore + JSON `content_size` accounting in `ScheduledJobExecutor`, atomic Lua `DomainThrottle` Redis slot reservation, `(scheme, netloc)` `robots:v2:{scheme}:{netloc}` cache isolation, and incremental `/batch` progress updates
-
-### Completed: Sprint 4 — Ethical Crawling & Production Hardening (`v0.6.0`) ✅
-
-**Sprint 4** (Complete — 2026-11-01): Ethical Crawling, Egress Protection & Defense-in-Depth Hardening
-- 7 tasks completed (`S4-be-1`..`S4-be-5`, `S4-test-1`, `S4-doc-1`)
-- Configurable `USER_AGENT` and `RESPECT_ROBOTS_TXT` (`default: True`) across `HTTPClient` and Playwright
-- Stateless-first `robots.txt` evaluation (`urllib.robotparser`) with bounded in-memory TTL/LRU cache by default (TTL 1h, zero Redis dependency), optional Redis backend when `REDIS_URI` is configured, and cached fail-open sentinels on unreachable origins
-- Per-domain `Crawl-delay` throttling (in-memory timestamps by default + optional Redis coordination), `HTTP 403` `robots_disallowed` responses, and Prometheus `robots_*` counters
-- Production hardening: streaming `CONTENT_MAX_DOWNLOAD_SIZE` (`HTTP 413` `content_too_large`), redirect & Playwright SSRF route blocking, active `RateLimitMiddleware` (`HTTP 429` + `Retry-After` + `X-RateLimit-*`), `BrowserPool` max-use recycling (`PDF_MAX_USES_PER_BROWSER=50`) & idle scale-to-zero (`PDF_IDLE_TIMEOUT=600s`), structured JSON `uvicorn.access` `path`/`method`/`status_code` fields, and unprivileged container port `:8000`
-- See [docs/features/ethical-crawling.md](features/ethical-crawling.md)
-
-### Deferred Preview (`v0.7.1` Reliability & Post-`v0.7.0` / `v0.8.0+` Multi-Tenant Quotas)
+### Live production findings (`services/docs/ops-log.md`)
 
 - [ ] **P1 (`v0.7.1` — Binary `Content-Type` Guard Against `OOMKilled` on Text/Multi-Format Routes, `services` `F-2026-11-16-002`):** Guard text, HTML, markdown, and multi-format conversion paths (`src/downloader/http_client.py:190-197,245-274`, `src/downloader/services/content_processor.py:626-627`, and `src/downloader/services/multi_format.py:133-150`) so non-text binary `Content-Type`s (`audio/*`, `video/*`, `application/octet-stream`, archives) are rejected early (`HTTP 415` / structured format error) before buffering up to `50 MB` and running `.decode()` + `json.dumps()` across parallel format tasks. *Review 2026-11-18:* the location list is incomplete. The default text and markdown path decodes any non-HTML body and returns it as text (`src/downloader/content_converter.py:684-692`); also `src/downloader/services/content_processor.py:563`, `src/downloader/services/content_negotiation.py:104-124` (base64 plus `json.dumps` of the full body) and `src/downloader/services/batch_processor.py:270,283-294`. A Content-Type reject does not cover compressed responses (`R3`) or the per-job result total (`R43`).
 - [ ] **P3 (`v0.7.1` — Auto-Detected Playwright Render Timeouts & Duplicate `ERROR` Logs, `services` `F-2026-11-17-002`):** Three article URLs (`https://www.dwarkesh.com/p/paul-christiano-2`, `https://www.decodingai.com/p/build-durable-secure-long-running-agents`, `https://newsletter.pragmaticengineer.com/p/inference-engineering-for-software-engineers`) hit `Page.goto: Timeout 10000ms exceeded` in `render_html_with_playwright` (`src/downloader/content_converter.py:134`, `html_js_rendering_timeout` in `src/downloader/config.py:264-269`), logged the failure twice at `ERROR` (`content_converter.py:579` plus `src/downloader/services/content_processor.py:552` or `:613-615`), then served the static HTML. (1) Reproduce the URLs and record which `should_use_playwright_for_html` heuristic (`content_converter.py:284-382`) sends them to the browser and why navigation stalls; neither is confirmed yet. One candidate: the JS-required phrase match runs on full-document text including `<noscript>` (`:328-341`) before the substantial-static-content check (`:372-375`). (2) Fix the confirmed cause so server-rendered pages with substantial body text skip the browser (for the candidate above: drop `<noscript>`/`<script>`/`<style>` text before the phrase match and run the static-content check first). (3) Log an auto-detected render failure that falls back to static HTML once at `WARNING`; keep `ERROR` for explicit `?render=true` failures. Leave the `10s` timeout alone unless the reproduction shows a page needs longer. Accept: the URLs return without a browser timeout, a degraded auto-render emits one `WARNING` and no `ERROR`, and `proj-test downloader` passes. *Review 2026-11-18:* measured on synthetic pages, not on the three URLs. The `<noscript>` candidate is confirmed, and two more causes send static pages to the browser: the phrase `"enable js"` (`src/downloader/content_converter.py:332`) matches ordinary prose such as "enable JSON mode", and `content_size < 50000 and _has_missing_metadata` (`:358`) renders every small static page without Open Graph or Twitter tags.
 - [ ] **P3 (`v0.7.1` — Log Upstream `4xx` Client Errors at `WARNING`, `services` `F-2026-11-18-001`):** In `src/downloader/routes/download.py:358-365`, log upstream `400 <= e.status_code < 500` `HTTPClientError`s at `logger.warning` instead of `logger.error` (matching `PDFGeneratorError` at `:375-376`, while keeping `logger.error` for `5xx` and network/timeout errors).
-
-**Post-`v0.7.0` Backlog** (Deferred until multi-key or Redis-backed multi-tenant deployment): Multi-Tenant Per-Key Quotas
-- 7 tasks (`S5-be-1`..`S5-be-5`, `S5-test-1`, `S5-doc-1`), ~21 hours effort
-- `QuotaConfig`, per-key request/bandwidth counters, `X-RateLimit-{Limit,Remaining,Reset}` headers, `GET /usage`, and `HTTP 429` with `Retry-After`
-- Deferred past `v0.7.0` because single-key stateless Kubernetes deployments without `REDIS_URI` do not need Redis-backed tenant accounting (`slowapi` `memory://` already enforces global endpoint rate limits); if activated later, quota storage should support `QUOTA_STORAGE_URI → REDIS_URI → memory://` parity
-
-**Post-`v0.7.0` Backlog — Stateless MCP `2026-07-28` Adapter**
-- Expose extraction, Playwright `render_pdf`, and `/batch` crawls over stateless `2026-07-28` Streamable HTTP MCP using `SEP-2663` Tasks (`io.modelcontextprotocol/tasks`) for non-blocking async jobs
-- Return extracted markdown/PDF outputs as `downloader://jobs/{id}/article.md` MCP Resources instead of inlining large page bodies into tool responses
-
-### Completed: Sprint 3 — Scheduling API ✅
-
-**Sprint 3** (Complete): Scheduling CRUD API
-- 7 tasks completed
-- Cron-based scheduling, job execution with retry, paginated execution history
-- See [docs/features/scheduling.md](features/scheduling.md)
-
----
-
-## Milestone `v0.7.1` — Review Findings (2026-11-18)
-
-Architecture, code-quality and test review of `main` at `d3452cd`. All 76 items (`R1`…`R76`) are scheduled in `v0.7.1`, the next milestone, together with the three `v0.7.1` items under Deferred Preview above. No `src/` or `sdks/` change exists after the `v0.7.0` tag, so every item is older debt or shipped in `v0.7.0`.
-
-- **Severity:** `P0` wrong output, broken security control or data loss · `P1` bugs on error and load paths, missing invariant tests, gate drift · `P2` Ports, Adapters and Contracts boundaries, contract drift, refactor-blocking coupling · `P3` dead code, duplication, docs · `P4` optional.
-- **Evidence:** `[run]` reproduced against the real library or route · `[fake]` reproduced with a fake Redis or fake browser · `[read]` code reading only (no Chromium, Redis or Docker was available). Every `P0` was reproduced or re-read independently by a second reviewer; none was refuted.
-- **Exposure:** production runs one pod, one API key and no `REDIS_URI` ([DECISIONS.md](../DECISIONS.md)). Items tagged `(Redis)` or `(split)` cannot occur there today.
-- **Mutation check:** 45 one-line mutants in a scratch copy; 15 killed, 30 survived the offline gate. Survivors are named in the items below.
-- **Suggested order inside `v0.7.1`:** `R1`–`R6` first (production path), next to the Content-Type guard; `R7`–`R13` before any deployment sets `REDIS_URI` or `DEPLOYMENT_MODE=api|worker`; `R15`, `R16` and `R24` are test-only and small (`R24` adds 104 tests to the gate for about 2 s); then the rest of `P1`, `P2`, `P3`, `P4` in that order.
 
 ### P0 — on the production path
 
@@ -159,10 +93,10 @@ Architecture, code-quality and test review of `main` at `d3452cd`. All 76 items 
 - [ ] **R51 · Caller-supplied headers are forwarded to another origin on redirect** `(Redis)` `[run]`. `src/downloader/http_client.py:240-245`. httpx strips only `Authorization` and `Cookie`; a token sent as a custom batch or schedule header goes to the redirect target. **Next:** drop caller headers when scheme, host or port changes. **Verify:** add `tests/unit/test_http_client_isolation.py::test_custom_headers_not_forwarded_cross_origin`.
 - [ ] **R52 · `PDF_WAIT_UNTIL` cannot turn off the network-idle gate** `[fake]`. `src/downloader/pdf_generator.py:306,325-346`. PDF always runs a fatal `wait_for_load_state("networkidle")` after `goto`, unlike the bounded settle that `v0.6.2` gave HTML and screenshot. **Next:** reuse `_navigate_and_settle` for PDF. **Verify:** add `tests/unit/test_v062_playwright_timeout.py::test_pdf_honours_wait_until_without_networkidle_gate`.
 - [ ] **R53 · Five environment variables in the spec do not exist in code; three defaults differ** `[run]`. `spec/contracts.md:1587-1596` against `src/downloader/runtime_config.py:20-31,40-45,62-72,83-88,111-116`; repeated in `README.md:154-159` and `AGENTS.md:170-173`. Spec `OCR_TIMEOUT_SECONDS` 30 is `OCR_TIMEOUT` 15 in code; `OCR_MAX_PIXELS` is `OCR_MAX_IMAGE_PIXELS`; `WEBHOOK_TIMEOUT_SECONDS` is `WEBHOOK_TIMEOUT`; `WORKER_BROWSER_TASK_TIMEOUT` 60 is `WORKER_REMOTE_BROWSER_TIMEOUT` 45; `WORKER_POLL_TIMEOUT` is 5 against 2; `SHUTDOWN_POLL_INTERVAL` has no setting. Setting the spec names has no effect. **Next:** code-side aliases for the four renamed variables; propose the defaults and `SHUTDOWN_POLL_INTERVAL` for spec review. **Verify:** add `tests/smoke/test_documentation_contract.py::test_spec_env_vars_resolve_to_settings_fields`; `git grep -n -E "OCR_TIMEOUT_SECONDS|WORKER_BROWSER_TASK_TIMEOUT" -- src` is empty today.
-- [ ] **R54 · Constant-time key comparison has no guard.** `src/downloader/auth.py:79`; `tests/unit/test_v061_hardening.py:347-358`. Replacing `secrets.compare_digest` with `==` survives every test. **Next:** an AST guard with a positive control. **Verify:** add `tests/smoke/test_auth.py::TestAuthFunctions::test_verify_api_key_uses_compare_digest`; `git grep -n compare_digest -- tests` is empty today.
-- [ ] **R55 · Standards ratchet cannot see the missing `BLE` rule set.** `tests/test_standards_baseline.py:88-89`; `tests/standards_debt.json:2-15`; `pyproject.toml:43-51`. `_selects()` uses `startswith`, so selecting `B` counts as selecting `BLE`; `ruff --select BLE` reports 79 `BLE001` in `src/` with no debt entry. The recorded `E722` ignore can be dropped (0 hits). **Next:** compare rule-set prefixes exactly; add `ruff:BLE` to the debt file; fix the shared copy of the baseline test too. **Verify:** `uv run --no-sync ruff check --no-cache --select BLE --statistics src/`; `git grep -n BLE -- tests/standards_debt.json` is empty today.
+- [ ] **R54 · Constant-time key comparison has no guard.** `src/downloader/auth.py:79`; `tests/unit/test_v061_hardening.py:347-358`. Replacing `secrets.compare_digest` with `==` survives every test. **Next:** an AST guard (`specs/ast.rules.yaml`) with a positive control. **Verify:** add `tests/smoke/test_auth.py::TestAuthFunctions::test_verify_api_key_uses_compare_digest`; `git grep -n compare_digest -- tests` is empty today.
+- [ ] **R55 · Clear 79 `BLE001` blind-exception hits and drop `ruff:BLE` debt.** `pyproject.toml:55-64`; `tests/standards_debt.json:2-14`. *(Note: `_selects()` in `tests/test_standards_baseline.py`, recording `ruff:BLE` in `tests/standards_debt.json`, and dropping the unused `E722` ignore are implemented on `main`.)* **Next:** replace the 79 broad `except Exception` handlers in `src/` with specific exception types (or justified per-line `# noqa: BLE001`), enable `"BLE"` in `pyproject.toml`, and remove `"ruff:BLE"` from `tests/standards_debt.json`. **Verify:** `uv run --no-sync ruff check --no-cache --select BLE --statistics src/`.
 - [ ] **R56 · Hygiene and baseline guards have no positive control; governance check absent.** `tests/smoke/test_repo_hygiene.py:12-21,49-65,100-114`; `tests/test_standards_baseline.py:74-139`. No synthetic-violation test; no check of `AGENTS.md` size, the `CLAUDE.md` symlink or the `CRITICAL.md` and `DECISIONS.md` caps; `SKIP_DIRS` omits `node_modules`, `dist`, `build`. **Next:** add `test_hygiene_patterns_positive_control`, `test_baseline_scanner_positive_control`, `test_governance_spine_and_claude_symlink`. **Verify:** `git grep -n -i -E "positive|tmp_path" -- tests/smoke/test_repo_hygiene.py tests/test_standards_baseline.py` is empty today.
-- [ ] **R57 · No coverage floor; idle tooling; dead markers.** `pyproject.toml:65-96,106-119`. No `[tool.coverage]` and no gate passes `--cov` (measured 83 % offline; `worker.py` 27 %, `routes/schedules.py` 45 %); `pip-audit`, `pytest-xdist` and `pytest-benchmark` are unused; `requires_redis` selects nothing. **Next:** `fail_under = 83` and ratchet up; `--cov=src` in both gates. **Verify:** `git grep -n -E "fail_under|--cov" -- pyproject.toml cloudbuild.yaml justfile` is empty today.
+- [ ] **R57 · No coverage floor; idle tooling; dead markers.** `pyproject.toml:77-108,118-131`. No `[tool.coverage]` and no gate passes `--cov` (measured 83 % offline; `worker.py` 27 %, `routes/schedules.py` 45 %); `pip-audit`, `pytest-xdist` and `pytest-benchmark` are unused; `requires_redis` selects nothing. **Next:** `fail_under = 83` and ratchet up; `--cov=src` in both gates. **Verify:** `git grep -n -E "fail_under|--cov" -- pyproject.toml cloudbuild.yaml justfile` is empty today.
 
 ### P3 — dead code, duplication, docs
 
@@ -180,259 +114,26 @@ Architecture, code-quality and test review of `main` at `d3452cd`. All 76 items 
 - [ ] **R69 · Tests that cannot fail.** `tests/smoke/test_rate_limiting.py:14-24,50-52,76-87,96-97`; `tests/api/test_health.py:29-35,53-55,73`. `hasattr` and `isinstance` checks on typed settings, and branches that pass in both arms. **Next:** delete all but the config and format checks; make the health tests deterministic. **Verify:** `git grep -n -c -E "hasattr\(|isinstance\(" -- tests/smoke/test_rate_limiting.py`.
 - [ ] **R70 · Size-cap boundary is untested.** `src/downloader/http_client.py:192,253,263`. Changing `>` to `>=` survives. **Next:** a body of exactly `max_download_size` bytes is accepted, for the stream and for `Content-Length`. **Verify:** add `tests/unit/test_http_hardening.py::TestHTTPStreamingAndRedirectSSRF::test_body_exactly_at_limit_is_accepted`.
 - [ ] **R71 · Tool versions and helper scripts drift from the gate.** `.pre-commit-config.yaml:11` pins ruff `v0.13.3` while `uv.lock` pins `0.14.13`; `justfile:5-17` has no read-only check and `just test` runs all 892 tests; `scripts/test_all.sh` is a fourth gate dialect; `run_examples.sh:5,43` exits 1 after the first successful example (`set -e` with `((SUCCESSFUL++))`). **Next:** a `just check` recipe running the four gate commands; delete `scripts/test_*.sh`; fix or delete `run_examples.sh`. **Verify:** `git grep -n "SUCCESSFUL++" -- run_examples.sh`.
-- [ ] **R72 · `tests/` cannot be type-checked.** `pyproject.toml:6,71`. Tests import `src.downloader.*` while the package installs as `downloader`, so `mypy src/ tests/` stops with "source file found twice"; `requires-python` still says `>=3.10` although `src/downloader/worker_queue.py:11` needs 3.11. **Next:** `explicit_package_bases = true` with `mypy_path = "."`, add `tests/` to the mypy gate, raise `requires-python`. **Verify:** `uv run --no-sync mypy --cache-dir=/dev/null src/ tests/` (errors today).
+- [ ] **R72 · `tests/` cannot be type-checked.** `pyproject.toml:83,110-116`. *(Note: `requires-python = ">=3.13"` is now set in `pyproject.toml`.)* Tests import `src.downloader.*` while the package installs as `downloader`, so `mypy src/ tests/` stops with "source file found twice". **Next:** set `explicit_package_bases = true` with `mypy_path = "."` (and `exclude = ["^\\.venv/"]`), unify `downloader.*` imports, and add `tests/` to the mypy gate. **Verify:** `uv run --no-sync mypy --cache-dir=/dev/null src/ tests/` (errors today).
 - [ ] **R73 · e2e fixture skips on infrastructure failure; test docs are stale.** `tests/e2e/conftest.py:16-24`; `tests/e2e/test_html_rendering_e2e.py:252`; `tests/README.md:124,152,174,333,350`. **Next:** fail instead of skip; replace the README command list with the single gate command. **Verify:** `git grep -n "pytest.skip" -- tests/e2e`.
 
 ### P4 — optional
 
 - [ ] **R74 · Small ergonomics in the pipeline.** `time.time()` for durations (`src/downloader/services/content_processor.py:156,172,595`); browser recycling runs inside the request's `finally` (`src/downloader/browser/manager.py:244-253`); full URLs with userinfo and query tokens are logged (`src/downloader/http_client.py:230`, `src/downloader/crawling/robots.py:333`); robots text is re-parsed on every request (`robots.py:383-395`). **Next:** fix when the files are next touched. **Verify:** `git grep -n "time.time()" -- src/downloader/services/content_processor.py`.
 - [ ] **R75 · Tooling ideas.** A documentation-contract test that maps every environment variable in the spec, `README.md`, `AGENTS.md` and `.env.example` to a settings field and default (would have caught `R35` and `R53`); SDK wire tests driven against the FastAPI app in-process (would have caught `R2` and `R9`); batch, queue and scheduler tests on one shared in-memory adapter. **Next:** take the first with `R53`. **Verify:** `git grep -n test_documentation_contract -- tests` (no hits today).
-- [ ] **R76 · conftest path handling and warnings.** `tests/conftest.py:125` uses absolute path parts, so a checkout under a directory named `integration` or `e2e` deselects everything; the offline guard (`:86-118`) does not cover asyncio streams and has no test; `pyproject.toml:92-94` ignores the Starlette deprecation warning about `httpx` in the test client; three tests use real sleeps. **Next:** `item.path.relative_to(config.rootpath).parts`; add `test_offline_guard_blocks_public_connect`. **Verify:** `git grep -n "item.path.parts" -- tests/conftest.py`.
+- [ ] **R76 · conftest path handling and warnings.** `tests/conftest.py:125` uses absolute path parts, so a checkout under a directory named `integration` or `e2e` deselects everything; the offline guard (`:86-118`) does not cover asyncio streams and has no test; `pyproject.toml:104-106` ignores the Starlette deprecation warning about `httpx` in the test client; three tests use real sleeps. **Next:** `item.path.relative_to(config.rootpath).parts`; add `test_offline_guard_blocks_public_connect`. **Verify:** `git grep -n "item.path.parts" -- tests/conftest.py`.
 
----
+## Unscheduled backlog
 
-## Priority Areas
+Items below have no target release and use plain bullets rather than `- [ ]` checkboxes so `work_sync.py` counts only scheduled milestone tasks (`79` in `v0.7.1`). Promote an item into a milestone (`- [ ]`) when scheduling it.
 
-### ✅ P0: Production Readiness (Phase 4 — Complete)
+- **Multi-Tenant Per-Key Quotas (`v0.8.0+`, ~21h across `S5-be-1`..`S5-be-5`, `S5-test-1`, `S5-doc-1`):** `QuotaConfig`, per-API-key request and bandwidth counters with `QUOTA_STORAGE_URI -> REDIS_URI -> memory://` storage parity, enforcement middleware (`X-RateLimit-{Limit,Remaining,Reset}`), `GET /usage`, `HTTP 429` with `Retry-After`, and tier-based plans. Deferred until multi-key or Redis-backed multi-tenant deployment is required.
+- **Stateless MCP `2026-07-28` Adapter:** Expose extraction, Playwright `render_pdf`, and `/batch` crawls over stateless `2026-07-28` Streamable HTTP MCP using `SEP-2663` Tasks (`io.modelcontextprotocol/tasks`) for non-blocking async jobs, returning extracted Markdown/PDF outputs as `downloader://jobs/{id}/article.md` MCP Resources instead of inlining large page bodies into tool responses.
 
-**Completed:** 2026-01-18  
-**Archive:** [docs/features/production-readiness.md](features/production-readiness.md)
+## Shipped
 
-CI/CD pipeline, offline smoke/unit/hygiene verification gate (`tests/smoke/test_repo_hygiene.py` + deterministic fixture DNS), container hardening, structured logging, and documentation alignment.
-
----
-
-### ✅ P1: Ethical Crawling & Stateless Safety (Phase 7 — Complete)
-
-**Completed:** 2026-11-01  
-**Archive:** [docs/features/ethical-crawling.md](features/ethical-crawling.md)
-
-**Goal**: Prevent egress abuse and IP bans via responsible `robots.txt` compliance and `Crawl-delay` pacing that work out-of-the-box in stateless single-key deployments as well as Redis-backed clusters.
-
-#### Features
-
-| Feature | Priority | Complexity | Status |
-|---------|----------|------------|--------|
-| Configurable `USER_AGENT` & `RESPECT_ROBOTS_TXT` | P1 | Low | ✅ Complete (`S4-be-1`) |
-| `robots.txt` parser + bounded in-memory TTL/LRU cache (optional Redis) | P1 | Medium | ✅ Complete (`S4-be-2`) |
-| Per-domain `Crawl-delay` throttling (in-memory + optional Redis) | P1 | Medium | ✅ Complete (`S4-be-3`) |
-| `GET /{url}` & `POST /batch` pre-flight enforcement | P1 | Medium | ✅ Complete (`S4-be-4`) |
-| Structured `HTTP 403` disallow responses & metrics | P1 | Low | ✅ Complete (`S4-be-5`) |
-
-#### Delivered Configuration & Wire Behavior
-- Settings in `src/downloader/config.py` (`CrawlingConfig`): `RESPECT_ROBOTS_TXT` (`default: True`), `USER_AGENT` (`default: REST-API-Downloader/1.0`), `ROBOTS_CACHE_TTL` (`default: 3600`), `ROBOTS_CACHE_MAX_SIZE` (`default: 1000`), `ROBOTS_FETCH_TIMEOUT` (`default: 5.0`), `MAX_CRAWL_DELAY` (`default: 30.0`)
-- Cache backend chain: bounded in-memory TTL/LRU cache (TTL 1h) when `REDIS_URI` is unset; Redis shared cache (`robots:v1:{netloc}`) when `REDIS_URI` is configured
-- Fail-open with structured warning log + cached sentinel when `robots.txt` is unreachable; returns `HTTP 403` (`error_type: "robots_disallowed"`) when blocked
-
-#### Success Criteria Met
-- ✅ `robots.txt` and `Crawl-delay` enforced before single and batch downloads without requiring Redis
-- ✅ Caching eliminates repeat `robots.txt` fetches within TTL across memory and Redis backends
-- ✅ 100% offline-sandbox-safe unit and mocked API test coverage (`tests/unit/test_robots.py`, `tests/api/test_ethical_crawling.py`)
-
-**Core Archive:** [docs/features/downloader-core.md](features/downloader-core.md)
-
----
-
-### ✅ P1: Content Transformation (Phase 5 — Complete)
-
-**Goal**: Transform downloaded content into formats optimized for downstream consumption (LLMs, data pipelines).
-
-#### Features
-
-| Feature | Priority | Complexity | Status |
-|---------|----------|------------|--------|
-| HTML to Markdown | P1 | Medium | ✅ Complete |
-| Plain text extraction | P2 | Low | ✅ Complete |
-| `Accept` content negotiation (single raw vs multi-format JSON) | P1 | Medium | ✅ Complete |
-| Image to Text (OCR) | P2 | High | ✅ Complete (`v0.7.0`) |
-
-#### API Implemented
-- `Accept` header negotiation on `GET /{url}`: raw payload for single MIME type (`text/plain`, `text/markdown`, `text/html`, `application/pdf`, `image/png`, `image/jpeg`, `application/json`) and JSON map for multi-format `Accept` headers
-- OCR image-to-text (`?ocr=true`, `?ocr_lang=eng`, automatic extraction on image origins for `text/plain` / `text/markdown` / `text/html`)
-- Batch support: `format` (`text`, `markdown`, `html`, `pdf`, `screenshot`, `json`, `raw`) and `default_format` options in request body
-
-**Archive:** [docs/features/content-transformation.md](features/content-transformation.md)
-
----
-
-### ✅ P2: Browser Rendering (Phase 6 — Complete)
-
-**Goal**: Capture JavaScript-rendered content, screenshots, and PDFs from SPAs and dynamic websites without penalizing non-browser startup or mocked test latency.
-
-#### Features
-
-| Feature | Priority | Complexity | Status |
-|---------|----------|------------|--------|
-| Basic JS rendering (`?render=true`) | P1 | High | ✅ Complete |
-| Wait for CSS selectors (`?wait_for=`) | P1 | Medium | ✅ Complete |
-| Lazy shared `BrowserPool` & process isolation | P1 | Medium | ✅ Complete |
-| Security hardening (`file:` scheme blocked, isolated contexts) | P1 | Medium | ✅ Complete |
-| Single-pass `domcontentloaded` + bounded settle (`S6-br-1`) | P1 | Low | ✅ Complete (`v0.6.2`) |
-| Screenshot/PDF output toggle (`?output=screenshot\|pdf`) | P2 | Medium | ✅ Complete (`v0.7.0`) |
-| Interaction scripting (`POST /render`, `?actions=`) | P3 | High | ✅ Complete (`v0.7.0`) |
-
-**Archive:** [docs/features/browser-rendering.md](features/browser-rendering.md)
-
----
-
-### 🚧 P3: Scheduling & Multi-Tenant Quotas (Phase 8 — Scheduling & Webhooks Complete, Quotas Deferred)
-
-**Goal**: Support recurring downloads with webhook notifications (when Redis is deployed) and defer per-tenant quota accounting until multi-key or Redis-backed tenancy is required.
-
-#### Scheduling Features (Sprint 3 + `v0.7.0` — Complete)
-
-| Feature | Priority | Complexity | Status |
-|---------|----------|------------|--------|
-| Cron-based scheduling | P1 | Medium | ✅ Complete |
-| Schedule CRUD API (`/schedules`) | P1 | Low | ✅ Complete |
-| Paginated execution history (`/schedules/{id}/history`) | P2 | Low | ✅ Complete |
-| Webhook on completion | P2 | Medium | ✅ Complete (`v0.7.0`) |
-
-#### Multi-Tenant Quota Features (Post-`v0.7.0` / `v0.8.0+` — Deferred Preview)
-
-| Feature | Priority | Complexity | Status |
-|---------|----------|------------|--------|
-| `QuotaConfig` & per-API-key counters (`memory://` + Redis parity) | P2 | Medium | 📋 Post-`v0.7.0` (Deferred) |
-| Enforcement middleware (`X-RateLimit-{Limit,Remaining,Reset}`) | P2 | Medium | 📋 Post-`v0.7.0` (Deferred) |
-| Usage tracking endpoint (`GET /usage`) | P2 | Low | 📋 Post-`v0.7.0` (Deferred) |
-| `HTTP 429` with `Retry-After` header | P2 | Low | 📋 Post-`v0.7.0` (Deferred) |
-| Tier-based plans | P3 | Medium | 📋 Post-`v0.7.0` (Deferred) |
-
-**Scheduling Archive:** [docs/features/scheduling.md](features/scheduling.md)
-
----
-
-## Release `v0.7.0` Scope (Extended Features & Operations — Complete)
-
-### Extended Features (`v0.7.0`)
-
-| Feature | Description | Complexity | Priority | Status |
-|---------|-------------|------------|----------|--------|
-| Screenshot/PDF output | `?output=screenshot\|pdf`, `?full_page=`, `?screenshot_format=`, `Accept: image/png\|jpeg` | Medium | P2 | ✅ Complete (`v0.7.0`) |
-| Webhook notifications | SSRF-safe HMAC-SHA256 webhooks on batch/schedule completion | Medium | P2 | ✅ Complete (`v0.7.0`) |
-| OCR (Image to Text) | Pytesseract + Pillow image-to-text extraction with decompression-bomb guard | High | P2 | ✅ Complete (`v0.7.0`) |
-| SDK/Client Libraries | Typed Python, JavaScript/TypeScript, and Go clients (`sdks/`) | Medium | P3 | ✅ Complete (`v0.7.0`) |
-| Interaction scripting | Declarative allowlisted Playwright actions (`?actions=`, `POST /render`, `/batch`) | High | P3 | ✅ Complete (`v0.7.0`) |
-
-### Operations & Infrastructure (`v0.7.0`)
-
-| Feature | Description | Complexity | Priority | Status |
-|---------|-------------|------------|----------|--------|
-| Prometheus & health-score metrics | `/metrics`, `/metrics/performance`, `/metrics/health-score`, `/metrics/live` | Low | P1 | ✅ Complete |
-| Graceful shutdown with connection drain | Zero-downtime pod termination draining active downloads (`drain.py`) | Low | P2 | ✅ Complete (`v0.7.0`) |
-| Split Worker Architecture | `DEPLOYMENT_MODE=all\|api\|worker` with Redis `BLMOVE` queue & browser RPC | High | P2 | ✅ Complete (`v0.7.0`) |
-| OpenTelemetry integration | Opt-in distributed tracing (`OTEL_ENABLED`) across API, HTTP, Redis, Playwright, OCR, webhooks | Medium | P2 | ✅ Complete (`v0.7.0`) |
-
-**Infrastructure Archive:** [docs/features/infrastructure.md](features/infrastructure.md)
-
----
-
-## Technical Dependencies
-
-### Content Transformation (Complete — `v0.7.0`)
-```
-markdownify>=0.11.0
-beautifulsoup4>=4.12.0
-pytesseract>=0.3.13
-Pillow>=11.0.0
-# System: tesseract-ocr, tesseract-ocr-eng
-```
-
-### Browser Rendering (Complete — Lazy Shared Pool)
-```
-playwright>=1.40.0
-# System: playwright install chromium
-```
-
-### Scheduling & Split Worker (Complete — Requires `REDIS_URI`)
-```
-apscheduler>=3.10.0
-redis>=5.0.0
-```
-
-### Observability (Opt-In — `OTEL_ENABLED=true`)
-```
-opentelemetry-api>=1.27.0
-opentelemetry-sdk>=1.27.0
-opentelemetry-exporter-otlp-proto-http>=1.27.0
-opentelemetry-instrumentation-fastapi>=0.48b0
-opentelemetry-instrumentation-httpx>=0.48b0
-opentelemetry-instrumentation-redis>=0.48b0
-```
-
-### Sprint 4: Ethical Crawling (Stateless-First)
-```
-# Python stdlib urllib.robotparser + bounded in-memory TTL/LRU cache (zero new mandatory deps)
-# Optional shared cache/coordination via existing redis>=5.0.0 when REDIS_URI is set
-```
-
----
-
-## Risk Matrix
-
-| Risk | Impact | Likelihood | Mitigation |
-|------|--------|------------|------------|
-| Browser rendering OOM or cold-start overhead | High | Low | Lazy `BrowserPool` init, isolated contexts, memory/concurrency semaphores ✅ |
-| `robots.txt` origin unreachable or slow | Medium | Medium | Short fetch timeout + fail-open with structured warning log + 1h TTL cache |
-| Stateless multi-pod cache divergence without Redis | Low | Medium | Per-pod bounded TTL/LRU cache is safe for `robots.txt`; optional `REDIS_URI` unifies across pods |
-| Scheduler job failures | Medium | Low | Retry policies + clear `503` when `REDIS_URI` is unset ✅ |
-| Quota bypass in future multi-tenant mode | Medium | Low | Server-side middleware enforcement when post-`v0.7.0` multi-tenant quotas activate |
-
----
-
-## Decision Log
-
-Canonical append-only rationale lives in [DECISIONS.md](../DECISIONS.md). Summary of roadmap milestones:
-
-| Date | Decision | Rationale |
-|------|----------|-----------|
-| 2026-11-12 | Implement `v0.6.2` (`S6-br-1` single-pass Playwright settle) and full `v0.7.0` scope (all 5 Extended Features + all 3 Operations tracks) | Eliminated `10s–20s` tracker-heavy navigation timeouts and shipped screenshot/PDF toggles, allowlisted Playwright actions (`POST /render`), SSRF-safe HMAC webhooks, Tesseract OCR, typed Python/JS/Go SDKs, graceful connection drain, split API+worker Redis architecture, and opt-in OpenTelemetry tracing while preserving stateless single-pod defaults |
-| 2026-11-12 | Replan `v0.7.0` around Extended Features & Operations; move Multi-Tenant Quotas past `v0.7.0` (`v0.8.0+`) | Single-key GKE production gets higher immediate value from extraction features (screenshots, webhooks, OCR, SDKs, interaction scripting) and operational resilience (graceful drain, split workers, OTel) than per-tenant quotas |
-| 2026-11-02 | Release `v0.6.1` (DNS-pinned SSRF transport, single-fetch Playwright pipeline, `/metrics*` auth & prod OpenAPI disablement, and `/batch` + `/schedules` hardening) | Closed DNS-rebinding TOCTOU, XFF spoofing, unauthenticated `/metrics*` exposure, duplicate HTTP+Chromium fetches, and stateful `/batch` + `/schedules` configuration/crawling gaps while preserving stateless GKE defaults |
-| 2026-11-01 | Release `v0.6.0` (Sprint 4 Ethical Crawling + production hardening) & consolidate to Roadmap-first layout | Delivered stateless-first `robots.txt`/`Crawl-delay`, streaming `413`, redirect & Playwright SSRF guards, active `429` rate limits, browser recycling/scale-to-zero, `:8000` unprivileged port, and archived Sprint 4 into `docs/features/ethical-crawling.md` |
-| 2026-11-01 | Promote Ethical Crawling (stateless-first) to Sprint 4; defer Multi-Tenant Quotas to Sprint 5 | Production runs statelessly behind a single API key without Redis; ethical crawling protects live egress immediately via in-memory TTL cache + optional Redis |
-| 2026-11-01 | Lazy `PlaywrightPDFGenerator` pool + offline verification gate | Eliminates Chromium startup cost on non-browser paths and guarantees deterministic offline smoke/unit hygiene checks |
-| 2026-08-20 | Adopt structured `spec/` + `DECISIONS.md` + `docs/features/` archive layout | Separate status-free wire contracts (`spec/`) from roadmap milestones (`docs/roadmap.md`) and decision rationale (`DECISIONS.md`) |
-| 2026-01-21 | Sprint 3 (Scheduling API) complete | Cron scheduling, retries, and execution history delivered |
-| 2026-01-19 | Sprint 2 (Browser Rendering) complete | Playwright rendering, selector waits, and security isolation delivered |
-| 2026-01-18 | Sprint 1 (Content Transformation) & Sprint 0 (Production Readiness) complete | Markdown/plain-text extraction, `Accept` negotiation, and SSRF hardening delivered |
-
----
-
-## Release Plan
-
-### Release 0.3.0 — Content Transformation (Complete)
-- ✅ HTML to Markdown conversion, plain text extraction, and `Accept` content negotiation
-
-### Release 0.4.0 — Browser Rendering (Complete)
-- ✅ Playwright JS rendering (`?render=true`, `?wait_for=`), process isolation, and lazy shared `BrowserPool`
-
-### Release 0.5.0 — Scheduling & Stateless Hardening (Complete)
-- ✅ Cron-based scheduling CRUD & history API (`REDIS_URI` mode), explicit `503` stateless guards, and offline repo hygiene gate
-
-### Release 0.6.0 — Ethical Crawling & Production Hardening (Complete)
-- ✅ Stateless-first `robots.txt` compliance (`urllib.robotparser`, bounded in-memory TTL/LRU cache default + optional Redis)
-- ✅ Configurable `USER_AGENT` and `RESPECT_ROBOTS_TXT` (`default: True`)
-- ✅ Per-domain `Crawl-delay` throttling, structured `HTTP 403` (`robots_disallowed`) responses, and Prometheus `robots_*` metrics
-- ✅ Streaming `CONTENT_MAX_DOWNLOAD_SIZE` (`HTTP 413`), redirect & Playwright SSRF route blocking, active `RateLimitMiddleware` (`HTTP 429` + `Retry-After`), browser max-use recycling & idle scale-to-zero, JSON `uvicorn.access` `path` fields, and unprivileged container port `:8000`
-
-### Release 0.6.1 — Security, Single-Fetch Browser & Stateful Pipeline Hardening (Complete)
-- ✅ DNS-pinned `SSRFSafeHTTPTransport` (`trust_env=False`), async DNS resolution, and hex/octal/int/mapped-IPv6/`*.localhost` SSRF blocks
-- ✅ Single-fetch Playwright pipeline across `?render=true`, `?wait_for=`, and `Accept: application/pdf` (`GET /{url}`, `/batch`, `/schedules`), unified `pdf_semaphore` concurrency, and live `ContentConfig` / TTL cache wiring
-- ✅ Constant-time API key verification, `/metrics*` auth enforcement, `ENVIRONMENT=production` `404` on `/docs`/`/redoc`/`/openapi.json`, right-to-left `RATELIMIT_TRUSTED_PROXIES` `X-Forwarded-For` parsing, and auth/unauth rate-limit isolation
-- ✅ Creation-time SSRF & custom header validation on `/schedules` and `/batch`, `ScheduledJobExecutor` `robots.txt` + `Crawl-delay` + per-attempt `max_workers` semaphore, atomic Redis Lua `DomainThrottle`, and `robots:v2:{scheme}:{netloc}` cache keys
-
-### Release 0.6.2 — Playwright Navigation Timeout Resilience (Complete — `F-2026-11-05-002`)
-- ✅ Single-pass `wait_until="domcontentloaded"` + bounded non-fatal `networkidle` settle (`min(timeout_ms, 2500)`) across `convert_content_with_playwright_fallback` and `render_html_with_playwright` in `src/downloader/content_converter.py`, eliminating `10s–20s` timeouts on Substack/ad-heavy pages (`materializedview.io`, `novinky.cz`)
-
-### Release 0.7.0 — Extended Features & Operations (Complete)
-- ✅ **Extended Features:** Screenshot/PDF output toggle (`?output=screenshot|pdf`, `?full_page=`, `?screenshot_format=`, `Accept: image/png|jpeg`), SSRF-safe HMAC-SHA256 webhook notifications on batch/schedule completion, OCR (image-to-text via `pytesseract` + `Pillow` + `tesseract-ocr`), typed client SDKs (`sdks/python`, `sdks/javascript`, `sdks/go`), and declarative allowlisted browser interaction scripting (`?actions=`, `POST /render`, `POST /batch`)
-- ✅ **Operations & Infrastructure:** Graceful shutdown with active-download connection drain (`DrainCoordinator` + `DrainMiddleware`), split worker architecture (`DEPLOYMENT_MODE=all|api|worker`, Redis `BLMOVE` queue + remote browser RPC + `docker-compose.split.yml`), and opt-in OpenTelemetry distributed tracing (`OTEL_ENABLED=false` default, OTLP HTTP/console exporters, log correlation, W3C `traceparent` propagation)
-
-### Release 0.7.1 — Reliability and Review Findings (Next)
-- Three reliability items under Deferred Preview: binary `Content-Type` guard, auto-detected render timeouts with duplicate `ERROR` logs, and the upstream `4xx` log level
-- `R1`–`R76` from the 2026-11-18 review (13 `P0`, 30 `P1`, 14 `P2`, 16 `P3`, 3 `P4`), listed under Milestone `v0.7.1` — Review Findings
-
-### Release 0.8.0+ — Multi-Tenant Quotas (Deferred — Post-`0.7.0`)
-- Per-API-key `QuotaConfig`, `GET /usage`, `X-RateLimit-*` headers, `HTTP 429` `Retry-After`, and tier-based plans (`QUOTA_STORAGE_URI → REDIS_URI → memory://` parity when multi-key tenancy is needed)
-- Deferred past `v0.7.0` until multi-key or Redis-backed multi-tenant deployment is required
+- **v0.3.0 to v0.5.0 (Sprints 0–3, 2026-01):** Core HTTP/batch foundation, SSRF & production readiness, HTML-to-Markdown & plain-text `Accept` content negotiation, lazy shared Playwright `BrowserPool` (`?render=true`, `?wait_for=`), and Redis cron `/schedules` CRUD & execution history — [archive](archive/roadmap-history.md#v030-to-v050-content-transformation-browser-rendering-and-scheduling)
+- **v0.6.0 (Sprint 4, 2026-11-01):** Stateless-first `robots.txt` compliance & `Crawl-delay` throttling, streaming `CONTENT_MAX_DOWNLOAD_SIZE` (`HTTP 413`), redirect & Playwright SSRF route guards, active `RateLimitMiddleware` (`HTTP 429`), browser recycling & idle scale-to-zero, JSON access logs, and `:8000` non-root container — [archive](archive/roadmap-history.md#v060-sprint-4-ethical-crawling-and-production-hardening)
+- **v0.6.1 (2026-11-02):** DNS-pinned `SSRFSafeHTTPTransport` (`trust_env=False`), single-fetch Playwright pipeline under unified `pdf_semaphore`, `/metrics*` API-key auth & production OpenAPI `404`, right-to-left `RATELIMIT_TRUSTED_PROXIES` XFF resolution, and atomic Lua `DomainThrottle` + stateful `/batch` & `/schedules` parity — [archive](archive/roadmap-history.md#v061-security-single-fetch-browser-and-stateful-pipeline-hardening)
+- **v0.6.2 (`S6-br-1` / `F-2026-11-05-002`, 2026-11-12):** Single-pass `domcontentloaded` navigation with bounded non-fatal `networkidle` settle (`min(timeout_ms, 2500)`), eliminating `10s–20s` timeouts on tracker-heavy origins — [archive](archive/roadmap-history.md#v062-playwright-navigation-timeout-resilience-f-2026-11-05-002)
+- **v0.7.0 (Extended Features & Operations, 2026-11-12):** Screenshot/PDF toggles, allowlisted declarative Playwright `actions` (`POST /render`), post-persistence SSRF-safe HMAC-SHA256 webhooks, Tesseract OCR, typed Python/JS/Go SDKs, graceful connection drain (`drain.py`), split API+worker Redis `BLMOVE` queue (`DEPLOYMENT_MODE`), and opt-in OpenTelemetry tracing — [archive](archive/roadmap-history.md#v070-extended-features-and-operations)

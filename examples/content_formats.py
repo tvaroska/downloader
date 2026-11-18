@@ -187,7 +187,7 @@ async def request_format(
                 result.error = error_data.get("detail", {}).get(
                     "error", f"HTTP {response.status_code}"
                 )
-            except:
+            except (ValueError, AttributeError):
                 result.error = f"HTTP {response.status_code}: {response.text[:100]}"
 
             print(f"   ❌ Failed: {result.error}")

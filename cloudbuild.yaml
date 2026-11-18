@@ -35,7 +35,7 @@ steps:
         printf "Resolved commit=%s tag=%s\n" "$${SHA}" "$${CB_TAG}"
 
   - id: python-lint-typecheck-and-tests
-    name: ghcr.io/astral-sh/uv:0.9.1-python3.13-bookworm-slim
+    name: ghcr.io/astral-sh/uv:0.12.24-python3.13-bookworm-slim
     waitFor: ["-"]
     entrypoint: bash
     env:
@@ -46,6 +46,7 @@ steps:
       - -c
       - |
         set -euo pipefail
+        uv lock --check --offline --no-config
         uv sync --frozen
         /workspace/.venv/bin/ruff check src/ tests/ examples/
         /workspace/.venv/bin/ruff format --check src/ tests/ examples/
