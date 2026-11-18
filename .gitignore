@@ -218,9 +218,8 @@ marimo/_static/
 marimo/_lsp/
 __marimo__/
 
-# Claude Code — ignore local state/plans while keeping shared skills & settings tracked
+# Claude Code — ignore local state/plans while keeping shared settings tracked
 .claude/*
-!.claude/skills
 !.claude/settings.json
 
 # Benchmark history (pytest-benchmark local runs)

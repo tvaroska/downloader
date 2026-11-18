@@ -2,7 +2,7 @@
 
 FastAPI web service for programmatic URL content downloading, DOM article extraction (`BeautifulSoup` + `markdownify`), image OCR (`pytesseract` + `Pillow`), headless Chromium PDF/screenshot/SPA rendering with declarative actions (`Playwright`), SSRF-safe webhooks, and stateless-first ethical crawling (`robots.txt` + `Crawl-delay`).
 
-## Security & Resource Isolation (`v0.7.0`)
+## Security & Resource Isolation (`v0.7.1`)
 
 - **4-Stage SSRF Defense-in-Depth (`SSRFSafeHTTPTransport`)**:
   - Resolves hostnames via non-blocking `asyncio.to_thread` and pins the verified IP address directly at socket connect time (`connect_tcp` in `SSRFSafeNetworkBackend` with `trust_env=False`), closing DNS-rebinding TOCTOU windows.

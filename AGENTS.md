@@ -6,11 +6,10 @@ This file is the canonical operating brief for all coding agents (**Antigravity 
 
 REST API Downloader — a high-performance FastAPI web service for programmatic URL content downloading with intelligent article extraction, stateless-first ethical crawling (`robots.txt` + `Crawl-delay`), headless Chromium rendering, and Redis-backed batch/scheduled jobs.
 
-- **Version:** 0.7.0
+- **Version:** 0.7.1
 - **Stack:** Python 3.13+, FastAPI, httpx, Redis, Playwright, pytesseract/Pillow, OpenTelemetry (opt-in)
 - **Registry:** `us-central1-docker.pkg.dev/sites-470716/containers/downloader` (Cloud Build CI/CD via [`cloudbuild.yaml`](cloudbuild.yaml) + GKE Autopilot / Flux CD GitOps)
 - **Production domain:** `https://download.tvaroska.sk`
-- **Operational Runbook Skill:** [`skills/downloader-ops/SKILL.md`](skills/downloader-ops/SKILL.md) (exposed via `.agents/skills` and `.claude/skills`)
 
 ## Development Commands
 
@@ -124,13 +123,14 @@ sdks/
 | GET | `/metrics/health-score` | Computed system health score (`0–100`) and contributing factors |
 | GET | `/metrics/live` | Real-time semaphore concurrency (PDF/batch) and connection pool stats |
 
-**`Accept` Content Negotiation Wire Contract (`GET /{url}`):**
+**`Accept` Content Negotiation & URL Encoding Wire Contract (`GET /{url}`):**
 - **Single format (`Accept` omitted or 1 MIME type):** Returns raw payload bytes directly with the matching `Content-Type` — `text/plain` (default), `text/markdown`, `text/html`, `application/pdf`, `image/png`, `image/jpeg`, or `application/json` (base64 content + metadata). Callers sending `Accept: text/html` receive raw HTML bytes (`response.text`), **not** JSON.
 - **Multi-format (`2+` MIME types, e.g. `Accept: text/html, text/markdown`):** Returns `application/json` mapping each requested MIME type to its rendered body (`{"text/html": "...", "text/markdown": "..."}`, including `"errors": {...}` only when one or more requested formats fail).
+- **Target URL encoding & binary media guard:** Target URLs containing `%`, `?`, or `#` on `GET /{url}` must percent-encode them in the `{url}` path (`%25`, `%3F`, `%23`; all three SDKs encode automatically), and undocumented outer query parameters return `HTTP 400` (`validation_error`). Non-text binary `Content-Type`s (`audio/*`, `video/*`, `application/octet-stream`, archives) return `HTTP 415` (`unsupported_media_type`) on text/HTML/Markdown/multi-format conversion paths.
 
 ## Testing Strategy
 
-4-marker pytest suite (`885+` total tests, `752+` fast offline tests across `smoke`, `unit`, `integration`, and `e2e`, plus standalone SDK test suites in `sdks/`):
+4-marker pytest suite (`940` total tests, `910` fast offline gate tests across `smoke` and `unit` including Python/JS/Go SDK gates in `tests/smoke/test_sdk_suites.py`, plus `integration` and `e2e`):
 - **Smoke (`-m smoke`)**: Fast critical-path checks (auth, validation/SSRF, rate limits, server startup, repo/ADR-005/link hygiene) in `<3s`
 - **Unit (`-m unit`)**: Isolated module, middleware, browser-manager, job-manager, metrics, and mocked API endpoint tests (offline deterministic fixture DNS in `tests/conftest.py`)
 - **Integration (`-m integration`)**: Real Playwright PDF generation, browser security isolation, and multi-component workflows
@@ -195,7 +195,6 @@ All upcoming milestones, open `- [ ]` tasks, and unscheduled backlog items live 
 | [`docs/archive/roadmap-history.md`](docs/archive/roadmap-history.md) | Archived milestone and release implementation history moved out of `docs/roadmap.md` |
 | [`DECISIONS.md`](DECISIONS.md) | Append-only architectural decision and learning log (`<= 25 KB`) |
 | [`CRITICAL.md`](CRITICAL.md) | Registry of security-, contract-, and CI-critical paths (mandatory review before commit) |
-| [`skills/downloader-ops/SKILL.md`](skills/downloader-ops/SKILL.md) | Operational runbooks (`Accept` contract, offline verification, Redis/Playwright E2E, Cloud Build releases, `.secrets.baseline`) |
 | `spec/` | THE WHAT — requirements and public wire contracts ([`spec/contracts.md`](spec/contracts.md)). Status-free, **protected** |
 | `docs/` | Guides & completed feature baselines — `docs/guides/*.md`, `docs/features/*.md` (e.g., [`docs/features/ethical-crawling.md`](docs/features/ethical-crawling.md)) |
 
@@ -206,3 +205,11 @@ All upcoming milestones, open `- [ ]` tasks, and unscheduled backlog items live 
 
 ### `CRITICAL.md` Escalation
 Any change touching a path listed in [`CRITICAL.md`](CRITICAL.md) requires explicit security/contract review before commit. `spec/` is protected — propose changes to `spec/contracts.md` for review rather than editing it unprompted.
+
+## Common Gotchas
+
+- **Streaming `httpx.MockTransport` tests:** `httpx.Response(200, content=...)` eagerly runs `self.read()` in `__init__` (`is_stream_consumed == True`, wrapping `ByteStream` inside `BoundAsyncStream`). Pass `stream=httpx.ByteStream(raw_bytes)` whenever testing raw wire streaming or bounded decompression bombs (`src/downloader/content_encoding.py`).
+- **Browser SSRF egress pinning:** Playwright `BrowserPool` routes Chromium egress through loopback connect-time IP-pinning proxy `BrowserEgressProxy` (`src/downloader/browser/egress_proxy.py`), sets `service_workers="block"`, attaches `install_ssrf_route_guard`, and re-validates every hop in `response.request.redirected_from` + `page.url` (`validate_browser_navigation`).
+- **Lifespan OTel & APScheduler `RedisJobStore`:** Calling `FastAPIInstrumentor.instrument_app(app)` inside `lifespan` must reset `app.middleware_stack = None` on both instrument and uninstrument so Starlette rebuilds middleware, and `excluded_urls` must stay host-anchored (`^https?://[^/]+/(health|metrics)(\?.*)?$`) so downloading target URLs ending in `/health` or `/metrics` remains traced (`src/downloader/telemetry.py`). APScheduler 3.x `RedisJobStore` forwards kwargs to `redis.Redis.__init__` (which rejects `url=`), so `src/downloader/scheduler/service.py` must pass `connection_pool=ConnectionPool.from_url(redis_uri)`.
+- **Cloud Build CI, Trivy & Scratch E2E:** Always run `uv lock --no-config --default-index https://pypi.org/simple` (`--offline` for version bumps) so `uv.lock` stays pinned to public PyPI (`test_uv_lock_uses_public_pypi_only`). In `cloudbuild.yaml`, invoke TypeScript via `npx --yes --package=typescript@5.8.2 tsc --noEmit` (bare `npx typescript@...` fails because `typescript` exposes both `tsc` and `tsserver`), and strip unused base-image `pip`/`setuptools`/`ensurepip` in `Dockerfile` so Trivy `--pkg-types os,library` stays clean. When Docker is unavailable locally, submit zero-push E2E builds strictly against `--project=btv-scratch-01` (never prod `sites-470716`), redirect `docker logs <ctr> > /tmp/ctr.log 2>&1` before `grep -q` (avoids `SIGPIPE` exit `141` under `pipefail`), and set `WORKER_REMOTE_BROWSER_ENABLED=true` on both `api` and `worker` containers when testing remote browser RPC.
+- **Secrets baseline (`.secrets.baseline`):** Regenerate via `uv run --no-sync detect-secrets scan --baseline .secrets.baseline` rather than hand-editing hashes or line numbers.
