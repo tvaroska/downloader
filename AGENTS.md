@@ -133,58 +133,19 @@ sdks/
 
 ## Testing Strategy
 
-4-marker pytest suite (`940` total tests, `910` fast offline gate tests across `smoke` and `unit` including Python/JS/Go SDK gates in `tests/smoke/test_sdk_suites.py`, plus `integration` and `e2e`):
-- **Smoke (`-m smoke`)**: Fast critical-path checks (auth, validation/SSRF, rate limits, server startup, repo/ADR-005/link hygiene) in `<3s`
-- **Unit (`-m unit`)**: Isolated module, middleware, browser-manager, job-manager, metrics, and mocked API endpoint tests (offline deterministic fixture DNS in `tests/conftest.py`)
-- **Integration (`-m integration`)**: Real Playwright PDF generation, browser security isolation, and multi-component workflows
+4-marker pytest suite (`935` collected, `905` fast offline gate tests across `smoke` and `unit` at `>= 83%` coverage including Python/JS/Go SDK gates in `tests/smoke/test_sdk_suites.py`):
+- **Smoke (`-m smoke`)**: Auth, SSRF/validation, rate limits, server startup, governance & ADR-005 link hygiene (`<3s`)
+- **Unit (`-m unit`)**: Isolated modules, Ports/Adapters parity, middleware, browser pool, job manager, and mocked routes (`tests/conftest.py` fixture DNS)
+- **Integration (`-m integration`)**: Real Playwright PDF/HTML rendering and browser security isolation
 - **E2E (`-m e2e`)**: Full Docker Compose + Redis + live example verification
 
-## Key Dependencies
+## Environment & Security Summary
 
-- **FastAPI** + **uvicorn**: Async web framework
-- **httpx[http2]**: Async HTTP client with connection pooling
-- **beautifulsoup4** + **lxml** + **markdownify**: Content extraction and conversion
-- **pytesseract** + **Pillow**: Image-to-text OCR extraction
-- **playwright**: Headless Chromium rendering, screenshot, and PDF generation
-- **redis**: Batch job management, schedule history, split worker queues, rate limiting
-- **slowapi**: Rate limiting middleware
-- **apscheduler**: Cron-based scheduled download jobs
-- **opentelemetry-sdk**: Opt-in distributed tracing (`OTEL_ENABLED`)
-- **pydantic-settings**: Environment configuration management
-
-## Environment Configuration
-
-Key variables (see `.env.example` for full list):
-
-- `DOWNLOADER_KEY`: API key for authentication (optional; when set, required on all endpoints except `GET /health`, including `/metrics*`)
-- `REDIS_URI`: Redis connection string (required for `/batch`, `/schedules`, and `DEPLOYMENT_MODE=api|worker`; optional shared cache/throttle for rate limits and `robots.txt`)
-- `ENVIRONMENT`: `development` / `staging` / `production` (`/docs`, `/redoc`, and `/openapi.json` return `HTTP 404` when `production`)
-- `CORS_ALLOWED_ORIGINS`: Comma-separated origins (default: `http://localhost:3000,http://localhost:8080,http://127.0.0.1:3000,http://127.0.0.1:8080`)
-- `USER_AGENT`: Outbound HTTP & Playwright `User-Agent` (default: `REST-API-Downloader/1.0`)
-- `RESPECT_ROBOTS_TXT`: Enforce `robots.txt` & `Crawl-delay` pre-flight across `GET /{url}`, `POST /render`, `POST /batch`, and `/schedules` (default: `true`; returns `HTTP 403` `robots_disallowed` when blocked, fails open when unreachable)
-- `ROBOTS_CACHE_TTL` / `ROBOTS_CACHE_MAX_SIZE` / `ROBOTS_FETCH_TIMEOUT` / `MAX_CRAWL_DELAY`: `robots.txt` cache TTL (`3600s`), bounded LRU size (`1000`), fetch timeout (`5.0s`), and `Crawl-delay` cap (`30.0s`)
-- `CONTENT_MAX_DOWNLOAD_SIZE`: Streaming byte cap (default: `52428800` / 50MB; returns `HTTP 413` `content_too_large`)
-- `HTTP_MAX_CONNECTIONS`: Max HTTP connections (default: 200)
-- `HTTP_REQUEST_TIMEOUT`: Request timeout in seconds (default: 30)
-- `RATELIMIT_ENABLED` / `RATELIMIT_TRUSTED_PROXIES`: Enable moving-window rate limiting (default: `true`; returns `HTTP 429` + `Retry-After` + `X-RateLimit-*`) and trusted proxy CIDRs for right-to-left `X-Forwarded-For` client IP resolution
-- `BATCH_CONCURRENCY` / `BATCH_MAX_URLS_PER_BATCH`: Max concurrent batch requests (default: CPU×8, max 50) and max URLs per batch submission (default: 50, hard ceiling: 1000)
-- `PDF_CONCURRENCY` / `PDF_MAX_USES_PER_BROWSER` / `PDF_IDLE_TIMEOUT`: Max concurrent browser sessions across PDF, screenshot, and Playwright HTML rendering (default: CPU×2, max 12), browser recycling cap (`50`), and idle scale-to-zero timeout (`600s`)
-- `SSRF_BLOCK_PRIVATE_IPS`: Block private/loopback/link-local IPs across DNS-pinned `httpcore` sockets, `3xx` redirects, `robots.txt`, webhooks, `/schedules`, and Playwright requests (default: `true`)
-- `OCR_ENABLED` / `OCR_DEFAULT_LANGUAGE` / `OCR_TIMEOUT_SECONDS` / `OCR_MAX_PIXELS`: Tesseract OCR controls (`true`, `eng`, `30.0s`, `25_000_000` decompression-bomb cap)
-- `WEBHOOK_ENABLED` / `WEBHOOK_TIMEOUT_SECONDS` / `WEBHOOK_MAX_RETRIES`: Post-persistence SSRF-safe HMAC-SHA256 webhook delivery controls (`true`, `10.0s`, `3`)
-- `SHUTDOWN_DRAIN_TIMEOUT` / `SHUTDOWN_POLL_INTERVAL`: Graceful shutdown active-request and job drain window (`30.0s`, `0.25s`)
-- `DEPLOYMENT_MODE` / `WORKER_POLL_TIMEOUT` / `WORKER_BROWSER_TASK_TIMEOUT` / `WORKER_MAX_CONCURRENT_JOBS`: Split API/worker topology (`all` default, `api`, `worker`)
-- `OTEL_ENABLED` / `OTEL_SERVICE_NAME` / `OTEL_EXPORTER_OTLP_ENDPOINT` / `OTEL_CONSOLE_EXPORTER`: Opt-in OpenTelemetry distributed tracing (`false` default)
-
-## Security
-
-- Defense-in-depth SSRF protection (async DNS resolution + DNS-pinned `SSRFSafeHTTPTransport` with `trust_env=False`, `3xx` redirect hop re-validation, `robots.txt` & `/schedules` validation, and Playwright `context.route("**/*", ...)` interception; blocks localhost, `*.localhost`, hex/octal/integer/IPv4-mapped-IPv6 private IPs, `file://`, and `169.254.169.254` cloud metadata)
-- Stateless-first ethical crawling (`robots.txt` compliance across `GET /{url}`, `/batch`, and `/schedules`, atomic Redis Lua `Crawl-delay` throttling, `HTTP 403` `robots_disallowed`, bounded in-memory TTL/LRU cache)
-- Streaming download size guard (`CONTENT_MAX_DOWNLOAD_SIZE` -> `HTTP 413` `content_too_large` before buffering oversized streams)
-- Constant-time API key authentication (`Authorization: Bearer` or `X-API-Key` header via `secrets.compare_digest` across download, batch, schedule, and `/metrics*` endpoints; `/docs`, `/redoc`, and `/openapi.json` disabled in `ENVIRONMENT=production`)
-- Localhost-only default CORS origins
-- Active moving-window rate limiting (`60/min` download, `20/min` batch, `200/min` status/jobs/metrics, `100/min` default -> `HTTP 429` + `Retry-After`, right-to-left trusted-proxy `X-Forwarded-For` resolution, and auth vs unauth bucket isolation)
-- Non-root Docker container listening on unprivileged port `:8000` with isolated, auto-recycling Playwright browser contexts
+Full defaults live in [`.env.example`](.env.example) and [`pyproject.toml`](pyproject.toml):
+- **Auth & Docs:** `DOWNLOADER_KEY` (constant-time `secrets.compare_digest` via `Bearer` or `X-API-Key` across all routes except `GET /health`, including `/metrics*`); `ENVIRONMENT=production` disables `/docs`, `/redoc`, and `/openapi.json` (`HTTP 404`); localhost-only default `CORS_ALLOWED_ORIGINS`.
+- **SSRF & Output Caps:** `SSRF_BLOCK_PRIVATE_IPS=true` (async DNS resolution + DNS-pinned `SSRFSafeHTTPTransport` with `trust_env=False`, `3xx` redirect re-validation, `BrowserEgressProxy`, `service_workers="block"`, `accept_downloads=False`, and `context.route("**/*", ...)` blocking private/loopback/shared-space/`169.254.169.254`/`file://`); `CONTENT_MAX_DOWNLOAD_SIZE=52428800` (`50 MB` -> `HTTP 413` on HTTP streams and rendered HTML/PDF/screenshots).
+- **Ethical Crawling & Rate Limits:** `RESPECT_ROBOTS_TXT=true`, `USER_AGENT`, `ROBOTS_CACHE_TTL=3600`, `ROBOTS_CACHE_MAX_SIZE=1000`, `ROBOTS_FETCH_TIMEOUT=5.0`, `MAX_CRAWL_DELAY=30.0` (RFC 9309 `*`/`$` + longest-match, 60s negative failure TTL, bounded `Crawl-delay` wait -> `429 Retry-After`); `RATELIMIT_ENABLED=true` and `RATELIMIT_TRUSTED_PROXIES` (`60/min` download, `20/min` batch, `200/min` status/metrics, `100/min` default, auth vs unauth bucket isolation).
+- **Runtime, Browser, OCR, Webhooks & Split Workers:** `REDIS_URI`, `HTTP_MAX_CONNECTIONS=200`, `HTTP_REQUEST_TIMEOUT=30`, `BATCH_CONCURRENCY`, `BATCH_MAX_URLS_PER_BATCH=50`, `PDF_CONCURRENCY`, `PDF_MAX_USES_PER_BROWSER=50`, `PDF_IDLE_TIMEOUT=600`, `OCR_ENABLED=true` (`OCR_DEFAULT_LANGUAGE=eng`, `OCR_MAX_PIXELS=25000000`, dedicated `downloader-ocr` pool), `WEBHOOK_ENABLED=true` (post-persistence HMAC-SHA256), `SHUTDOWN_DRAIN_TIMEOUT=30.0`, `DEPLOYMENT_MODE=all|api|worker`, `OTEL_ENABLED=false`, non-root container on `:8000`.
 
 ## Planning & Backlog Workflow (Roadmap-First, No `TODO.md`)
 
@@ -202,7 +163,7 @@ All upcoming milestones, open `- [ ]` tasks, and unscheduled backlog items live 
 | `docs/` | Guides & completed feature baselines — `docs/guides/*.md`, `docs/features/*.md` (e.g., [`docs/features/ethical-crawling.md`](docs/features/ethical-crawling.md)) |
 
 ### Verification Ladder
-- **T1 (every change — gates commit):** `proj-test downloader` (`ruff check`, `ruff format --check`, `mypy src/`, and offline fast `pytest` suite `not (integration or e2e or network or requires_redis or requires_playwright)`).
+- **T1 (every change — gates commit):** `proj-test downloader` (`ast-grep`, `ruff check`, `ruff format --check`, `mypy src/ tests/`, and offline fast `pytest --cov=src/downloader` suite).
 - **T2 (gates milestone completion in `docs/roadmap.md`):** Exercise the changed behavior against acceptance criteria (including `integration` / `requires_playwright` / Redis suites and SDK suites when relevant); move shipped milestones into `docs/archive/roadmap-history.md` (`proj-test roadmap-archive downloader --done`) and record decisions in `DECISIONS.md`.
 - **T3 (release gate):** Full container + Trivy `os,library` + Playwright smoke verification (`cloudbuild.yaml` / `proj-release downloader`) against [`spec/contracts.md`](spec/contracts.md).
 
