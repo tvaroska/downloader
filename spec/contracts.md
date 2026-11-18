@@ -1,8 +1,8 @@
 # REST API Downloader - API Reference
 
-**Last Updated:** 2026-11-12
+**Last Updated:** 2026-11-18
 
-Complete API documentation for the REST API Downloader service (`v0.7.0`).
+Complete API documentation for the REST API Downloader service (`v0.7.1`).
 
 ## Base URL
 
@@ -184,6 +184,8 @@ Download and process content from any public URL with intelligent content extrac
 
 **Parameters:**
 - `url` (path, required) - The complete URL to download (e.g., `https://example.com`)
+
+> **Target URL Encoding:** Because `GET /{url}` accepts downloader control options on the outer request query string (`render`, `wait_for`, `output`, `full_page`, `screenshot_format`, `actions`, `ocr`, `ocr_lang`), callers passing a target URL that contains `%`, `?`, or `#` **must** percent-encode those characters in the `{url}` path segment (`%25`, `%3F`, `%23`; all official Python, JavaScript/TypeScript, and Go SDKs perform this encoding automatically). Any outer query parameter outside the documented control set is rejected with `HTTP 400` (`validation_error`).
 
 **Headers:**
 - `Accept` (optional) - Content format preference (`text/plain`, `text/markdown`, `text/html`, `application/pdf`, `image/png`, `image/jpeg`, `application/json`, or comma-separated list for multi-format JSON)
@@ -798,7 +800,8 @@ All errors return JSON responses with structured error information.
 **Common Cases:**
 - Invalid URL format
 - Missing or malformed URL
-- Blocked domains (localhost, private IPs)
+- Blocked domains (localhost, private/non-global IPs)
+- Undocumented outer query parameters on `GET /{url}`
 
 **Example:**
 ```json
@@ -839,6 +842,22 @@ Returned on `GET /{url}` (and recorded with `status_code: 413` per item in `POST
     "success": false,
     "error": "Content size exceeds maximum allowed size of 52428800 bytes",
     "error_type": "content_too_large"
+  }
+}
+```
+
+#### Unsupported Media Type Errors (415 Unsupported Media Type)
+
+**Error Type:** `unsupported_media_type`
+
+Returned on `GET /{url}` (and recorded per item in `POST /batch` and `/schedules`) when text, Markdown, HTML, or multi-format JSON conversion is requested for a non-text binary upstream `Content-Type` (such as `audio/*`, `video/*`, `application/octet-stream`, archives, or binary PDFs) rather than raw passthrough (`Accept: */*`).
+
+```json
+{
+  "detail": {
+    "success": false,
+    "error": "Unsupported binary content type 'audio/mpeg' for text conversion",
+    "error_type": "unsupported_media_type"
   }
 }
 ```
