@@ -189,7 +189,7 @@ def _mock_handler(request: httpx.Request) -> httpx.Response:
             200,
             json={
                 "status": "healthy",
-                "version": "0.7.1",
+                "version": "0.8.3",
                 "environment": "test",
                 "draining": False,
                 "active_requests": 0,
@@ -221,8 +221,8 @@ def test_sync_client_end_to_end() -> None:
         transport=transport,
     ) as client:
         health = client.health()
-        assert health.version == "0.7.1"
-        assert __version__ == "0.7.1"
+        assert health.version == "0.8.3"
+        assert __version__ == "0.8.3"
         assert not health.draining
 
         shot = client.screenshot("https://example.com/shot", full_page=True)

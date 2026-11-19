@@ -1,6 +1,6 @@
 {
   "name": "@downloader/client",
-  "version": "0.7.1",
+  "version": "0.8.3",
   "description": "Zero-dependency typed JavaScript and TypeScript client for the REST API Downloader service.",
   "type": "module",
   "main": "./src/index.js",

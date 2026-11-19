@@ -6,7 +6,7 @@ This file is the canonical operating brief for all coding agents (**Antigravity 
 
 REST API Downloader — a high-performance FastAPI web service for programmatic URL content downloading with intelligent article extraction, stateless-first ethical crawling (`robots.txt` + `Crawl-delay`), headless Chromium rendering, and Redis-backed batch/scheduled jobs.
 
-- **Version:** 0.7.1
+- **Version:** 0.8.3
 - **Stack:** Python 3.13+, FastAPI, httpx, Redis, Playwright, pytesseract/Pillow, OpenTelemetry (opt-in)
 - **Registry:** `us-central1-docker.pkg.dev/sites-470716/containers/downloader` (Cloud Build CI/CD via [`cloudbuild.yaml`](cloudbuild.yaml) + GKE Autopilot / Flux CD GitOps)
 - **Production domain:** `https://download.tvaroska.sk`

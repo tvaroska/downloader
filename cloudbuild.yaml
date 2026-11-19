@@ -81,8 +81,9 @@ steps:
         docker run --rm --network cloudbuild \
           -v /workspace:/workspace -w /workspace \
           -e REDIS_URI=redis://downloader-ci-redis:6379 \
+          -e PYTHONDONTWRITEBYTECODE=1 \
           ghcr.io/astral-sh/uv:0.12.24-python3.13-trixie-slim \
-          /workspace/.venv/bin/pytest tests/ -m requires_redis -v --timeout=30
+          /workspace/.venv/bin/pytest tests/ -m requires_redis --no-cov -p no:cacheprovider -v --timeout=30
 
   - id: sdk-go-tests
     name: golang:1.24-bookworm
@@ -197,9 +198,11 @@ steps:
         docker run --rm \
           -v /workspace:/workspace -w /workspace \
           -e PLAYWRIGHT_BROWSERS_PATH=/usr/local/share/playwright/browsers \
+          -e HOME=/tmp \
+          -e PYTHONDONTWRITEBYTECODE=1 \
           --entrypoint /workspace/.venv/bin/pytest \
           downloader:ci \
-          tests/ -m requires_playwright --no-cov -v --timeout=60
+          tests/ -m requires_playwright --no-cov -p no:cacheprovider -v --timeout=60
 
   - id: trivy-vulnerability-scan
     name: gcr.io/cloud-builders/docker

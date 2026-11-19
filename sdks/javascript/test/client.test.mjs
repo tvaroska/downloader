@@ -15,7 +15,7 @@ function createMockFetch() {
 
     if (url.pathname === "/health") {
       return new Response(
-        JSON.stringify({ status: "healthy", version: "0.7.1", environment: "test" }),
+        JSON.stringify({ status: "healthy", version: "0.8.3", environment: "test" }),
         { status: 200, headers: { "content-type": "application/json" } },
       );
     }
@@ -207,7 +207,7 @@ test("DownloaderClient handles download, render, OCR, screenshot, batch, and API
   });
 
   const health = await client.health();
-  assert.equal(health.version, "0.7.1");
+  assert.equal(health.version, "0.8.3");
 
   const shot = await client.screenshot("https://example.com/shot", { fullPage: true });
   assert.equal(shot.contentType, "image/png");

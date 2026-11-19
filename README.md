@@ -2,7 +2,7 @@
 
 FastAPI web service for programmatic URL content downloading, DOM article extraction (`BeautifulSoup` + `markdownify`), image OCR (`pytesseract` + `Pillow`), headless Chromium PDF/screenshot/SPA rendering with declarative actions (`Playwright`), SSRF-safe webhooks, and stateless-first ethical crawling (`robots.txt` + `Crawl-delay`).
 
-## Security & Resource Isolation (`v0.7.1`)
+## Security & Resource Isolation (`v0.8.3`)
 
 - **4-Stage SSRF Defense-in-Depth (`SSRFSafeHTTPTransport`)**:
   - Resolves hostnames via non-blocking `asyncio.to_thread` and pins the verified IP address directly at socket connect time (`connect_tcp` in `SSRFSafeNetworkBackend` with `trust_env=False`), closing DNS-rebinding TOCTOU windows.
@@ -213,9 +213,9 @@ uv run --no-sync pytest -m integration -v
 uv run --no-sync pytest -m e2e -v
 ```
 
-## Implementation Status (`v0.7.1`)
+## Implementation Status (`v0.8.3`)
 
-**Delivered through `v0.7.1`:**
+**Delivered through `v0.8.3`:**
 - Single-pass `domcontentloaded` + bounded `networkidle` settle (`v0.6.2`) eliminating navigation hangs on tracker-heavy origins
 - Direct URL endpoint (`GET /{url}`) with single- and multi-format `Accept` content negotiation (`text/plain`, `text/markdown`, `text/html`, `application/json`, `application/pdf`, `image/png`, `image/jpeg`) plus `?output=screenshot|pdf`, `?actions=`, and `?ocr=true`
 - Scripted rendering endpoint (`POST /render`) executing strictly allowlisted declarative Playwright actions (`src/downloader/browser/actions.py`, zero raw JS eval)

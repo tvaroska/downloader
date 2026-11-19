@@ -19,7 +19,7 @@ func TestDownloaderClientEndToEnd(t *testing.T) {
 		switch r.URL.Path {
 		case "/health":
 			w.Header().Set("Content-Type", "application/json")
-			_, _ = w.Write([]byte(`{"status":"healthy","version":"0.7.1","environment":"test","draining":false}`))
+			_, _ = w.Write([]byte(`{"status":"healthy","version":"0.8.3","environment":"test","draining":false}`))
 		case "/render":
 			var body RenderRequest
 			if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
@@ -103,8 +103,8 @@ func TestDownloaderClientEndToEnd(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Health failed: %v", err)
 	}
-	if health.Version != "0.7.1" {
-		t.Fatalf("expected version 0.7.1, got %s", health.Version)
+	if health.Version != "0.8.3" {
+		t.Fatalf("expected version 0.8.3, got %s", health.Version)
 	}
 
 	shot, err := client.Screenshot(ctx, "https://example.com/shot", true, "png", nil)
