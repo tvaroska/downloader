@@ -1,8 +1,8 @@
 # Deployment Guide
 
-**Last Updated:** 2026-11-01
+**Last Updated:** 2026-11-19
 
-This guide covers deploying the REST API Downloader (`v0.6.0`) to production.
+This guide covers deploying the REST API Downloader (`v0.7.1`) to production.
 
 ## Prerequisites
 
@@ -73,7 +73,8 @@ LOG_LEVEL=INFO
 USER_AGENT=REST-API-Downloader/1.0
 RESPECT_ROBOTS_TXT=true
 
-# Performance & Browser Lifecycle (adjust based on your resources)
+# Performance & Browser Lifecycle (explicit PDF_CONCURRENCY must be <= PDF_POOL_SIZE)
+PDF_POOL_SIZE=8
 PDF_CONCURRENCY=8
 PDF_MAX_USES_PER_BROWSER=50
 PDF_IDLE_TIMEOUT=600.0
@@ -84,15 +85,16 @@ BATCH_CONCURRENCY=32
 
 **Memory-constrained (2GB RAM)**:
 ```bash
-PDF_CONCURRENCY=2
-BATCH_CONCURRENCY=8
 PDF_POOL_SIZE=1
+PDF_CONCURRENCY=1
+BATCH_CONCURRENCY=8
 HTTP_MAX_CONNECTIONS=40
 ```
 
 **High-performance (16GB RAM, 8+ cores)**:
 ```bash
-PDF_CONCURRENCY=16
+PDF_POOL_SIZE=10
+PDF_CONCURRENCY=10
 BATCH_CONCURRENCY=64
 HTTP_MAX_CONNECTIONS=400
 ```
@@ -143,7 +145,7 @@ pip install -e .
 playwright install chromium
 
 # Run
-uvicorn src.downloader.main:app --host 0.0.0.0 --port 8000
+uvicorn downloader.main:app --host 0.0.0.0 --port 8000
 ```
 
 ## Health Verification
@@ -158,7 +160,7 @@ curl http://localhost:8000/health
 ```json
 {
   "status": "healthy",
-  "version": "0.6.0",
+  "version": "0.7.1",
   "environment": "production",
   "services": {
     "job_manager": {"available": true, "status": "connected"},
@@ -285,8 +287,8 @@ docker exec -it downloader redis-cli -h redis ping
 
 PDF generation is memory-intensive (`PlaywrightPDFGenerator` recycles Chromium after `PDF_MAX_USES_PER_BROWSER=50` uses and scales idle pools to zero after `PDF_IDLE_TIMEOUT=600s`). For tighter envelopes, reduce:
 ```bash
-PDF_CONCURRENCY=2
 PDF_POOL_SIZE=1
+PDF_CONCURRENCY=1
 PDF_MAX_USES_PER_BROWSER=25
 PDF_IDLE_TIMEOUT=120.0
 BATCH_CONCURRENCY=8

@@ -1,6 +1,6 @@
 # Documentation Archive
 
-**Last Updated:** 2026-01-20
+**Last Updated:** 2026-11-19
 
 This folder contains archived documentation for resolved issues and completed investigations.
 
@@ -17,6 +17,7 @@ These documents are kept for reference and learning, not as active documentation
 
 | Document | Topic | Status | Date |
 |----------|-------|--------|------|
+| [decisions-history.md](decisions-history.md) | Archived architectural decisions (`2025`–`2026-11-12`) moved from `DECISIONS.md` | **ARCHIVED** | 2026-11-19 |
 | [roadmap-history.md](roadmap-history.md) | Shipped roadmap milestones and release summaries (`v0.3.0`–`v0.7.0`) | **ARCHIVED** | 2026-11-18 |
 | [DOWNLOADER_BUG.md](DOWNLOADER_BUG.md) | Missing metadata for JS-heavy sites (Substack, Medium) | **RESOLVED** | 2026-01-02 |
 | [TEST_RESULTS.md](TEST_RESULTS.md) | Test findings confirming Brotli decompression issue | **RESOLVED** | 2026-01-02 |

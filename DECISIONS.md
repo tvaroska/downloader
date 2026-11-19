@@ -6,13 +6,25 @@ history — supersede an old decision with a new entry that references it.
 
 ---
 
+## 2026-11-19 — `v0.8.3` Release Blockers, Pure Ports Split, Redis/Worker Atomicity & Contract Alignment (Implemented locally, pending release)
+
+- **Decision (Stateless production fixes, pure Ports split & gate enforcement — `R77`–`R78`, `R80`–`R82`, `R88`, `R90`, `R95`–`R103`, `R107`–`R114`):**
+  Translated Playwright `TimeoutError`/`Error` and `BrowserPoolError` at the browser adapter boundary (`src/downloader/browser/renderer.py`, `src/downloader/pdf_generator.py`) to typed domain exceptions (`RenderTimeoutError`, `ScreenshotGeneratorError`, `PDFGeneratorError`, `BrowserPoolError`) with full `errors.py` rows so auto-render fallbacks preserve static output (`R77`). Labelled rendered HTML bytes `text/html; charset=utf-8` at every conversion entry point, limited `<meta charset>` sniffing to HTML/XML, and mapped meta `utf-16*` to UTF-8 (`R78`). Deleted `.coveragerc` so `pyproject.toml` enforces `branch = true` and `fail_under = 83` alongside `--cov-fail-under=83` across `justfile`, `cloudbuild.yaml`, and `proj-test`, added `ast-grep-cli` to dev dependencies, allowed configured `REDIS_URI` hosts for `requires_redis` tests, and added a real-Chromium `playwright-integration-tests` step to `cloudbuild.yaml` (`R80`–`R82`). Split `src/downloader/ports.py` into a pure framework-free contract leaf (moving Playwright adapters to `src/downloader/browser/renderer.py`, session helpers to `src/downloader/browser/session.py`, pure actions to `src/downloader/models/browser_actions.py`, and in-memory test fakes to `tests/fixtures/in_memory_ports.py`) and removed `slowapi` in favor of `limits` (`R95`, `R109`). Added ContextVar-scoped per-download redirect cookies (`R90`), typed redirect policy catches (`R88`), explicit `PDF_CONCURRENCY <= PDF_POOL_SIZE` validation (`R97`), pre-stop `/health` `503` delay (`SHUTDOWN_PRE_STOP_DELAY`, `R100`), Settings-only `auth.py` (`R103`), OTLP `/v1/traces` normalization (`R111`), and `# noqa` / `# type: ignore` ratchets (`R107`).
+- **Decision (Redis, scheduler & split-worker correctness — `R79`, `R83`–`R87`, `R89`, `R101`, `R104`–`R105`, `R113`):**
+  Expanded UNIX cron day-of-week tokens explicitly over `sun..sat` (`*/n`, `0-7`, `0-N`) in UTC with UNIX `OrTrigger` DOM|DOW semantics and `extra="forbid"` on `ScheduleCreate` (`R79`, `R105`, `R112`). Kept worker heartbeats alive across the full active-task drain window and validated `heartbeat_ttl >= drain_timeout + heartbeat_interval` (`R83`, `R113`). Consolidated batch completion into atomic single-MULTI `JobStore.complete_job()` with linear-pass off-loop payload capping and counter synchronization (`R84`, `R113`), switched `FakeRedis` to raise `redis.exceptions.ConnectionError` and caught `RedisError` in rate-limit and batch progress paths (`R85`), added atomic Lua reclaim with `WORKER_MAX_ATTEMPTS` dead-lettering + atomic WATCH/MULTI `requeue_batch_job` (`R86`, `R113`), bounded remote browser dequeuing and re-checked deadlines after slot acquisition (`R87`), achieved full local/remote `BrowserRenderer` error and `fail_fast` parity (`R89`), offloaded synchronous APScheduler job-store calls with `asyncio.to_thread` + cached `/health` probes (`R101`), sealed `webhook_secret` at rest in Redis using Encrypt-then-MAC (`WEBHOOK_SECRET_KEY` / `DOWNLOADER_KEY`, `R113`), and exported worker Prometheus metrics + `monitoring/alerting_rules.yml` (`R104`).
+- **Decision (Clarification superseding `2026-11-18` `R49` Chromium flag citation — `R111`):**
+  `BrowserConfig.launch_args` in `src/downloader/browser/manager.py` launches Chromium with `--no-sandbox` (without `--disable-setuid-sandbox`, which is redundant when `--no-sandbox` is active and absent from the container launch list).
+- **Decision (Approved `spec/contracts.md` updates — resolves `2026-11-18` spec review queue & `R102`):**
+  With explicit user approval, updated `spec/contracts.md` directly alongside Python/JS/Go SDK fixes (`timeout_ms`, path-segment escaping, `BatchJobError` without synthetic `500`, `go 1.24`), aligning local `POST /render` `408 timeout_error` vs remote `504 worker_timeout`, `400` invalid cron, upstream `401`/`429` passthrough, `/health` and `/metrics/*` payloads, `AUTH_ALLOW_UNAUTHENTICATED_PRODUCTION`, and operational env defaults.
+
+---
+
 ## 2026-11-18 — `v0.8.1` & `v0.8.2` Observability, SDK Parity, Split-Worker Correctness & Wire Contract Parity (Implemented locally, pending release)
 
 - **Decision (Observability, SDK parity, worker health & test consolidation — `v0.8.1`, `R63`–`R71`, `R73`–`R76`):**
   Split `requests_total_status_*` into `downloader_requests_by_status_total`, exported histogram `_sum`/`_count` and `html_rendering_*` metrics, excluded upstream 4xx from `get_system_health_score()`, and aligned the `unhealthy` threshold to `< 50` (`R64`). Scoped `worker --healthcheck` to the process's own `WORKER_ID` heartbeat and trimmed unauthenticated `/health` worker/Redis error details (`R66`). Closed Python async, JS/TS, and Go SDK parity gaps (`download_multi`, `cancel_job`, `get_schedule`, `get_schedule_history`, `BatchJobStatus.expires_at`) (`R65`). Removed 5 duplicate root test files (`72` cases), consolidated `FakeRedis`/`make_response_metadata`/`attach_mock_transport` in `tests/fixtures/mock_fixtures.py`, extended the offline test guard to `asyncio.BaseEventLoop.create_connection`, and synchronized `README.md`, `docs/`, `AGENTS.md`, `.pre-commit-config.yaml`, and `run_examples.sh` (`R63`, `R67`–`R71`, `R73`–`R74`, `R76`).
 - **Decision (Redis/split-worker `P0`s, SIGTERM drain, off-loop HTML parsing, canonical URLs & strict env/wire contracts — `v0.8.2`, `R7`–`R14`, `R17`–`R23`, `R25`, `R27`–`R43`, `R51`–`R53`, `R75`):**
   Translated UNIX `0=Sunday` cron weekday tokens to APScheduler names (`R7`), round-tripped submitted `cron_expression` (`R8`), added split-mode scheduler wake-up + Redis run lock (`R13`), and trimmed expired execution history (`R42`). Added terminal-state transition guards (`ALLOWED_JOB_TRANSITIONS`), result status/duration persistence, safe `JobManager.disconnect()`, per-worker `processing:{worker_id}` reclaim lists, shutdown requeuing, bounded remote browser RPC with task deadlines, and aggregate batch result caps (`R9`–`R12`, `R22`, `R38`, `R43`). Installed `SIGTERM` drain (`install_sigterm_drain_handler`), switched `RateLimitMiddleware` to `limits.aio` without clearing shared Redis counters on startup, moved HTML parsing/Markdown/plaintext conversion onto a bounded `ThreadPoolExecutor` with unified `needs_js_render()`, and bounded `BrowserSession`/`close_page_modals` deadlines (`R14`, `R31`, `R32`, `R34`, `R39`). Enforced ASCII-canonical URLs (`origin_key`, `X-Original-URL` header safety), cross-origin redirect custom-header stripping, `HTTPClient`/`RobotsChecker` constructor network-backend ports, strict `ConfigDict(extra="forbid")` + `timeout_ms` on `RenderRequest`, `NoDecode` comma-list settings, nested `.env` propagation, production `DOWNLOADER_KEY` startup guard, `AliasChoices` for spec env vars, `RequestValidationError` envelope, and `502` mapping for upstream 5xx (`R17`–`R21`, `R23`, `R27`–`R30`, `R33`, `R35`–`R37`, `R40`–`R41`, `R51`–`R53`, `R75`).
-  - **Spec review items (deferred to user review per `CRITICAL.md`):** `ocr_lang` regex (`R63`), `/health` & `/metrics/*` example payloads (`R63`), `Accept: */*` passthrough wording (`R63`), `X-Downloader-Timestamp` webhook signing (`R21`), unified `needs_js_render` wording at `spec/contracts.md:455,462,465` (`R34`), and `OCR_TIMEOUT_SECONDS`/`WORKER_BROWSER_TASK_TIMEOUT`/`WORKER_POLL_TIMEOUT`/`SHUTDOWN_POLL_INTERVAL` defaults (`R53`).
 
 ---
 
@@ -21,9 +33,9 @@ history — supersede an old decision with a new entry that references it.
 - **Decision (Hexagonal Ports, Adapters and Contracts consolidation — `R44`, `R45`, `R46`, `R60`, `R61`):**
   Introduced `src/downloader/ports.py` (`BrowserRenderer` with `LocalBrowserRenderer` and `RemoteBrowserRenderer` selected once at startup in `main.py`, plus `JobStore` / `InMemoryJobStore` and `WorkQueue` / `InMemoryWorkQueue`), `BrowserSession` + `close_page_modals` + `enforce_rendered_output_size` in `src/downloader/pdf_generator.py`, `EgressPolicy` + `HTTPClient(transport=..., egress_policy=..., redirect_policy=...)`, a single transport-agnostic `convert(request, deps) -> ConversionResult` pipeline in `src/downloader/services/content_processor.py` (with zero `fastapi`/`starlette` imports across `services/` and single-parse `extract_main_content_node` in `src/downloader/transformers/common.py`), and a single `classify_domain_error` table in `src/downloader/errors.py`. Deleted production test hooks (`_resolve_batch_hook`, `from ..main import`, `"pytest" in sys.modules` branches, and silent skip in `install_ssrf_route_guard`).
   - **Why:** Eliminated three duplicated browser-session lifecycles, five scattered `worker_queue is not None` checks, four drifting format/exception tables, and 115 brittle internal patch points so security and size-cap invariants apply uniformly across `GET /{url}`, `POST /render`, multi-format `Accept`, `/batch`, and `/schedules`.
-- **Decision (Chromium `--no-sandbox` in non-root GKE Autopilot container + browser output bounds — `R49`):**
-  Retained `--no-sandbox` and `--disable-setuid-sandbox` in `BrowserConfig.args` (`src/downloader/browser/manager.py`) while enforcing `accept_downloads=False` on all Playwright contexts and capping rendered HTML, PDF, and screenshot byte sizes at `CONTENT_MAX_DOWNLOAD_SIZE` (`ContentTooLargeError` -> `HTTP 413`).
-  - **Why:** Production runs as unprivileged `appuser` inside GKE Autopilot Linux containers that drop `CAP_SYS_ADMIN` and restrict nested `CLONE_NEWUSER` user namespaces, causing Chromium's internal zygote sandbox to fail startup unless `SYS_ADMIN` or privileged seccomp relaxation is granted to the pod. Running the pod unprivileged without `CAP_SYS_ADMIN` while isolating Chromium behind `BrowserEgressProxy` connect-time IP pinning, `service_workers="block"`, `accept_downloads=False`, `install_ssrf_route_guard` (now failing closed if `context.route` is absent), max-use browser recycling (`PDF_MAX_USES_PER_BROWSER=50`), `--js-flags=--max-old-space-size`, and output byte caps preserves a smaller blast radius than granting `CAP_SYS_ADMIN` to the container.
+- **Decision (Chromium `--no-sandbox` in non-root GKE Autopilot container + browser output bounds — `R49`, flag citation clarified in `2026-11-19`):**
+  Retained `--no-sandbox` in `BrowserConfig.launch_args` (`src/downloader/browser/manager.py`) while enforcing `accept_downloads=False` on all Playwright contexts and capping rendered HTML, PDF, and screenshot byte sizes at `CONTENT_MAX_DOWNLOAD_SIZE` (`ContentTooLargeError` -> `HTTP 413`).
+  - **Why:** Production runs as unprivileged `appuser` inside GKE Autopilot Linux containers that drop `CAP_SYS_ADMIN` and restrict nested `CLONE_NEWUSER` user namespaces, causing Chromium's internal zygote sandbox to fail startup unless `SYS_ADMIN` or privileged seccomp relaxation is granted to the pod. Running the pod unprivileged without `CAP_SYS_ADMIN` while isolating Chromium behind `BrowserEgressProxy` connect-time IP pinning, `service_workers="block"`, `accept_downloads=False`, `install_ssrf_route_guard` (failing closed if `context.route` is absent), max-use browser recycling (`PDF_MAX_USES_PER_BROWSER=50`), `--js-flags=--max-old-space-size`, and output byte caps preserves a smaller blast radius than granting `CAP_SYS_ADMIN` to the container.
 - **Decision (Bounded ethical crawling, dedicated OCR thread pool & typed conversion failure — `R47`, `R48`, `R50`, `R58`):**
   Added 60s negative TTL on transient `robots.txt` failures, typed `DNSResolutionError`, userinfo-free `(scheme, host, port)` cache keys, `max_cache_bytes` LRU eviction, RFC 9309 `*`/`$` + longest-match evaluation, and cross-origin redirect `robots.txt` checks (`R47`); bounded `DomainThrottle` queue waits (`CrawlDelayExceededError` -> `HTTP 429` + `Retry-After`), canonicalized host keys, refunded cancelled slots, and deleted the non-atomic Redis `GET`/`PSETEX` fallback (`R48`); isolated CPU-bound Tesseract runs onto a dedicated bounded `downloader-ocr` `ThreadPoolExecutor` and checked `width * height > max_image_pixels` before `img.load()` (`R50`); and replaced silent raw-HTML-on-error fallback in `content_converter.py` with logged `ContentConversionError` (`HTTP 500`) (`R58`).
 - **Decision (Declarative AST rules, unified `downloader.*` imports, `BLE`/`C90`/`PLR` ratchets & `83%` coverage gate — `R54`–`R57`, `R62`, `R72`):**
@@ -35,7 +47,7 @@ history — supersede an old decision with a new entry that references it.
 
 - **Decision (Multi-layer Chromium redirect SSRF protection — supersedes `2026-11-01` route-only browser claim):**
   Added `BrowserEgressProxy` (`src/downloader/browser/egress_proxy.py`), `service_workers="block"` on all Playwright contexts (`src/downloader/browser/manager.py`, `src/downloader/pdf_generator.py`), and post-navigation `response.request.redirected_from` + `page.url` + subresource redirect validation (`validate_browser_navigation`), plus `not ip_obj.is_global` blocking (`100.64.0.0/10` shared address space) in `src/downloader/validation.py` (`R1`, `R5`).
-  - **Why:** Playwright's `context.route("**/*", ...)` handler (`2026-11-01` entry below) does not re-fire when Chromium follows a `3xx` redirect hop (`crNetworkManager.js`). Running Chromium behind an in-process loopback HTTP/CONNECT proxy that resolves and pins validated IPs at connect time — reinforced by post-navigation redirect-chain checks and blocked service workers — closes both `3xx` redirect SSRF and DNS-rebinding TOCTOU in headless browser captures.
+  - **Why:** Playwright's `context.route("**/*", ...)` handler (`2026-11-01` entry in archive) does not re-fire when Chromium follows a `3xx` redirect hop (`crNetworkManager.js`). Running Chromium behind an in-process loopback HTTP/CONNECT proxy that resolves and pins validated IPs at connect time — reinforced by post-navigation redirect-chain checks and blocked service workers — closes both `3xx` redirect SSRF and DNS-rebinding TOCTOU in headless browser captures.
 - **Decision (Bounded raw-stream decompression, stateless cookie jar, charset decoding & binary `415` guard):**
   Added `src/downloader/content_encoding.py` (`read_bounded_response_bytes`, `make_stateless_cookies`, `resolve_charset_and_decode`, `is_text_convertible_content_type`) shared across `http_client.py`, `crawling/robots.py`, `content_converter.py`, and format services (`R3`, `R4`, `R6`, `F-2026-11-16-002`).
   - **Why:** `httpx.Response.aiter_bytes()` decompressed full brotli/gzip chunks before checking `CONTENT_MAX_DOWNLOAD_SIZE`, `httpx.AsyncClient` replayed `Set-Cookie` across callers, `.decode("utf-8", errors="ignore")` dropped non-UTF-8 characters, and binary `audio/*`/`video/*`/`application/octet-stream` responses caused `OOMKilled` pod restarts when decoded across parallel text/markdown/HTML tasks. Non-text binary media types now fail fast with `HTTP 415` (`unsupported_media_type`) before buffering body chunks.
@@ -48,205 +60,16 @@ history — supersede an old decision with a new entry that references it.
 ## 2026-11-12 — `v0.6.2` single-pass browser settle & `v0.7.0` extended features and operations
 
 - **Decision (`v0.6.2` single-pass `domcontentloaded` + bounded settle — `F-2026-11-05-002`):**
-  Replaced the two-pass `networkidle` navigation draft in `src/downloader/content_converter.py`
-  (`convert_content_with_playwright_fallback` and `render_html_with_playwright`) with a single
-  `page.goto(url, wait_until="domcontentloaded", timeout=timeout_ms)` followed by a bounded
-  non-fatal `page.wait_for_load_state("networkidle", timeout=min(timeout_ms, 2500))`.
-  - **Why:** Ad- and analytics-heavy pages hold background connections open indefinitely, causing
-    two-pass retries to burn `10s–20s` and time out unnecessarily once DOM hydration has finished.
+  Replaced the two-pass `networkidle` navigation draft with a single `page.goto(url, wait_until="domcontentloaded", timeout=timeout_ms)` followed by a bounded non-fatal `page.wait_for_load_state("networkidle", timeout=min(timeout_ms, 2500))`.
 - **Decision (Screenshot/PDF output toggle & declarative allowlisted browser actions — zero raw JS eval):**
-  Added `output=screenshot|pdf`, `full_page`, `screenshot_format=png|jpeg`, and `Accept: image/png` /
-  `image/jpeg` across `GET /{url}`, `POST /render`, `POST /batch`, and `/schedules`. Defined
-  strictly allowlisted declarative actions (`src/downloader/browser/actions.py`: `click`, `fill`,
-  `select`, `scroll`, `wait`, `wait_for_selector`, `hover`, `press`; max `20` steps, bounded per-step
-  timeout, zero arbitrary JavaScript evaluation).
-  - **Why:** Allows multi-step SPA interaction (dismissing modals, expanding tabs, scrolling lazy
-    lists) prior to extraction/capture without exposing an RCE or sandbox-escape surface.
+  Added `output=screenshot|pdf`, `full_page`, `screenshot_format=png|jpeg`, `Accept: image/png|jpeg`, and strictly allowlisted declarative actions (`click`, `fill`, `select`, `scroll`, `wait`, `wait_for_selector`, `hover`, `press`; max `20` steps, zero raw JS evaluation).
 - **Decision (SSRF-safe HMAC-SHA256 webhooks firing strictly post-persistence):**
-  Added `src/downloader/services/webhooks.py` (`deliver_webhook`) using `validate_url_async` +
-  DNS-pinned `SSRFSafeHTTPTransport(trust_env=False)` with `follow_redirects=False`, bounded
-  retries (`WEBHOOK_MAX_RETRIES=3`), and `X-Downloader-Signature-256: sha256=<hex>` signatures.
-  `webhook_url` is SSRF-validated at batch/schedule creation time, `webhook_secret` is never returned
-  in API responses, and batch webhooks fire strictly after `store_job_results` + `COMPLETED` status
-  updates persist in Redis.
-  - **Why:** Prevents webhook endpoints from becoming a secondary SSRF pivot and eliminates race
-    conditions when receivers immediately fetch `GET /jobs/{job_id}/results`.
-- **Decision (Tesseract OCR with decompression-bomb protection & `503` graceful degradation):**
-  Added `src/downloader/transformers/ocr.py` (`pytesseract` + `Pillow` + `tesseract-ocr` /
-  `tesseract-ocr-eng` in `Dockerfile`) with `Image.MAX_IMAGE_PIXELS` capping (`OCR_MAX_PIXELS`),
-  regex language validation (`OCR_DEFAULT_LANGUAGE`), and explicit `HTTP 503` (`ocr_unavailable`)
-  when the `tesseract` binary is absent or `OCR_ENABLED=false`.
-- **Decision (Graceful shutdown drain, split API+worker Redis architecture & opt-in OpenTelemetry):**
-  Added `src/downloader/drain.py` (`DrainCoordinator`, `DrainMiddleware` returning `503` +
-  `Connection: close` + `Retry-After: 5`, `/health` `503` while draining, `JobManager.wait_for_active_jobs`),
-  split `DEPLOYMENT_MODE=all|api|worker` (`src/downloader/worker_queue.py` reliable `BLMOVE` batch
-  queue + remote browser RPC + worker heartbeats, `src/downloader/worker.py`, `docker-compose.split.yml`),
-  and opt-in OpenTelemetry (`src/downloader/telemetry.py`, `OTEL_ENABLED=false` default, OTLP HTTP /
-  console exporters, `trace_id`/`span_id` log correlation, `X-Trace-ID`, W3C `traceparent` across Redis).
-  - **Why:** Preserves zero-overhead stateless single-pod defaults (`DEPLOYMENT_MODE=all`,
-    `OTEL_ENABLED=false`) while enabling zero-downtime Kubernetes rollouts, independent horizontal
-    scaling of Playwright/scheduler workers, and end-to-end tracing when opted in.
-- **Decision (Typed first-party client SDKs in `sdks/`):**
-  Added `sdks/python`, `sdks/javascript`, and `sdks/go` with zero internal-tooling dependencies,
-  full coverage of download, screenshot/PDF, actions (`POST /render`), OCR, batch + webhooks, and
-  schedules, verified via standalone offline test suites.
+  Added `src/downloader/services/webhooks.py` (`deliver_webhook`) using `validate_url_async` + DNS-pinned `SSRFSafeHTTPTransport` with `follow_redirects=False`, bounded retries (`WEBHOOK_MAX_RETRIES=3`), and `X-Downloader-Signature-256: sha256=<hex>` signatures.
+- **Decision (Tesseract OCR, graceful drain, split workers, opt-in OpenTelemetry & typed SDKs):**
+  Added `src/downloader/transformers/ocr.py`, `src/downloader/drain.py`, `DEPLOYMENT_MODE=all|api|worker`, opt-in `OTEL_ENABLED`, and standalone typed SDKs in `sdks/{python,javascript,go}`.
 
 ---
 
-## 2026-11-12 — Replan `v0.7.0` around Extended Features & Operations; move Multi-Tenant Quotas past `v0.7.0`
+## Archived Decisions
 
-- **Decision (Roadmap reprioritization — supersedes `2026-11-01` post-Sprint-4 sequencing):**
-  Pulled the former Sprint 6 Extended Features (screenshot/PDF toggle, batch/schedule
-  webhooks, OCR, typed client SDKs, browser interaction scripting) and Operations &
-  Infrastructure items (graceful shutdown connection drain, split worker architecture,
-  OpenTelemetry tracing) into **`v0.7.0`**, and pushed **Multi-Tenant Per-Key Quotas**
-  (`QuotaConfig`, `GET /usage`, per-key counters, tier-based plans) out to **post-`v0.7.0`
-  (`v0.8.0+`, Deferred)**. `v0.6.2` remains the immediate next patch release for Playwright
-  navigation timeout resilience (`F-2026-11-05-002`).
-- **Why:** Production continues to run single-key on `services-gke`, so user-facing
-  extraction features (screenshots, webhooks, OCR) and operational resilience (graceful
-  drain, worker isolation, tracing) deliver immediate value ahead of multi-tenant quota
-  accounting. Details in `docs/roadmap.md`.
-
----
-
-## 2026-11-02 — `v0.6.1` DNS-pinned SSRF transport, single-fetch browser pipeline & endpoint hardening
-
-- **Decision (DNS-pinned `SSRFSafeHTTPTransport` & async SSRF validation):**
-  Added `src/downloader/ssrf_transport.py` wrapping `httpcore.AsyncNetworkBackend.connect_tcp`
-  to resolve DNS via `asyncio.to_thread(socket.getaddrinfo, ...)`, validate all A/AAAA
-  records (including IPv4-mapped IPv6, hex/octal/integer/shorthand IPv4, malformed numeric
-  TLDs, and `*.localhost`), and connect directly to the validated IP while preserving the
-  original hostname for TLS SNI (`trust_env=False` on both `HTTPClient` and `RobotsChecker`).
-  - **Why:** Pre-flight `validate_url()` followed by a second DNS lookup inside `httpx`
-    left a DNS-rebinding TOCTOU window and blocked the asyncio event loop on synchronous
-    `getaddrinfo` calls.
-- **Decision (Single-fetch Playwright & PDF pipeline under unified `pdf_semaphore`):**
-  Skipped pre-flight `http_client.download()` on `Accept: application/pdf` (across `GET /{url}`,
-  `POST /batch`, and `/schedules`) and on explicit `?render=true` / `?wait_for=` requests
-  (lazily falling back to `http_client.download()` only if Playwright fails with a non-selector
-  error, without re-triggering secondary Playwright heuristics). Unified all browser entrypoints
-  under `pdf_semaphore` (`HTTP 503` fail-fast on explicit `?render=true` and PDF; graceful
-  static content fallback on implicit auto-detection and empty-body fallback) and removed the
-  unconditional `2s` post-`networkidle` sleep in `PlaywrightPDFGenerator.generate_pdf`.
-- **Decision (`/metrics*` authentication, production docs `404`, and trusted-proxy rate limits):**
-  Required `Depends(get_api_key)` on `/metrics`, `/metrics/performance`, `/metrics/health-score`,
-  and `/metrics/live` when `DOWNLOADER_KEY` is configured while keeping `GET /health` public;
-  disabled `/docs`, `/docs/oauth2-redirect`, `/redoc`, and `/openapi.json` (`HTTP 404`) when
-  `ENVIRONMENT=production` via explicit pre-router handlers ahead of `/{url:path}`; added
-  `RATELIMIT_TRUSTED_PROXIES` right-to-left `X-Forwarded-For` client IP resolution and isolated
-  authenticated (`key:<sha256[:16]>:<ip>`) vs unauthenticated (`unauth:<ip>`) rate-limit buckets.
-- **Decision (Stateful `/batch`, `/schedules`, and Redis Lua atomicity — keeps `/schedules` metadata-only):**
-  Kept `/schedules` execution-metadata-only until Sprint 6 webhook delivery while enforcing
-  creation-time SSRF & custom header sanitization (`HTTP 400`), `robots.txt` + `DomainThrottle`
-  compliance, non-retryable policy short-circuiting, per-attempt `SCHEDULER_MAX_WORKERS`
-  concurrency (releasing slots before retry sleep), and serialized JSON `content_size` accounting.
-  Upgraded `DomainThrottle` Redis slot reservation to an atomic `EVAL` Lua script and namespaced
-  `RobotsChecker` caches to `robots:v2:{scheme}:{netloc}`.
-
----
-
-## 2026-11-01 — `v0.6.0` Ethical Crawling, production hardening & Roadmap-first consolidation
-
-- **Decision (Stateless-first Ethical Crawling & `Crawl-delay` — completes Sprint 4):**
-  Shipped `CrawlingConfig` (`USER_AGENT`, `RESPECT_ROBOTS_TXT`, `ROBOTS_CACHE_TTL`,
-  `ROBOTS_CACHE_MAX_SIZE`, `ROBOTS_FETCH_TIMEOUT`, `MAX_CRAWL_DELAY`), `RobotsChecker`
-  (`src/downloader/crawling/robots.py`), and `DomainThrottle`
-  (`src/downloader/crawling/throttle.py`). Both default to bounded in-memory LRU/TTL
-  state (`OrderedDict` + per-domain monotonic slot locks) when `REDIS_URI` is unset
-  and coordinate via Redis (`robots:v1:{netloc}`, `throttle:v1:{domain}`) when
-  configured. `RobotsChecker` uses its own SSRF-validated fetcher rather than the
-  route `HTTPClientDep`, fails open with cached sentinels when origins are unreachable
-  or malformed, and maps disallowed URLs to `HTTP 403` (`robots_disallowed`).
-- **Decision (Defense-in-depth HTTP, SSRF, Playwright, rate-limit, logging & `:8000` hardening):**
-  - Enforced streaming `CONTENT_MAX_DOWNLOAD_SIZE` in `HTTPClient` (aborting oversized
-    `Content-Length` headers pre-read and chunked streams mid-flight -> `HTTP 413`
-    `content_too_large`) and re-validated every `3xx` redirect `Location` hop via
-    `validate_url()` (`SSRFProtectionError`).
-  - Added Playwright `context.route("**/*", ...)` SSRF interception across
-    `pdf_generator.py` and `content_converter.py` (blocking RFC1918, loopback,
-    link-local/cloud metadata `169.254.169.254`, and `file://` subresources), browser
-    recycling at `PDF_MAX_USES_PER_BROWSER=50`, and idle pool scale-to-zero after
-    `PDF_IDLE_TIMEOUT=600s`.
-  - Activated moving-window enforcement in `RateLimitMiddleware` (`HTTP 429`
-    `rate_limit_exceeded` + `Retry-After` + `X-RateLimit-*` headers, matching
-    `/http...` paths to `download_limit`).
-  - Extracted top-level `method`, `path`, and `status_code` fields on `uvicorn.access`
-    records in `CustomJsonFormatter`, and moved the container listener from `:80` to
-    unprivileged `:8000` (eliminating privileged port `sysctls`).
-- **Decision (Pure Roadmap-first consolidation — supersedes `TODO.md` tracker from 2026-08-20):**
-  With Sprint 4 (`S4-be-1..5`, `S4-test-1`, `S4-doc-1`) complete and `0` active open
-  sprint tasks remaining, archived Sprint 4 into `docs/features/ethical-crawling.md`
-  and removed root `TODO.md`. Roadmap milestones and deferred backlog items now live
-  exclusively in `docs/roadmap.md`, architectural rationale in `DECISIONS.md`, and
-  wire contracts in `spec/contracts.md`.
-
----
-
-## 2026-11-01 — Stateless-first Sprint 4 re-alignment & offline verification gate
-
-- **Decision (Sprint 4 vs. Sprint 5 re-ordering — supersedes 2026-01-21 roadmap order):**
-  Promoted **Ethical Crawling & Stateless Safety** (`S4-be-1`..`S4-be-5`, `S4-test-1`,
-  `S4-doc-1`) into Sprint 4 using a stateless-first dual-mode design: stdlib
-  `urllib.robotparser` with a bounded in-memory TTL/LRU cache (1h TTL) and in-memory
-  per-domain `Crawl-delay` timestamps by default when `REDIS_URI` is unset, plus
-  optional Redis cache/throttle coordination when `REDIS_URI` is configured. Moved
-  **Multi-Tenant Per-Key Quotas** (`QuotaConfig`, `GET /usage`, `X-RateLimit-*`,
-  `429 Retry-After`) to Sprint 5 Preview (`S5-*`, deferred until multi-key or
-  Redis-backed deployment).
-- **Why (Stateless Kubernetes reality):** Production runs as a stateless Kubernetes
-  deployment behind a single shared `DOWNLOADER_KEY` with `REDIS_URI` unset (`slowapi`
-  `memory://` already enforces global endpoint rate limits). Building Redis-only
-  per-key tenant accounting next would add zero value in single-key stateless pods,
-  whereas stateless-compatible `robots.txt`, `USER_AGENT`, and `Crawl-delay`
-  controls immediately protect live egress. If multi-tenant quotas are activated
-  later, they should either target a Redis-backed deployment or implement a
-  `QUOTA_STORAGE_URI → REDIS_URI → memory://` fallback chain matching `slowapi`.
-  Details in `TODO.md` and `docs/roadmap.md`.
-- **Decision (Lazy unified `PlaywrightPDFGenerator` pool & unblinded offline gate):**
-  Unified browser lifecycle management on a lazily initialized `BrowserPool` inside
-  `PlaywrightPDFGenerator` (deferring Chromium startup until the first PDF or
-  rendered-HTML call rather than FastAPI lifespan startup) and hardened the default
-  fast test gate with `tests/smoke/test_repo_hygiene.py` (enforcing ADR-005
-  portability and repo-relative Markdown link resolution) plus deterministic
-  allowlisted fixture DNS in `tests/conftest.py`.
-- **Why (Fast, deterministic verification):** Lazy browser pool initialization keeps
-  non-browser requests and `TestClient` suites free of multi-second Chromium spawn
-  overhead, while allowlisted offline fixture DNS lets SSRF loopback/private-IP and
-  mocked route tests run sub-second in network-isolated sandboxes without masking
-  real defects.
-
----
-
-## 2026-08-20 — Adopted gen-3 planning layout
-
-- **Decision:** Migrated to the gen-3 planning workflow. Live status lives ONLY in
-  `TODO.md`; `spec/` holds the WHAT (status-free, protected); `docs/` holds
-  planning/ops (roadmap, guides, feature-history archives); this file is the
-  decision log; `CRITICAL.md` registers protected paths.
-- **Moves:** `PLAN.md` → `TODO.md`; `docs/api/api-reference.md` → `spec/contracts.md`.
-  Task IDs normalized to lowercase feature slugs (`S4-BE-1` → `S4-be-1`).
-- **Why:** One source of truth for status; separate the WHAT from the HOW;
-  stop shipping dead `.claude/plans/...` links (plans are local/gitignored).
-- **Cleanup:** Dead `.claude/plans/*.md` links in `docs/features/*.md` archives
-  replaced with `—`; stale `product/` references in `docs/README.md` removed
-  (that directory does not exist in this repo).
-
----
-
-## Prior decisions (recovered from history / archives)
-
-- **Rate-limit storage fallback chain** — `RATELIMIT_STORAGE_URI → REDIS_URI →
-  memory://`. Rate limiting degrades gracefully to in-memory when Redis is absent.
-  (S0-doc-5; see `.env.example`, `docs/guides/configuration.md`.)
-- **503 over silent failure when Redis is down** — batch/schedule endpoints return
-  a clear 503 naming the feature that requires Redis, rather than failing opaquely.
-  (S0-be-1.)
-- **Consistent error envelope** — `ErrorResponse` `detail` wrapping is uniform
-  across routes and the OpenAPI schema matches the actual response shape. (S0-be-2.)
-- **SSRF blocked by default** — `SSRF_BLOCK_PRIVATE_IPS=true`; localhost/private IPs
-  and `file://` are blocked. Security posture is opt-out, not opt-in.
-- **Content negotiation via `Accept` header** — one `GET /{url}` endpoint serves
-  text/markdown/html/pdf/json rather than separate endpoints per format.
-- **Implicit Playwright fallback in batch** — batch processing falls back to browser
-  rendering when needed; documented rather than made a required explicit flag. (S0-doc-3.)
+- [`docs/archive/decisions-history.md`](docs/archive/decisions-history.md) — Decisions from `2025` through `2026-11-12` (`v0.3.0`–`v0.6.1`, gen-3 planning layout, Sprint 4 re-alignment, and `v0.7.0` replan).

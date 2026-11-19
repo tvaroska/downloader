@@ -19,8 +19,8 @@ Completed: 2026-11-12
 ### Graceful Shutdown with Connection Drain (Priority: P2)
 - [x] `DrainCoordinator` and `DrainMiddleware` in `src/downloader/drain.py`
 - [x] In-flight non-health request tracking; new requests rejected with `HTTP 503` (`service_draining`, `Connection: close`, `Retry-After: 5`) once shutdown begins
-- [x] `GET /health` flips to `HTTP 503` with `status: "draining"` and `active_requests` count for Kubernetes readiness eviction
-- [x] `JobManager.wait_for_active_jobs()` waits up to `SHUTDOWN_DRAIN_TIMEOUT` (`30s` default) before teardown; `Dockerfile` and Compose files pass `--timeout-graceful-shutdown 35`
+- [x] `GET /health` flips to `HTTP 503` with `status: "draining"` and `active_requests` count for Kubernetes readiness eviction, held open for `SHUTDOWN_PRE_STOP_DELAY` (`2.0s` default) after `SIGTERM` before closing listening sockets
+- [x] `JobManager.wait_for_active_jobs()` waits up to `SHUTDOWN_DRAIN_TIMEOUT` (`30s` default) for active batch jobs and tracked webhooks before teardown; `Dockerfile` and Compose files pass `--timeout-graceful-shutdown 35`
 
 ### Split Worker Architecture (Priority: P2)
 - [x] `DEPLOYMENT_MODE=all|api|worker` (`all` default preserves zero-overhead single-pod stateless behavior)

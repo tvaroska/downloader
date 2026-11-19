@@ -167,7 +167,7 @@ Comprehensive configuration template with:
 ### Basic Usage (Development)
 ```bash
 # No configuration needed! Sensible defaults for everything
-uvicorn src.downloader.main:app --reload
+uvicorn downloader.main:app --reload
 ```
 
 ### Production Configuration
@@ -188,7 +188,7 @@ CORS_ALLOWED_ORIGINS=https://yourdomain.com
 ### Accessing Configuration in Code
 ```python
 # Via dependency injection (recommended)
-from src.downloader.dependencies import SettingsDep
+from downloader.dependencies import SettingsDep
 
 @app.get("/example")
 async def example(settings: SettingsDep):
@@ -196,7 +196,7 @@ async def example(settings: SettingsDep):
     return {"max_size_mb": max_size / 1024 / 1024}
 
 # Direct access
-from src.downloader.config import get_settings
+from downloader.config import get_settings
 
 settings = get_settings()
 print(f"PDF concurrency: {settings.pdf.concurrency}")
@@ -204,10 +204,10 @@ print(f"PDF concurrency: {settings.pdf.concurrency}")
 
 ### Structured Logging
 ```python
-from src.downloader.logging_config import get_logger, log_with_context
+from downloader.logging_config import log_with_context
 import logging
 
-logger = get_logger(__name__)
+logger = logging.getLogger(__name__)
 
 # Regular logging
 logger.info("Download started")
@@ -272,7 +272,7 @@ log_with_context(
 The application validates configuration on startup and logs warnings:
 
 ```
-INFO: Starting REST API Downloader v0.0.1
+INFO: Starting REST API Downloader v0.7.1
 INFO: Environment: production
 WARNING: CORS allows all origins in production
 INFO: PDF concurrency: 8
@@ -363,7 +363,8 @@ For existing deployments, no code changes required. The system uses sensible def
 If you were using environment variables before, they still work:
 
 ```bash
-# Old way (still works)
+# Old way (still works; explicit PDF_CONCURRENCY must be <= PDF_POOL_SIZE)
+export PDF_POOL_SIZE=8
 export PDF_CONCURRENCY=8
 export BATCH_CONCURRENCY=32
 export REDIS_URI=redis://localhost:6379

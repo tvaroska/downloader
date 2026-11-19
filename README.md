@@ -9,7 +9,7 @@ FastAPI web service for programmatic URL content downloading, DOM article extrac
   - Enforces private, shared (`100.64.0.0/10`), and non-global IP blocks across initial DNS pre-flight, every `3xx` HTTP redirect hop, `/robots.txt` fetches, outbound webhooks (`follow_redirects=False`), `/schedules` and `/batch` creation, and Chromium rendering (combining `context.route("**/*", ...)`, `service_workers="block"`, post-navigation `redirected_from` / `page.url` re-validation, and an in-process loopback SSRF-pinning HTTP/CONNECT proxy).
   - Blocks `127.0.0.1`, `*.localhost`, RFC1918 private ranges, RFC 6598 shared address space (`100.64.0.0/10`), link-local / cloud metadata (`169.254.169.254`), `file://` URIs, and hex/octal/integer/IPv4-mapped-IPv6 encodings.
 - **Single-Fetch Bounded Chromium Pool (`pdf_semaphore`) & Allowlisted Actions**:
-  - Unifies all headless Chromium pathways (`Accept: application/pdf`, `Accept: image/png|jpeg`, `?output=screenshot|pdf`, `?render=true`, `?wait_for=`, and `POST /render`) under a single `pdf_semaphore` (`PDF_CONCURRENCY`, default `CPUx2`, max `12`) without redundant pre-flight HTTP fetches.
+  - Unifies all headless Chromium pathways (`Accept: application/pdf`, `Accept: image/png|jpeg`, `?output=screenshot|pdf`, `?render=true`, `?wait_for=`, and `POST /render`) under a single `pdf_semaphore` (`PDF_CONCURRENCY`, default `min(CPUx2, PDF_POOL_SIZE)`, explicit values must be `<= PDF_POOL_SIZE`) without redundant pre-flight HTTP fetches.
   - Uses single-pass `domcontentloaded` navigation with a bounded non-fatal `networkidle` settle (`min(timeout_ms, 2500)`), eliminating `10s-20s` hangs on tracker-heavy origins (`v0.6.2`).
   - Supports strictly allowlisted declarative Playwright actions (`click`, `fill`, `select`, `scroll`, `wait`, `wait_for_selector`, `hover`, `press`; max `20` steps) with zero arbitrary JavaScript evaluation (`src/downloader/browser/actions.py`).
   - Fails fast with `HTTP 503` (`service_unavailable`) when the browser pool is saturated on explicit PDF/screenshot/`?render=true` requests, while degrading gracefully to static HTML extraction on automatic JS-detection fallbacks.
@@ -25,7 +25,7 @@ FastAPI web service for programmatic URL content downloading, DOM article extrac
 - **SSRF-Safe HMAC Webhooks**:
   - Batch and schedule completion webhooks (`webhook_url`, optional `webhook_secret`) validate target URLs at creation and delivery time, sign JSON payloads with `X-Downloader-Signature-256: sha256=<hex>`, never echo `webhook_secret` in API responses, and fire strictly after batch results persist in Redis.
 - **Graceful Shutdown, Split Workers & Opt-In OpenTelemetry**:
-  - `DrainCoordinator` and `DrainMiddleware` return `HTTP 503` (`service_draining`, `Connection: close`, `Retry-After: 5`) and flip `GET /health` to `503` during shutdown while waiting up to `SHUTDOWN_DRAIN_TIMEOUT` (`30s`) for in-flight requests and active jobs to finish.
+  - `DrainCoordinator` and `DrainMiddleware` return `HTTP 503` (`service_draining`, `Connection: close`, `Retry-After: 5`) and hold `GET /health` at `503` for `SHUTDOWN_PRE_STOP_DELAY` (`2.0s` default) after `SIGTERM` before closing listening sockets, then wait up to `SHUTDOWN_DRAIN_TIMEOUT` (`30s`) for in-flight requests, active jobs, and webhooks to finish.
   - `DEPLOYMENT_MODE=all|api|worker` keeps stateless single-pod behavior by default (`all`), or separates stateless API pods from Playwright/scheduler workers via Redis `BLMOVE` queues and remote browser RPC (`docker-compose.split.yml`).
   - Opt-in OpenTelemetry (`OTEL_ENABLED=false` default) traces FastAPI, `httpx`, Redis, Playwright, OCR, webhooks, and worker jobs with `trace_id`/`span_id` JSON log correlation, `X-Trace-ID` headers, and W3C `traceparent` queue propagation.
 - **Active Moving-Window Rate Limiting**: Multi-tier limits (fallback order: `RATELIMIT_STORAGE_URI`, then `REDIS_URI`, then `memory://`) with right-to-left trusted-proxy `X-Forwarded-For` parsing (`RATELIMIT_TRUSTED_PROXIES`), separate authenticated vs. unauthenticated buckets, `X-RateLimit-{Limit,Remaining,Reset}` headers, and `HTTP 429` (`rate_limit_exceeded`) with `Retry-After`:
@@ -142,10 +142,11 @@ First-party typed SDKs with offline unit tests live in [`sdks/`](sdks):
 Configured via environment variables (see `.env.example` and [`docs/guides/configuration.md`](docs/guides/configuration.md) for the full reference):
 
 ### Core & Authentication
-- `DOWNLOADER_KEY`: API key for Bearer / `X-API-Key` authentication (optional in local dev; required in production)
+- `DOWNLOADER_KEY`: API key for Bearer / `X-API-Key` authentication (optional in local dev; required in production unless `AUTH_ALLOW_UNAUTHENTICATED_PRODUCTION=true`)
+- `AUTH_ALLOW_UNAUTHENTICATED_PRODUCTION`: Explicit opt-out (`false` default) permitting `ENVIRONMENT=production` startup without `DOWNLOADER_KEY`
 - `REDIS_URI`: Redis connection string for `/batch`, `/schedules`, split worker queues, and shared rate-limit / `robots.txt` state
 - `ENVIRONMENT`: `development`, `staging`, or `production` (`production` disables `/docs`, `/redoc`, and `/openapi.json`)
-- `DEPLOYMENT_MODE`: `all` (default monolith/stateless pod), `api` (offloads batch/browser to Redis), or `worker` (standalone `src.downloader.worker`)
+- `DEPLOYMENT_MODE`: `all` (default monolith/stateless pod), `api` (offloads batch/browser to Redis), or `worker` (standalone `downloader.worker`)
 
 ### HTTP Client, OCR & Content Limits
 - `HTTP_MAX_CONNECTIONS`: Max total HTTP connections (default: `200`)
@@ -154,10 +155,10 @@ Configured via environment variables (see `.env.example` and [`docs/guides/confi
 - `OCR_ENABLED` / `OCR_DEFAULT_LANGUAGE` / `OCR_MAX_PIXELS`: Tesseract OCR extraction (`true`, `eng`, `25_000_000` pixel cap)
 
 ### Webhooks, Shutdown Drain, Workers & OpenTelemetry
-- `WEBHOOK_ENABLED` / `WEBHOOK_TIMEOUT_SECONDS` / `WEBHOOK_MAX_RETRIES`: Post-persistence SSRF-safe HMAC-SHA256 webhooks (`true`, `10.0s`, `3`)
-- `SHUTDOWN_DRAIN_TIMEOUT` / `SHUTDOWN_POLL_INTERVAL`: Graceful shutdown connection and job drain (`30.0s`, `0.25s`)
-- `WORKER_POLL_TIMEOUT` / `WORKER_BROWSER_TASK_TIMEOUT` / `WORKER_MAX_CONCURRENT_JOBS`: Split worker queue polling and browser RPC settings (`5.0s`, `60.0s`, `4`)
-- `OTEL_ENABLED` / `OTEL_SERVICE_NAME` / `OTEL_EXPORTER_OTLP_ENDPOINT` / `OTEL_CONSOLE_EXPORTER`: Opt-in OpenTelemetry distributed tracing (`false` default)
+- `WEBHOOK_ENABLED` / `WEBHOOK_TIMEOUT_SECONDS` / `WEBHOOK_MAX_RETRIES` / `WEBHOOK_SECRET_KEY`: Post-persistence SSRF-safe HMAC-SHA256 webhooks (`true`, `10.0s`, `3`; optional encryption key for secrets at rest in Redis)
+- `SHUTDOWN_DRAIN_TIMEOUT` / `SHUTDOWN_PRE_STOP_DELAY`: Graceful shutdown drain timeout (`30.0s`) and `/health` `503` pre-stop hold delay (`2.0s`)
+- `WORKER_POLL_TIMEOUT` / `WORKER_BROWSER_TASK_TIMEOUT` / `WORKER_MAX_CONCURRENT_JOBS` / `WORKER_MAX_ATTEMPTS` / `WORKER_HEARTBEAT_TTL` / `WORKER_MAX_REMOTE_BROWSER_CALLS` / `WORKER_METRICS_PORT`: Split worker polling, browser RPC, reclaim caps, and optional Prometheus listener (`2.0s`, `45.0s`, `4`, `3`, `60s`, `8`, `null`)
+- `OTEL_ENABLED` / `OTEL_SERVICE_NAME` / `OTEL_EXPORTER_OTLP_ENDPOINT` / `OTEL_CONSOLE_EXPORTER`: Opt-in OpenTelemetry distributed tracing (`false` default; base OTLP URL automatically appends `/v1/traces`)
 
 ### Ethical Crawling
 - `USER_AGENT`: Outbound HTTP and Playwright `User-Agent` (default: `REST-API-Downloader/1.0`)
@@ -178,7 +179,8 @@ Configured via environment variables (see `.env.example` and [`docs/guides/confi
 ### Batch & Browser Pool Lifecycle
 - `BATCH_CONCURRENCY`: Max concurrent batch requests (default: `CPUx8`, max `50`)
 - `BATCH_MAX_URLS_PER_BATCH`: Max URLs per batch (default: `50`)
-- `PDF_CONCURRENCY`: Max concurrent Playwright renders across PDF, screenshot, and HTML (default: `CPUx2`, max `12`)
+- `PDF_POOL_SIZE`: Browser instances in pool (default: `3`)
+- `PDF_CONCURRENCY`: Max concurrent Playwright renders across PDF, screenshot, and HTML (default: `min(CPUx2, PDF_POOL_SIZE)`; explicit values must not exceed `PDF_POOL_SIZE`)
 - `PDF_PAGE_LOAD_TIMEOUT`: Playwright timeout in ms (default: `30000`)
 - `PDF_MAX_USES_PER_BROWSER`: Recycle Chromium instance after N renders (default: `50`)
 - `PDF_IDLE_TIMEOUT`: Close idle browser pool after N seconds / scale-to-zero (default: `600.0`)
@@ -211,9 +213,9 @@ uv run --no-sync pytest -m integration -v
 uv run --no-sync pytest -m e2e -v
 ```
 
-## Implementation Status (`v0.7.0`)
+## Implementation Status (`v0.7.1`)
 
-**Delivered through `v0.7.0`:**
+**Delivered through `v0.7.1`:**
 - Single-pass `domcontentloaded` + bounded `networkidle` settle (`v0.6.2`) eliminating navigation hangs on tracker-heavy origins
 - Direct URL endpoint (`GET /{url}`) with single- and multi-format `Accept` content negotiation (`text/plain`, `text/markdown`, `text/html`, `application/json`, `application/pdf`, `image/png`, `image/jpeg`) plus `?output=screenshot|pdf`, `?actions=`, and `?ocr=true`
 - Scripted rendering endpoint (`POST /render`) executing strictly allowlisted declarative Playwright actions (`src/downloader/browser/actions.py`, zero raw JS eval)

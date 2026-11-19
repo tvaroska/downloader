@@ -1,6 +1,6 @@
 # REST API Downloader - API Reference
 
-**Last Updated:** 2026-11-18
+**Last Updated:** 2026-11-19
 
 Complete API documentation for the REST API Downloader service (`v0.7.1`).
 
@@ -18,7 +18,8 @@ API key authentication is supported and can be enabled by setting the `DOWNLOADE
 
 | Environment Variable | Description |
 |---------------------|-------------|
-| `DOWNLOADER_KEY` | API key for authentication. When set, all endpoints (including `/metrics*`) require a valid API key except `GET /health`, which remains public for liveness/readiness probes. |
+| `DOWNLOADER_KEY` | API key for authentication. When set, all endpoints (including `/metrics*`) require a valid API key except `GET /health`, which remains public for liveness/readiness probes. Required on startup when `ENVIRONMENT=production` unless `AUTH_ALLOW_UNAUTHENTICATED_PRODUCTION=true`. |
+| `AUTH_ALLOW_UNAUTHENTICATED_PRODUCTION` | Explicit opt-out (`false` default) allowing `ENVIRONMENT=production` to start without `DOWNLOADER_KEY`. |
 
 > **OpenAPI & Interactive Docs Surface:** Interactive documentation (`/docs`, `/docs/oauth2-redirect`, `/redoc`) and `/openapi.json` are enabled in `development` and `staging`, and return `HTTP 404` when `ENVIRONMENT=production`.
 
@@ -116,7 +117,7 @@ Check service health, version, deployment mode, connection drain state, and spli
   "status": "healthy",
   "draining": false,
   "active_requests": 0,
-  "version": "0.7.0",
+  "version": "0.7.1",
   "environment": "production",
   "deployment_mode": "all",
   "telemetry_enabled": false,
@@ -131,10 +132,29 @@ Check service health, version, deployment mode, connection drain state, and spli
     "webhooks_enabled": true
   },
   "services": {
-    "job_manager": { "available": true, "status": "healthy" },
-    "batch_processing": { "available": true },
-    "pdf_generation": { "available": true },
-    "scheduler": { "available": true },
+    "job_manager": { "available": true, "status": "connected" },
+    "batch_processing": {
+      "available": true,
+      "max_concurrent_downloads": 10,
+      "current_active_downloads": 0,
+      "available_slots": 10,
+      "utilization_percent": 0.0
+    },
+    "pdf_generation": {
+      "available": true,
+      "max_concurrent_pdfs": 3,
+      "current_active_pdfs": 0,
+      "available_slots": 3,
+      "utilization_percent": 0.0
+    },
+    "scheduler": {
+      "available": true,
+      "status": "running",
+      "job_store_type": "redis",
+      "total_jobs": 0,
+      "pending_jobs": 0,
+      "next_run_time": null
+    },
     "workers": {
       "deployment_mode": "all",
       "remote_browser_enabled": false,
@@ -149,7 +169,7 @@ Check service health, version, deployment mode, connection drain state, and spli
 }
 ```
 
-When `REDIS_URI` is configured, `services.workers.queue_configured` is `true` (unauthenticated `/health` omits worker hostnames, queue depths, and raw Redis exception text). When `DOWNLOADER_KEY` is unset, `auth_enabled` is `false` and `auth_methods` is `null`.
+When `REDIS_URI` is configured, `services.workers.queue_configured` is `true` (unauthenticated `/health` omits worker hostnames, queue depths, and raw Redis exception text, and caches Redis/scheduler probes). When `DOWNLOADER_KEY` is unset, `auth_enabled` is `false` and `auth_methods` is `null`.
 
 **Draining Response (`503 Service Unavailable` during graceful shutdown):**
 ```json
@@ -157,17 +177,48 @@ When `REDIS_URI` is configured, `services.workers.queue_configured` is `true` (u
   "status": "draining",
   "draining": true,
   "active_requests": 2,
-  "version": "0.7.0",
+  "version": "0.7.1",
   "environment": "production",
   "deployment_mode": "all",
   "telemetry_enabled": false,
-  "auth_enabled": true
+  "configuration": {
+    "pdf_concurrency": 3,
+    "batch_concurrency": 10,
+    "max_download_size_mb": 50.0,
+    "cpu_cores": 4,
+    "respect_robots_txt": true,
+    "user_agent": "REST-API-Downloader/1.0",
+    "ocr_enabled": true,
+    "webhooks_enabled": true
+  },
+  "services": {
+    "job_manager": { "available": false, "reason": "Redis connection required" },
+    "batch_processing": { "available": false, "reason": "Redis connection (REDIS_URI) required" },
+    "pdf_generation": {
+      "available": true,
+      "max_concurrent_pdfs": 3,
+      "current_active_pdfs": 0,
+      "available_slots": 3,
+      "utilization_percent": 0.0
+    },
+    "scheduler": { "available": false, "reason": "Redis connection required" },
+    "workers": {
+      "deployment_mode": "all",
+      "remote_browser_enabled": false,
+      "queue_configured": false
+    }
+  },
+  "auth_enabled": true,
+  "auth_methods": [
+    "Authorization: Bearer <api_key>",
+    "X-API-Key: <api_key>"
+  ]
 }
 ```
 
 **Status Codes:**
 - `200` - Service is healthy and ready to accept traffic
-- `503` - Service is draining active connections during graceful shutdown (non-`/health` endpoints also include `Connection: close` and `Retry-After: 5`)
+- `503` - Service is draining active connections during graceful shutdown (held open for `SHUTDOWN_PRE_STOP_DELAY`, default `2.0s`, after `SIGTERM` so readiness probes observe `503`; non-`/health` endpoints also include `Connection: close` and `Retry-After: 5`)
 
 ---
 
@@ -195,7 +246,7 @@ Download and process content from any public URL with intelligent content extrac
 | `full_page` | boolean | `false` | Capture the full scrollable page when rendering a screenshot (`output=screenshot` or `Accept: image/png|jpeg`). |
 | `screenshot_format` | string | `png` | Image encoding for screenshot captures: `png` (`image/png`) or `jpeg` (`image/jpeg`). |
 | `actions` | string | `null` | URL-encoded JSON array (max 8192 chars, max 20 actions) of strictly allowlisted declarative Playwright actions (`click`, `fill`, `select`, `scroll`, `wait`, `wait_for_selector`, `hover`, `press`; zero raw JS evaluation). Implies `render=true`. |
-| `ocr` | boolean | `false` | Require Tesseract OCR extraction (returns `HTTP 422` if origin is not a supported `image/*` content type, or `HTTP 503` `ocr_unavailable` if `tesseract` is unavailable or `OCR_ENABLED=false`). Image origins also run OCR automatically when `Accept` requests `text/plain`, `text/markdown`, or `text/html`. |
+| `ocr` | boolean | `false` | Require Tesseract OCR extraction (returns `HTTP 400` `validation_error` if origin is not a supported `image/*` content type, `HTTP 422` `ocr_error` on image decode/pixel-cap/OCR failures, or `HTTP 503` `ocr_unavailable` if `tesseract` is unavailable or `OCR_ENABLED=false`). Image origins also run OCR automatically when `Accept` requests `text/plain` or `text/markdown`. |
 | `ocr_lang` | string | `null` | Optional Tesseract OCR language code (validated against `^[a-zA-Z0-9_+]{1,64}$`, e.g., `eng`, `eng+deu`). |
 
 **Common Response Headers:**
@@ -617,16 +668,27 @@ Get all service metrics in Prometheus text exposition format for scraping.
 ```
 Content-Type: text/plain; version=0.0.4; charset=utf-8
 
-# HELP downloader_requests_total Total requests
+# HELP downloader_uptime_seconds Time since service started
+# TYPE downloader_uptime_seconds gauge
+downloader_uptime_seconds 3600.5
+
+# HELP downloader_requests_total Total number of requests
 # TYPE downloader_requests_total counter
-downloader_requests_total 1234
-# HELP downloader_request_duration_seconds Request duration
-# TYPE downloader_request_duration_seconds histogram
-downloader_request_duration_seconds_sum 456.78
-downloader_request_duration_seconds_count 1234
-# HELP downloader_errors_total Total errors
+downloader_requests_total{endpoint="GET_/download"} 1234
+
+# HELP downloader_requests_by_status_total Total number of requests by HTTP status code
+# TYPE downloader_requests_by_status_total counter
+downloader_requests_by_status_total{status="200"} 1222
+
+# HELP downloader_errors_total Total number of server (5xx) errors
 # TYPE downloader_errors_total counter
-downloader_errors_total 12
+downloader_errors_total{endpoint="GET_/download"} 12
+
+# HELP downloader_response_time_seconds Response time histogram
+# TYPE downloader_response_time_seconds histogram
+downloader_response_time_seconds_sum{endpoint="GET_/download"} 456.78
+downloader_response_time_seconds_count{endpoint="GET_/download"} 1234
+
 # HELP robots_evaluations_total Total robots.txt evaluations
 # TYPE robots_evaluations_total counter
 robots_evaluations_total 850
@@ -726,13 +788,13 @@ Get real-time system resource usage and concurrency statistics.
 **Response:**
 ```json
 {
-  "timestamp": 1737460800.0,
+  "timestamp": "2026-11-19T12:00:00+00:00",
   "concurrency": {
     "pdf": {
-      "limit": 4,
+      "limit": 3,
       "active": 1,
-      "available": 3,
-      "utilization_percent": 25.0
+      "available": 2,
+      "utilization_percent": 33.3
     },
     "batch": {
       "limit": 16,
@@ -749,17 +811,15 @@ Get real-time system resource usage and concurrency statistics.
     "overall_avg_response_time": 0.37
   },
   "connections": {
-    "redis": {
-      "status": "not_configured"
-    },
+    "redis": {},
     "http_client": {
       "status": "healthy"
     }
   },
   "system": {
     "cpu_cores": 4,
-    "pdf_scaling": "2x CPU cores (max 12), current: 4",
-    "batch_scaling": "8x CPU cores (max 50), current: 16"
+    "pdf_scaling": "Pool-bounded (3 browsers, concurrency 3)",
+    "batch_scaling": "8x CPU cores (max 50)"
   }
 }
 ```
@@ -856,7 +916,9 @@ Returned on `GET /{url}` (and recorded per item in `POST /batch` and `/schedules
 }
 ```
 
-#### HTTP Client Errors
+#### HTTP Client & Browser Upstream Errors
+
+Upstream `4xx` responses (including `401`, `403`, `404`, and `429`) pass through their HTTP status code with `error_type: "http_error"`. Upstream `5xx` responses map to `502 Bad Gateway` (`error_type: "http_error"`) on both HTTP and browser capture paths. Browser capture failures without an upstream status map to `500` with `pdf_generation_error`, `screenshot_generation_error`, or `render_error` (`POST /render`).
 
 **404 Not Found:**
 ```json
@@ -869,18 +931,18 @@ Returned on `GET /{url}` (and recorded per item in `POST /batch` and `/schedules
 }
 ```
 
-**403 Forbidden:**
+**401 Unauthorized / 403 Forbidden / 429 Too Many Requests (upstream passthrough):**
 ```json
 {
   "detail": {
     "success": false,
-    "error": "HTTP 403: Forbidden",
+    "error": "HTTP 429: Too Many Requests",
     "error_type": "http_error"
   }
 }
 ```
 
-**502 Bad Gateway:**
+**502 Bad Gateway (upstream 5xx):**
 ```json
 {
   "detail": {
@@ -933,15 +995,16 @@ Returned on `GET /{url}` (and recorded per item in `POST /batch` and `/schedules
 }
 ```
 
-#### OCR Processing & Availability Errors (`422` / `503`)
+#### OCR Processing & Availability Errors (`400` / `422` / `503`)
 
-- **`422 Unprocessable Entity` (`error_type: "ocr_error"`):** Returned when `?ocr=true` targets a non-image origin, an image fails decoding, or decoded dimensions exceed `OCR_MAX_PIXELS` (`25_000_000` default decompression-bomb guard).
+- **`400 Bad Request` (`error_type: "validation_error"`):** Returned when `?ocr=true` targets a non-image origin or `ocr_lang` fails `^[a-zA-Z0-9_+]{1,64}$`.
+- **`422 Unprocessable Entity` (`error_type: "ocr_error"`):** Returned when an image fails decoding, Tesseract extraction fails/times out, or decoded dimensions exceed `OCR_MAX_PIXELS` (`25_000_000` default decompression-bomb guard).
 - **`503 Service Unavailable` (`error_type: "ocr_unavailable"`):** Returned when `OCR_ENABLED=false` or the `tesseract` system binary is unavailable on the host.
 
 #### Graceful Shutdown & Split-Worker Errors (`503` / `504`)
 
-- **`503 Service Unavailable` (`error_type: "service_draining"`):** Returned with `Connection: close` and `Retry-After: 5` by `DrainMiddleware` once pod shutdown begins while in-flight requests drain.
-- **`504 Gateway Timeout` (`error_type: "worker_timeout"`):** Returned when `DEPLOYMENT_MODE=api` dispatches a browser render/PDF/screenshot task to a remote worker via Redis and no worker completes it within `WORKER_BROWSER_TASK_TIMEOUT`.
+- **`503 Service Unavailable` (`error_type: "service_draining"`):** Returned with `Connection: close` and `Retry-After: 5` by `DrainMiddleware` once pod shutdown begins; `SIGTERM` holds `/health` at `503` for `SHUTDOWN_PRE_STOP_DELAY` (`2.0s` default) before closing listening sockets and waiting up to `SHUTDOWN_DRAIN_TIMEOUT` for in-flight requests and jobs.
+- **`504 Gateway Timeout` (`error_type: "worker_timeout"`):** Returned when `DEPLOYMENT_MODE=api` dispatches a browser render/PDF/screenshot task to a remote worker via Redis and no worker completes it within `WORKER_BROWSER_TASK_TIMEOUT` (local `POST /render` `timeout_ms` expiry returns `408 timeout_error`).
 
 ## Rate Limiting
 
@@ -1537,14 +1600,14 @@ Remove a scheduled job.
 
 ### Cron Expression Format
 
-Schedules use standard 5-field UNIX cron format:
+Schedules use standard 5-field UNIX cron format evaluated in **UTC** (both `0` and `7` denote Sunday; `*/n` and `0-7` expand with Sunday=0; when both day-of-month and day-of-week are restricted, e.g. `0 9 13 * 5`, the schedule fires when **either** matches per UNIX cron OR semantics). Unknown request fields on `POST /schedules` are rejected with `HTTP 422`.
 
 ```
 ┌───────────── minute (0-59)
 │ ┌───────────── hour (0-23)
 │ │ ┌───────────── day of month (1-31)
 │ │ │ ┌───────────── month (1-12)
-│ │ │ │ ┌───────────── day of week (0-6, 0=Sunday)
+│ │ │ │ ┌───────────── day of week (0-7, 0 or 7 = Sunday)
 │ │ │ │ │
 * * * * *
 ```
@@ -1591,7 +1654,7 @@ Failed scheduled jobs are automatically retried for transient errors:
 
 ---
 
-### Operational Configuration (`v0.7.0`)
+### Operational Configuration (`v0.7.1`)
 
 | Environment Variable | Default | Description |
 |---------------------|---------|-------------|
@@ -1602,21 +1665,28 @@ Failed scheduled jobs are automatically retried for transient errors:
 | `WEBHOOK_ENABLED` | `true` | Enable outbound batch/schedule webhook delivery |
 | `WEBHOOK_TIMEOUT_SECONDS` | `10.0` | Timeout per outbound webhook attempt in seconds (alias for `WEBHOOK_TIMEOUT`) |
 | `WEBHOOK_MAX_RETRIES` | `3` | Retry attempts on transient `5xx`/network failures |
+| `WEBHOOK_SECRET_KEY` | `null` | Optional symmetric key encrypting `webhook_secret` at rest in Redis (falls back to `DOWNLOADER_KEY`) |
 | `SHUTDOWN_DRAIN_TIMEOUT` | `30.0` | Max seconds to wait for active requests and jobs during shutdown |
+| `SHUTDOWN_PRE_STOP_DELAY` | `2.0` | Seconds after `SIGTERM` to hold `/health` at `503` before closing listening sockets |
 | `DEPLOYMENT_MODE` | `all` | Runtime topology: `all` (monolith/stateless default), `api` (offloads batch/browser via Redis), or `worker` |
 | `WORKER_POLL_TIMEOUT` | `2.0` | Worker Redis `BLMOVE` poll interval in seconds |
+| `WORKER_HEARTBEAT_INTERVAL` | `10.0` | Seconds between worker Redis heartbeat refreshes |
+| `WORKER_HEARTBEAT_TTL` | `60` | Worker heartbeat TTL in Redis (must exceed `SHUTDOWN_DRAIN_TIMEOUT + WORKER_HEARTBEAT_INTERVAL` when `DEPLOYMENT_MODE=worker`) |
+| `WORKER_MAX_ATTEMPTS` | `3` | Maximum batch job delivery attempts before dead-lettering as `failed` |
 | `WORKER_BROWSER_TASK_TIMEOUT` | `45.0` | Timeout waiting for remote worker Playwright/PDF/screenshot RPC (alias for `WORKER_REMOTE_BROWSER_TIMEOUT`) |
 | `WORKER_MAX_CONCURRENT_JOBS` | `4` | Max concurrent batch jobs processed per worker instance |
+| `WORKER_MAX_REMOTE_BROWSER_CALLS` | `8` | Max concurrent in-flight remote browser RPC calls per API process |
+| `WORKER_METRICS_PORT` | `null` | Optional TCP port exposing Prometheus `/metrics` on the standalone worker process |
 | `OTEL_ENABLED` | `false` | Opt-in OpenTelemetry distributed tracing (`false` adds zero runtime overhead) |
 | `OTEL_SERVICE_NAME` | `downloader` | OpenTelemetry service name resource attribute |
-| `OTEL_EXPORTER_OTLP_ENDPOINT` | `null` | OTLP HTTP exporter endpoint (e.g., `http://otel-collector:4318`) |
+| `OTEL_EXPORTER_OTLP_ENDPOINT` | `null` | OTLP HTTP exporter endpoint (base URLs like `http://otel-collector:4318` automatically append `/v1/traces`) |
 | `OTEL_CONSOLE_EXPORTER` | `false` | Emit OpenTelemetry spans to stdout for local debugging |
 
 ---
 
 ## Versioning
 
-Current API version: `v1.0` (service `0.7.0`)
+Current API version: `v1.0` (service `0.7.1`)
 
 Version information available via `/health` endpoint.
 

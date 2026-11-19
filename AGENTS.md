@@ -61,43 +61,48 @@ just clean
 ```
 src/downloader/
 ├── main.py                  # FastAPI app, lifespan, single BrowserRenderer/EgressPolicy wiring
-├── ports.py                 # BrowserRenderer, JobStore, WorkQueue Protocols + local/remote/in-memory adapters
+├── ports.py                 # Framework-free BrowserRenderer, JobStore, WorkQueue Protocols & error contracts
 ├── errors.py                # Single classify_domain_error exception-to-HTTP/batch/schedule table
 ├── config.py                # Pydantic Settings (60+ configurable params)
 ├── runtime_config.py        # OCR, Webhook, Shutdown, Worker & OpenTelemetry configs
-├── auth.py                  # API key authentication (Bearer / X-API-Key via secrets.compare_digest)
-├── drain.py                 # DrainCoordinator & DrainMiddleware (503 service_draining)
-├── telemetry.py             # Opt-in OpenTelemetry SDK, auto-instrumentation & W3C propagation
-├── worker.py                # Standalone split worker entrypoint (DEPLOYMENT_MODE=worker)
-├── worker_queue.py          # Reliable Redis BLMOVE batch queue, browser RPC & heartbeats
+├── auth.py                  # Settings-only API key auth (Bearer / X-API-Key via secrets.compare_digest)
+├── drain.py                 # DrainCoordinator, pre-stop SIGTERM delay & DrainMiddleware (503 service_draining)
+├── telemetry.py             # Opt-in OpenTelemetry SDK, /v1/traces normalization & W3C propagation
+├── worker.py                # Standalone split worker entrypoint & consumer loops (DEPLOYMENT_MODE=worker)
+├── worker_runtime.py        # Split worker initialization, teardown, metrics server & browser error serialization
+├── worker_queue.py          # Reliable Redis BLMOVE batch queue, Lua reclaim, browser RPC & heartbeats
 ├── validation.py            # EgressPolicy, canonical origin/host helpers & async DNS/IP SSRF protection
 ├── ssrf_transport.py        # DNS-pinned httpcore network backend & httpx transport (trust_env=False)
-├── http_client.py           # Async httpx client, injected transport, redirect policy & streaming size guard
-├── pdf_generator.py         # BrowserSession context manager, modal closer, size cap & PDF/screenshot capture
-├── job_manager.py           # Redis-based batch job tracking, drain wait & post-persist webhooks
+├── http_client.py           # Async httpx client, per-download redirect cookies, redirect policy & streaming guard
+├── pdf_generator.py         # Shared PlaywrightPDFGenerator pool facade & PDF/screenshot capture
+├── job_manager.py           # Redis batch job tracking, atomic complete_job() MULTI & post-persist webhooks
 ├── logging_config.py        # Structured JSON logging (path/method/status_code + trace_id/span_id)
 ├── middleware.py             # Metrics collection & X-Trace-ID header middleware
-├── ratelimit_middleware.py   # Moving-window rate limiting enforcement (HTTP 429)
+├── ratelimit_middleware.py   # Async limits.aio moving-window rate limiting enforcement (HTTP 429)
 ├── crawling/
 │   ├── robots.py            # RFC 9309 */$ robots.txt evaluator, short negative TTL & byte-bounded cache
 │   └── throttle.py          # Bounded Crawl-delay pacing (429 Retry-After, canonical host, atomic Redis Lua)
 ├── routes/
 │   ├── download.py          # GET /{url} - maps pure convert() results & typed errors to HTTP
 │   ├── render.py            # POST /render - scripted Playwright capture via convert()
-│   ├── batch.py             # POST /batch (actions + webhooks), job status/results/cancel via JobStore/WorkQueue
-│   ├── schedules.py         # Cron schedule CRUD (screenshot + webhooks) & execution history
+│   ├── batch.py             # POST /batch (actions + sealed webhook secrets), job status/results/cancel
+│   ├── schedules.py         # Off-loop cron schedule CRUD (screenshot + sealed webhooks) & history
 │   └── metrics.py           # Prometheus, performance, health-score & live metrics
 ├── services/
-│   ├── content_processor.py # Pure convert(request, deps) -> ConversionResult (zero FastAPI imports)
-│   ├── content_negotiation.py # Pure FORMAT_MIME_SPECS table & Accept header parsers
+│   ├── content_processor.py # Pure convert(request, deps) -> ConversionResult (zero framework imports)
+│   ├── content_negotiation.py # Pure FORMAT_MIME_SPECS table, Accept parsers & ASCII header sanitization
 │   ├── multi_format.py      # Pure parallel multi-format conversion (single DOM render, forwards force_ocr)
 │   ├── batch_processor.py   # Per-URL & background batch runner delegating to convert()
-│   └── webhooks.py          # SSRF-safe HMAC-SHA256 webhook delivery with bounded retries
-├── content_converter.py     # HTML heuristics, BrowserSession rendering & single-parse conversion
+│   └── webhooks.py          # SSRF-safe HMAC-SHA256 webhook delivery & Encrypt-then-MAC secret sealing
+├── content_converter.py     # HTML heuristics & single-parse conversion (framework-free)
 ├── scheduler/               # APScheduler for scheduled downloads delegating to convert()
-├── browser/                 # Playwright BrowserPool (accept_downloads=False), egress_proxy & actions.py
-├── models/                  # Pydantic request/response schemas
+├── browser/                 # manager.py (BrowserPool), session.py (BrowserSession), renderer.py (Local/Remote), egress_proxy.py, actions.py
+├── models/                  # Pydantic request/response, schedule & pure browser_actions schemas
 └── transformers/            # common.py single-parse extractor, markdown, plaintext & dedicated-pool OCR
+
+monitoring/
+├── prometheus.yml           # Prometheus scrape config
+└── alerting_rules.yml       # Prometheus SLO/availability alerting rules
 
 sdks/
 ├── python/                  # Typed sync & async Python client (httpx + Pydantic v2)
@@ -133,7 +138,7 @@ sdks/
 
 ## Testing Strategy
 
-4-marker pytest suite (`935` collected, `905` fast offline gate tests across `smoke` and `unit` at `>= 83%` coverage including Python/JS/Go SDK gates in `tests/smoke/test_sdk_suites.py`):
+4-marker pytest suite (`1,066` collected, `1,048` fast offline gate tests across `smoke` and `unit` at `>= 83%` enforced branch-inclusive coverage including Python/JS/Go SDK gates in `tests/smoke/test_sdk_suites.py` and `ast-grep` contract checks in `tests/test_isolation_guard.py`):
 - **Smoke (`-m smoke`)**: Auth, SSRF/validation, rate limits, server startup, governance & ADR-005 link hygiene (`<3s`)
 - **Unit (`-m unit`)**: Isolated modules, Ports/Adapters parity, middleware, browser pool, job manager, and mocked routes (`tests/conftest.py` fixture DNS)
 - **Integration (`-m integration`)**: Real Playwright PDF/HTML rendering and browser security isolation
@@ -142,10 +147,10 @@ sdks/
 ## Environment & Security Summary
 
 Full defaults live in [`.env.example`](.env.example) and [`pyproject.toml`](pyproject.toml):
-- **Auth & Docs:** `DOWNLOADER_KEY` (constant-time `secrets.compare_digest` via `Bearer` or `X-API-Key` across all routes except `GET /health`, including `/metrics*`); `ENVIRONMENT=production` disables `/docs`, `/redoc`, and `/openapi.json` (`HTTP 404`); localhost-only default `CORS_ALLOWED_ORIGINS`.
+- **Auth & Docs:** `DOWNLOADER_KEY` (Settings-only constant-time `secrets.compare_digest` via `Bearer` or `X-API-Key` across all routes except `GET /health`, including `/metrics*`; required in production unless `AUTH_ALLOW_UNAUTHENTICATED_PRODUCTION=true`); `ENVIRONMENT=production` disables `/docs`, `/redoc`, and `/openapi.json` (`HTTP 404`); localhost-only default `CORS_ALLOWED_ORIGINS`.
 - **SSRF & Output Caps:** `SSRF_BLOCK_PRIVATE_IPS=true` (async DNS resolution + DNS-pinned `SSRFSafeHTTPTransport` with `trust_env=False`, `3xx` redirect re-validation, `BrowserEgressProxy`, `service_workers="block"`, `accept_downloads=False`, and `context.route("**/*", ...)` blocking private/loopback/shared-space/`169.254.169.254`/`file://`); `CONTENT_MAX_DOWNLOAD_SIZE=52428800` (`50 MB` -> `HTTP 413` on HTTP streams and rendered HTML/PDF/screenshots).
-- **Ethical Crawling & Rate Limits:** `RESPECT_ROBOTS_TXT=true`, `USER_AGENT`, `ROBOTS_CACHE_TTL=3600`, `ROBOTS_CACHE_MAX_SIZE=1000`, `ROBOTS_FETCH_TIMEOUT=5.0`, `MAX_CRAWL_DELAY=30.0` (RFC 9309 `*`/`$` + longest-match, 60s negative failure TTL, bounded `Crawl-delay` wait -> `429 Retry-After`; Playwright sends a hard-coded `Chrome/120` UA unless `USER_AGENT` is explicitly set, while `robots.txt` is evaluated for the default `REST-API-Downloader/1.0` agent, `src/downloader/pdf_generator.py:33-76`); `RATELIMIT_ENABLED=true` and `RATELIMIT_TRUSTED_PROXIES` (`60/min` download, `20/min` `/batch`, `200/min` status/`/metrics*`/`/jobs/*`, `100/min` default, auth vs unauth bucket isolation). Scheduled downloads keep only output `content_size` (`src/downloader/scheduler/executor.py:236-253`).
-- **Runtime, Browser, OCR, Webhooks & Split Workers:** `REDIS_URI`, `HTTP_MAX_CONNECTIONS=200`, `HTTP_REQUEST_TIMEOUT=30`, `BATCH_CONCURRENCY`, `BATCH_MAX_URLS_PER_BATCH=50`, `PDF_CONCURRENCY`, `PDF_MAX_USES_PER_BROWSER=50`, `PDF_IDLE_TIMEOUT=600`, `OCR_ENABLED=true` (`OCR_DEFAULT_LANGUAGE=eng`, `OCR_MAX_PIXELS=25000000`, dedicated `downloader-ocr` pool), `WEBHOOK_ENABLED=true` (post-persistence HMAC-SHA256), `SHUTDOWN_DRAIN_TIMEOUT=30.0`, `DEPLOYMENT_MODE=all|api|worker`, `OTEL_ENABLED=false`, non-root container on `:8000`.
+- **Ethical Crawling & Rate Limits:** `RESPECT_ROBOTS_TXT=true`, `USER_AGENT`, `ROBOTS_CACHE_TTL=3600`, `ROBOTS_CACHE_MAX_SIZE=1000`, `ROBOTS_FETCH_TIMEOUT=5.0`, `MAX_CRAWL_DELAY=30.0` (RFC 9309 `*`/`$` + longest-match, 60s negative failure TTL, bounded `Crawl-delay` wait -> `429 Retry-After`; Playwright sends a hard-coded `Chrome/120` UA unless `USER_AGENT` is explicitly set, while `robots.txt` is evaluated for the default `REST-API-Downloader/1.0` agent, `src/downloader/browser/session.py`); `RATELIMIT_ENABLED=true` and `RATELIMIT_TRUSTED_PROXIES` (`60/min` download, `20/min` `/batch`, `200/min` status/`/metrics*`/`/jobs/*`, `100/min` default, auth vs unauth bucket isolation). Scheduled downloads keep only output `content_size` (`src/downloader/scheduler/executor.py`).
+- **Runtime, Browser, OCR, Webhooks & Split Workers:** `REDIS_URI`, `HTTP_MAX_CONNECTIONS=200`, `HTTP_REQUEST_TIMEOUT=30`, `BATCH_CONCURRENCY`, `BATCH_MAX_URLS_PER_BATCH=50`, `PDF_POOL_SIZE=3`, `PDF_CONCURRENCY<=PDF_POOL_SIZE`, `PDF_MAX_USES_PER_BROWSER=50`, `PDF_IDLE_TIMEOUT=600`, `OCR_ENABLED=true` (`OCR_DEFAULT_LANGUAGE=eng`, `OCR_MAX_IMAGE_PIXELS=25000000`, dedicated `downloader-ocr` pool), `WEBHOOK_ENABLED=true` (post-persistence HMAC-SHA256; sealed at rest via `WEBHOOK_SECRET_KEY`), `SHUTDOWN_DRAIN_TIMEOUT=30.0`, `SHUTDOWN_PRE_STOP_DELAY=0.0`, `DEPLOYMENT_MODE=all|api|worker`, `WORKER_MAX_ATTEMPTS=3`, `OTEL_ENABLED=false`, non-root container on `:8000`.
 
 ## Planning & Backlog Workflow (Roadmap-First, No `TODO.md`)
 
@@ -163,7 +168,7 @@ All upcoming milestones, open `- [ ]` tasks, and unscheduled backlog items live 
 | `docs/` | Guides & completed feature baselines — `docs/guides/*.md`, `docs/features/*.md` (e.g., [`docs/features/ethical-crawling.md`](docs/features/ethical-crawling.md)) |
 
 ### Verification Ladder
-- **T1 (every change — gates commit):** `proj-test downloader` (`ast-grep`, `ruff check`, `ruff format --check`, `mypy src/ tests/`, and offline fast `pytest --cov=src/downloader` suite).
+- **T1 (every change — gates commit):** `proj-test downloader` (`ruff check`, `ruff format --check`, `mypy src/ tests/`, and offline fast `pytest -n auto --cov=src/downloader --cov-fail-under=83` suite, which runs `ast-grep` via `tests/test_isolation_guard.py` and Python/JS/Go SDK tests via `tests/smoke/test_sdk_suites.py`; `just check` and `cloudbuild.yaml` also run `ast-grep` and `tsc --noEmit` directly).
 - **T2 (gates milestone completion in `docs/roadmap.md`):** Exercise the changed behavior against acceptance criteria (including `integration` / `requires_playwright` / Redis suites and SDK suites when relevant); move shipped milestones into `docs/archive/roadmap-history.md` (`proj-test roadmap-archive downloader --done`) and record decisions in `DECISIONS.md`.
 - **T3 (release gate):** Full container + Trivy `os,library` + Playwright smoke verification (`cloudbuild.yaml` / `proj-release downloader`) against [`spec/contracts.md`](spec/contracts.md).
 
