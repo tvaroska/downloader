@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import json
+import pathlib
+import re
 from typing import Any
 
 import httpx
@@ -222,7 +224,12 @@ def test_sync_client_end_to_end() -> None:
     ) as client:
         health = client.health()
         assert health.version == "0.8.3"
-        assert __version__ == "0.8.3"
+        sdk_manifest = (pathlib.Path(__file__).resolve().parents[1] / "pyproject.toml").read_text(
+            encoding="utf-8"
+        )
+        manifest_match = re.search(r'^version\s*=\s*"([^"]+)"', sdk_manifest, re.MULTILINE)
+        assert manifest_match is not None
+        assert __version__ == manifest_match.group(1)
         assert not health.draining
 
         shot = client.screenshot("https://example.com/shot", full_page=True)
