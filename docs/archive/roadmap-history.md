@@ -184,7 +184,7 @@ Close all seven Redis and split-worker `P0` bugs (`R7`–`R13`) before any deplo
 
 ## Milestone 5 - `v0.8.3`: Release Blockers, Pure Ports Split and Redis/Worker Hardening (`R77`-`R114`)
 
-*Archived from [`../roadmap.md`](../roadmap.md) on 2026-11-19 — **Implemented locally on `main` (pending `v0.8.3` release; not yet deployed to GKE)**.*
+*Archived from [`../roadmap.md`](../roadmap.md) on 2026-11-19 (shipped in `v0.8.3` on 2026-11-19).*
 
 ### Stateless production path and gates (`R77`–`R78`, `R80`–`R82`, `R88`, `R90`)
 
