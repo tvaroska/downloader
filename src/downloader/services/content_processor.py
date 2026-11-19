@@ -10,24 +10,32 @@ from collections.abc import Awaitable, Callable, Sequence
 from dataclasses import dataclass
 from typing import Literal
 
-from ..browser.actions import BrowserAction, BrowserActionError
 from ..content_converter import (
-    SelectorTimeoutError,
     convert_content,
     run_in_html_executor,
     should_use_playwright_for_html,
 )
 from ..content_encoding import is_text_convertible_content_type, resolve_charset_and_decode
-from ..http_client import ContentConversionError, ContentTooLargeError, UnsupportedMediaTypeError
 from ..metrics import (
     record_html_rendering_detection,
     record_html_rendering_duration,
     record_html_rendering_failure,
     record_html_rendering_success,
 )
+from ..models.browser_actions import BrowserAction, BrowserActionError
 from ..models.responses import ResponseMetadata
-from ..pdf_generator import PDFGeneratorError
-from ..ports import BrowserCapacityError, BrowserRenderer, LocalBrowserRenderer
+from ..ports import (
+    BrowserCapacityError,
+    BrowserPoolError,
+    BrowserRenderer,
+    ContentConversionError,
+    ContentTooLargeError,
+    CrawlDelayExceededError,
+    PDFGeneratorError,
+    RobotsDisallowedError,
+    SelectorTimeoutError,
+    UnsupportedMediaTypeError,
+)
 from ..transformers.ocr import (
     extract_text_from_image,
     format_ocr_markdown,
@@ -90,10 +98,6 @@ class ConversionDeps:
     renderer: BrowserRenderer
     http_fetcher: HTTPFallbackFetcher | None = None
 
-    @classmethod
-    def local(cls, *, http_fetcher: HTTPFallbackFetcher | None = None) -> ConversionDeps:
-        return cls(renderer=LocalBrowserRenderer(), http_fetcher=http_fetcher)
-
 
 @dataclass(frozen=True)
 class ConversionResult:
@@ -110,34 +114,63 @@ class ConversionResult:
         return self.body.decode("utf-8", errors="replace")
 
 
-def _build_conversion_headers(  # noqa: PLR0913
-    *,
-    original_url: str,
-    original_content_type: str | None = None,
-    original_size: int | None = None,
-    content_length: int | None = None,
-    rendered_with_js: bool | None = None,
-    ocr_applied: bool = False,
-    ocr_language: str | None = None,
-    content_disposition: str | None = None,
-) -> dict[str, str]:
+@dataclass(frozen=True)
+class _HeaderSpec:
+    original_url: str
+    original_content_type: str | None = None
+    original_size: int | None = None
+    content_length: int | None = None
+    rendered_with_js: bool | None = None
+    ocr_applied: bool = False
+    ocr_language: str | None = None
+    content_disposition: str | None = None
+
+
+def _build_conversion_headers(spec: _HeaderSpec) -> dict[str, str]:
     """Construct canonical `X-Original-*` and content metadata headers in one place."""
-    headers: dict[str, str] = {"X-Original-URL": original_url}
-    if original_content_type is not None:
-        headers["X-Original-Content-Type"] = original_content_type
-    if original_size is not None:
-        headers["X-Content-Length"] = str(original_size)
-    if content_length is not None:
-        headers["Content-Length"] = str(content_length)
-    if rendered_with_js is not None:
-        headers["X-Rendered-With-JS"] = "true" if rendered_with_js else "false"
-    if ocr_applied:
+    headers: dict[str, str] = {"X-Original-URL": spec.original_url}
+    if spec.original_content_type is not None:
+        headers["X-Original-Content-Type"] = spec.original_content_type
+    if spec.original_size is not None:
+        headers["X-Content-Length"] = str(spec.original_size)
+    if spec.content_length is not None:
+        headers["Content-Length"] = str(spec.content_length)
+    if spec.rendered_with_js is not None:
+        headers["X-Rendered-With-JS"] = "true" if spec.rendered_with_js else "false"
+    if spec.ocr_applied:
         headers["X-OCR-Applied"] = "true"
-        if ocr_language:
-            headers["X-OCR-Language"] = ocr_language
-    if content_disposition is not None:
-        headers["Content-Disposition"] = content_disposition
+        if spec.ocr_language:
+            headers["X-OCR-Language"] = spec.ocr_language
+    if spec.content_disposition is not None:
+        headers["Content-Disposition"] = spec.content_disposition
     return headers
+
+
+def _source_meta(
+    req: ConversionRequest,
+    fallback_size: int,
+    *,
+    default_ct: str = "text/html; charset=utf-8",
+) -> tuple[str, str, int]:
+    if req.metadata is not None:
+        return req.metadata["url"], req.metadata["content_type"], req.metadata["size"]
+    return req.url, default_ct, fallback_size
+
+
+def _make_result(
+    body: bytes,
+    media_type: str,
+    header_spec: _HeaderSpec,
+    *,
+    original_content_type: str,
+) -> ConversionResult:
+    return ConversionResult(
+        body=body,
+        media_type=media_type,
+        headers=_build_conversion_headers(header_spec),
+        original_content_type=original_content_type,
+        rendered_with_js=header_spec.rendered_with_js,
+    )
 
 
 async def render_html_with_metrics(  # noqa: PLR0913
@@ -184,12 +217,11 @@ async def _convert_pdf(req: ConversionRequest, deps: ConversionDeps) -> Conversi
         wait_for_selector=req.wait_for_selector,
         actions=req.actions,
     )
-    orig_url = req.metadata["url"] if req.metadata is not None else req.url
-    orig_ct = req.metadata["content_type"] if req.metadata is not None else "text/html"
-    return ConversionResult(
-        body=pdf_bytes,
-        media_type="application/pdf",
-        headers=_build_conversion_headers(
+    orig_url, orig_ct, _ = _source_meta(req, len(pdf_bytes), default_ct="text/html")
+    return _make_result(
+        pdf_bytes,
+        "application/pdf",
+        _HeaderSpec(
             original_url=orig_url,
             original_content_type=orig_ct,
             content_length=len(pdf_bytes),
@@ -212,12 +244,11 @@ async def _convert_screenshot(req: ConversionRequest, deps: ConversionDeps) -> C
     )
     media_type = "image/jpeg" if shot_fmt == "jpeg" else "image/png"
     ext = "jpg" if shot_fmt == "jpeg" else "png"
-    orig_url = req.metadata["url"] if req.metadata is not None else req.url
-    orig_ct = req.metadata["content_type"] if req.metadata is not None else "text/html"
-    return ConversionResult(
-        body=img_bytes,
-        media_type=media_type,
-        headers=_build_conversion_headers(
+    orig_url, orig_ct, _ = _source_meta(req, len(img_bytes), default_ct="text/html")
+    return _make_result(
+        img_bytes,
+        media_type,
+        _HeaderSpec(
             original_url=orig_url,
             original_content_type=orig_ct,
             content_length=len(img_bytes),
@@ -239,13 +270,10 @@ async def _convert_json(req: ConversionRequest, deps: ConversionDeps) -> Convers
             "metadata": metadata,
         }
     ).encode("utf-8")
-    return ConversionResult(
-        body=payload,
-        media_type="application/json",
-        headers=_build_conversion_headers(
-            original_url=metadata["url"],
-            original_size=metadata["size"],
-        ),
+    return _make_result(
+        payload,
+        "application/json",
+        _HeaderSpec(original_url=metadata["url"], original_size=metadata["size"]),
         original_content_type=metadata["content_type"],
     )
 
@@ -253,13 +281,10 @@ async def _convert_json(req: ConversionRequest, deps: ConversionDeps) -> Convers
 async def _convert_raw(req: ConversionRequest, deps: ConversionDeps) -> ConversionResult:
     content, metadata = await _require_http_payload(req, deps)
     orig_ct = metadata.get("content_type", "application/octet-stream")
-    return ConversionResult(
-        body=content,
-        media_type=orig_ct,
-        headers=_build_conversion_headers(
-            original_url=metadata["url"],
-            content_length=metadata["size"],
-        ),
+    return _make_result(
+        content,
+        orig_ct,
+        _HeaderSpec(original_url=metadata["url"], content_length=metadata["size"]),
         original_content_type=orig_ct,
     )
 
@@ -277,10 +302,10 @@ async def _maybe_convert_ocr(
         text_body = (
             format_ocr_markdown(extracted, metadata["url"]) if fmt == "markdown" else extracted
         )
-        return ConversionResult(
-            body=text_body.encode("utf-8"),
-            media_type=media_type,
-            headers=_build_conversion_headers(
+        return _make_result(
+            text_body.encode("utf-8"),
+            media_type,
+            _HeaderSpec(
                 original_url=metadata["url"],
                 original_content_type=content_type,
                 original_size=metadata["size"],
@@ -294,6 +319,27 @@ async def _maybe_convert_ocr(
             f"OCR requires an image content type, but origin returned '{content_type}'."
         )
     return None
+
+
+def _text_result_from_meta(
+    text: str,
+    media_type: str,
+    meta: tuple[str, str, int],
+    *,
+    rendered_with_js: bool | None,
+) -> ConversionResult:
+    orig_url, orig_ct, orig_size = meta
+    return _make_result(
+        text.encode("utf-8"),
+        media_type,
+        _HeaderSpec(
+            original_url=orig_url,
+            original_content_type=orig_ct,
+            original_size=orig_size,
+            rendered_with_js=rendered_with_js,
+        ),
+        original_content_type=orig_ct,
+    )
 
 
 async def _force_render_text_or_markdown(
@@ -312,35 +358,24 @@ async def _force_render_text_or_markdown(
             fail_fast=True,
         )
         assert rendered_html is not None
-        orig_url = req.metadata["url"] if req.metadata is not None else req.url
-        orig_ct = (
-            req.metadata["content_type"] if req.metadata is not None else "text/html; charset=utf-8"
+        meta = _source_meta(req, len(rendered_html))
+        converted = await run_in_html_executor(
+            convert_content, rendered_html, "text/html; charset=utf-8", fmt
         )
-        orig_size = req.metadata["size"] if req.metadata is not None else len(rendered_html)
-        converted = await run_in_html_executor(convert_content, rendered_html, "text/html", fmt)
-        return ConversionResult(
-            body=converted.encode("utf-8"),
-            media_type=media_type,
-            headers=_build_conversion_headers(
-                original_url=orig_url,
-                original_content_type=orig_ct,
-                original_size=orig_size,
-                rendered_with_js=True,
-            ),
-            original_content_type=orig_ct,
-            rendered_with_js=True,
-        )
+        return _text_result_from_meta(converted, media_type, meta, rendered_with_js=True)
     except (
         SelectorTimeoutError,
         BrowserActionError,
         URLValidationError,
+        RobotsDisallowedError,
+        CrawlDelayExceededError,
         UnsupportedMediaTypeError,
         BrowserCapacityError,
         ContentTooLargeError,
         ContentConversionError,
     ):
         raise
-    except (PDFGeneratorError, RuntimeError, OSError, TimeoutError) as exc:
+    except (PDFGeneratorError, BrowserPoolError, RuntimeError, OSError, TimeoutError) as exc:
         logger.error(f"Playwright {fmt} rendering failed for {req.url}: {exc}")
         record_html_rendering_failure()
         if req.content is None and deps.http_fetcher is None:
@@ -349,18 +384,8 @@ async def _force_render_text_or_markdown(
         converted = await run_in_html_executor(
             convert_content, content, metadata["content_type"], fmt
         )
-        return ConversionResult(
-            body=converted.encode("utf-8"),
-            media_type=media_type,
-            headers=_build_conversion_headers(
-                original_url=metadata["url"],
-                original_content_type=metadata["content_type"],
-                original_size=metadata["size"],
-                rendered_with_js=False,
-            ),
-            original_content_type=metadata["content_type"],
-            rendered_with_js=False,
-        )
+        meta = (metadata["url"], metadata["content_type"], metadata["size"])
+        return _text_result_from_meta(converted, media_type, meta, rendered_with_js=False)
 
 
 async def _try_auto_fallback_text_or_markdown(
@@ -378,9 +403,22 @@ async def _try_auto_fallback_text_or_markdown(
         return None
     try:
         return await deps.renderer.convert_fallback(req.url, fmt)
-    except (URLValidationError, ContentTooLargeError, ContentConversionError):
+    except (
+        URLValidationError,
+        RobotsDisallowedError,
+        CrawlDelayExceededError,
+        ContentTooLargeError,
+        ContentConversionError,
+    ):
         raise
-    except (PDFGeneratorError, RuntimeError, OSError, TimeoutError) as exc:
+    except (
+        PDFGeneratorError,
+        BrowserCapacityError,
+        BrowserPoolError,
+        RuntimeError,
+        OSError,
+        TimeoutError,
+    ) as exc:
         logger.warning(f"Playwright {fmt} auto-fallback failed for {req.url}: {exc}")
         return None
 
@@ -396,42 +434,19 @@ async def _convert_text_or_markdown(
 
     if req.already_rendered and not req.force_ocr:
         assert req.content is not None
-        orig_url = req.metadata["url"] if req.metadata is not None else req.url
-        orig_ct = (
-            req.metadata["content_type"] if req.metadata is not None else "text/html; charset=utf-8"
+        meta = _source_meta(req, len(req.content))
+        converted = await run_in_html_executor(
+            convert_content, req.content, "text/html; charset=utf-8", fmt
         )
-        orig_size = req.metadata["size"] if req.metadata is not None else len(req.content)
-        converted = await run_in_html_executor(convert_content, req.content, "text/html", fmt)
-        return ConversionResult(
-            body=converted.encode("utf-8"),
-            media_type=media_type,
-            headers=_build_conversion_headers(
-                original_url=orig_url,
-                original_content_type=orig_ct,
-                original_size=orig_size,
-                rendered_with_js=True,
-            ),
-            original_content_type=orig_ct,
-            rendered_with_js=True,
-        )
+        return _text_result_from_meta(converted, media_type, meta, rendered_with_js=True)
 
     if req.degraded_force_render and not req.force_ocr:
         content, metadata = await _require_http_payload(req, deps)
         converted = await run_in_html_executor(
             convert_content, content, metadata["content_type"], fmt
         )
-        return ConversionResult(
-            body=converted.encode("utf-8"),
-            media_type=media_type,
-            headers=_build_conversion_headers(
-                original_url=metadata["url"],
-                original_content_type=metadata["content_type"],
-                original_size=metadata["size"],
-                rendered_with_js=False,
-            ),
-            original_content_type=metadata["content_type"],
-            rendered_with_js=False,
-        )
+        meta = (metadata["url"], metadata["content_type"], metadata["size"])
+        return _text_result_from_meta(converted, media_type, meta, rendered_with_js=False)
 
     if req.force_render and (
         req.content is None
@@ -456,18 +471,8 @@ async def _convert_text_or_markdown(
             convert_content, content, metadata["content_type"], fmt
         )
         rendered_flag = False if (req.force_render or is_html) else None
-    return ConversionResult(
-        body=final_text.encode("utf-8"),
-        media_type=media_type,
-        headers=_build_conversion_headers(
-            original_url=metadata["url"],
-            original_content_type=metadata["content_type"],
-            original_size=metadata["size"],
-            rendered_with_js=rendered_flag,
-        ),
-        original_content_type=metadata["content_type"],
-        rendered_with_js=rendered_flag,
-    )
+    meta = (metadata["url"], metadata["content_type"], metadata["size"])
+    return _text_result_from_meta(final_text, media_type, meta, rendered_with_js=rendered_flag)
 
 
 def _static_html_result(
@@ -491,17 +496,31 @@ def _static_html_result(
         body_bytes = decoded.encode("utf-8")
         media_type = "text/html; charset=utf-8"
 
-    return ConversionResult(
-        body=body_bytes,
-        media_type=media_type,
-        headers=_build_conversion_headers(
+    return _make_result(
+        body_bytes,
+        media_type,
+        _HeaderSpec(
             original_url=metadata["url"],
             original_content_type=metadata["content_type"],
             original_size=metadata["size"],
             rendered_with_js=rendered_with_js,
         ),
         original_content_type=metadata["content_type"],
-        rendered_with_js=rendered_with_js,
+    )
+
+
+def _rendered_html_result(body: bytes, meta: tuple[str, str, int]) -> ConversionResult:
+    orig_url, orig_ct, orig_size = meta
+    return _make_result(
+        body,
+        "text/html; charset=utf-8",
+        _HeaderSpec(
+            original_url=orig_url,
+            original_content_type=orig_ct,
+            original_size=orig_size,
+            rendered_with_js=True,
+        ),
+        original_content_type=orig_ct,
     )
 
 
@@ -516,33 +535,19 @@ async def _force_render_html(req: ConversionRequest, deps: ConversionDeps) -> Co
             fail_fast=True,
         )
         assert rendered_html is not None
-        orig_url = req.metadata["url"] if req.metadata is not None else req.url
-        orig_ct = (
-            req.metadata["content_type"] if req.metadata is not None else "text/html; charset=utf-8"
-        )
-        orig_size = req.metadata["size"] if req.metadata is not None else len(rendered_html)
-        return ConversionResult(
-            body=rendered_html,
-            media_type="text/html; charset=utf-8",
-            headers=_build_conversion_headers(
-                original_url=orig_url,
-                original_content_type=orig_ct,
-                original_size=orig_size,
-                rendered_with_js=True,
-            ),
-            original_content_type=orig_ct,
-            rendered_with_js=True,
-        )
+        return _rendered_html_result(rendered_html, _source_meta(req, len(rendered_html)))
     except (
         SelectorTimeoutError,
         BrowserActionError,
         URLValidationError,
+        RobotsDisallowedError,
+        CrawlDelayExceededError,
         UnsupportedMediaTypeError,
         BrowserCapacityError,
         ContentTooLargeError,
     ):
         raise
-    except (PDFGeneratorError, RuntimeError, OSError, TimeoutError) as exc:
+    except (PDFGeneratorError, BrowserPoolError, RuntimeError, OSError, TimeoutError) as exc:
         logger.error(f"Playwright HTML rendering failed for {req.url}: {exc}")
         record_html_rendering_failure()
         if req.content is None and deps.http_fetcher is None:
@@ -554,23 +559,7 @@ async def _force_render_html(req: ConversionRequest, deps: ConversionDeps) -> Co
 async def _convert_html(req: ConversionRequest, deps: ConversionDeps) -> ConversionResult:
     if req.already_rendered and not req.force_ocr:
         assert req.content is not None
-        orig_url = req.metadata["url"] if req.metadata is not None else req.url
-        orig_ct = (
-            req.metadata["content_type"] if req.metadata is not None else "text/html; charset=utf-8"
-        )
-        orig_size = req.metadata["size"] if req.metadata is not None else len(req.content)
-        return ConversionResult(
-            body=req.content,
-            media_type="text/html; charset=utf-8",
-            headers=_build_conversion_headers(
-                original_url=orig_url,
-                original_content_type=orig_ct,
-                original_size=orig_size,
-                rendered_with_js=True,
-            ),
-            original_content_type=orig_ct,
-            rendered_with_js=True,
-        )
+        return _rendered_html_result(req.content, _source_meta(req, len(req.content)))
 
     if req.degraded_force_render and not req.force_ocr:
         content, metadata = await _require_http_payload(req, deps)
@@ -606,21 +595,24 @@ async def _convert_html(req: ConversionRequest, deps: ConversionDeps) -> Convers
                 fail_fast=False,
             )
             if rendered is not None:
-                return ConversionResult(
-                    body=rendered,
-                    media_type="text/html; charset=utf-8",
-                    headers=_build_conversion_headers(
-                        original_url=metadata["url"],
-                        original_content_type=metadata["content_type"],
-                        original_size=metadata["size"],
-                        rendered_with_js=True,
-                    ),
-                    original_content_type=metadata["content_type"],
-                    rendered_with_js=True,
-                )
-        except (SelectorTimeoutError, URLValidationError, ContentTooLargeError):
+                meta = (metadata["url"], metadata["content_type"], metadata["size"])
+                return _rendered_html_result(rendered, meta)
+        except (
+            SelectorTimeoutError,
+            URLValidationError,
+            RobotsDisallowedError,
+            CrawlDelayExceededError,
+            ContentTooLargeError,
+        ):
             raise
-        except (PDFGeneratorError, RuntimeError, OSError, TimeoutError) as exc:
+        except (
+            PDFGeneratorError,
+            BrowserCapacityError,
+            BrowserPoolError,
+            RuntimeError,
+            OSError,
+            TimeoutError,
+        ) as exc:
             logger.warning(
                 f"Auto-detected Playwright HTML rendering failed for {req.url}, serving static HTML: {exc}"
             )

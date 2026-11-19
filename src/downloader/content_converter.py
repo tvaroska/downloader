@@ -1,4 +1,4 @@
-"""HTML detection, Playwright rendering via BrowserSession, and single-parse format conversion."""
+"""Pure HTML JS-need detection, bounded HTML executor, and single-parse format conversion."""
 
 from __future__ import annotations
 
@@ -10,32 +10,26 @@ import re
 import threading
 import time
 from collections import OrderedDict
-from collections.abc import Callable, Sequence
+from collections.abc import Callable
 from concurrent.futures import ThreadPoolExecutor
 from typing import Any, Literal
 from urllib.parse import urlparse
 
 from bs4 import BeautifulSoup
-from playwright.async_api import Error as PlaywrightError
-from playwright.async_api import TimeoutError as PlaywrightTimeoutError
 
-from .browser.actions import BrowserAction, BrowserActionError, execute_browser_actions
 from .config import Settings, get_settings
 from .content_encoding import is_text_convertible_content_type, resolve_charset_and_decode
-from .http_client import ContentConversionError, ContentTooLargeError, UnsupportedMediaTypeError
-from .pdf_generator import (
-    BrowserSession,
-    PDFGeneratorError,
-    close_page_modals,
-    enforce_rendered_output_size,
-    get_shared_pdf_generator,
-    validate_browser_navigation,
+from .ports import (
+    ContentConversionError,
+    ContentTooLargeError,
+    UnsupportedMediaTypeError,
 )
-from .telemetry import get_tracer
+from .ports import (
+    SelectorTimeoutError as SelectorTimeoutError,
+)
 from .transformers.common import extract_main_content_node
 from .transformers.markdown import html_to_markdown
 from .transformers.plaintext import html_to_plaintext
-from .validation import EgressPolicy, URLValidationError
 
 logger = logging.getLogger(__name__)
 
@@ -58,30 +52,11 @@ def _get_html_executor() -> ThreadPoolExecutor:
         return _html_executor
 
 
-def shutdown_html_executor() -> None:
-    """Shut down the dedicated HTML thread pool if initialized."""
-    global _html_executor
-    with _html_executor_lock:
-        executor = _html_executor
-        _html_executor = None
-    if executor is not None:
-        executor.shutdown(wait=False, cancel_futures=True)
-
-
 async def run_in_html_executor[T](func: Callable[..., T], *args: Any, **kwargs: Any) -> T:
     """Run a CPU-bound HTML parsing or conversion function on the bounded HTML executor."""
     loop = asyncio.get_running_loop()
     call = functools.partial(func, *args, **kwargs) if kwargs else functools.partial(func, *args)
     return await loop.run_in_executor(_get_html_executor(), call)
-
-
-class SelectorTimeoutError(Exception):
-    """Raised when `wait_for_selector` times out."""
-
-    def __init__(self, selector: str, timeout_ms: int) -> None:
-        self.selector = selector
-        self.timeout_ms = timeout_ms
-        super().__init__(f"Timeout waiting for selector '{selector}' after {timeout_ms}ms")
 
 
 class BoundedCache:
@@ -157,8 +132,6 @@ def _cache_ttl() -> float:
     return float(get_settings().content.html_js_rendering_cache_ttl)
 
 
-_empty_content_cache = BoundedCache(maxsize=_cache_maxsize, ttl=_cache_ttl)
-_fallback_bypass_cache = BoundedCache(maxsize=_cache_maxsize, ttl=_cache_ttl)
 _js_heavy_cache = BoundedCache(maxsize=_cache_maxsize, ttl=_cache_ttl)
 _static_html_cache = BoundedCache(maxsize=_cache_maxsize, ttl=_cache_ttl)
 
@@ -171,7 +144,6 @@ def _is_js_heavy_domain(url: str, domains: list[str]) -> bool:
     return any(host == d or host.endswith(f".{d}") for d in clean_domains)
 
 
-_NETWORKIDLE_SETTLE_CAP_MS = 2500
 _JS_REQUIRED_RE = re.compile(
     r"please\s+enable\s+javascript"
     r"|javascript\s+is\s+required"
@@ -181,46 +153,6 @@ _JS_REQUIRED_RE = re.compile(
     r"|requires\s+javascript",
     re.IGNORECASE,
 )
-
-
-async def _navigate_and_settle(
-    session: BrowserSession,
-    url: str,
-    timeout_ms: int,
-    *,
-    include_status_in_error: bool = False,
-) -> None:
-    """Navigate once on domcontentloaded, then allow a short non-fatal networkidle settle.
-
-    Ad/tracker-heavy origins keep background connections open indefinitely, so gating
-    page.goto on networkidle stalls until timeout even after the article DOM is ready.
-    """
-    page = session.page
-    logger.info(f"Loading page with Playwright: {url}")
-    response = await page.goto(url, wait_until="domcontentloaded", timeout=timeout_ms)
-
-    if not response or response.status >= 400:
-        status_code = response.status if response else None
-        if include_status_in_error:
-            status_label = status_code if status_code is not None else "no response"
-            raise PDFGeneratorError(
-                f"Failed to load page: {url} (status: {status_label})",
-                status_code=status_code,
-            )
-        raise PDFGeneratorError(f"Failed to load page: {url}", status_code=status_code)
-
-    await validate_browser_navigation(
-        page, response, session.context, egress_policy=session._egress_policy
-    )
-
-    settle_timeout_ms = min(timeout_ms, _NETWORKIDLE_SETTLE_CAP_MS)
-    logger.debug(f"Page loaded, waiting up to {settle_timeout_ms}ms for network idle: {url}")
-    try:
-        await page.wait_for_load_state("networkidle", timeout=settle_timeout_ms)
-    except (PlaywrightTimeoutError, TimeoutError):
-        logger.debug(
-            f"Proceeding with DOM content after {settle_timeout_ms}ms networkidle settle: {url}"
-        )
 
 
 def _has_missing_metadata(soup: BeautifulSoup) -> bool:
@@ -289,11 +221,7 @@ def needs_js_render(
     settings: Settings | None = None,
     soup: BeautifulSoup | None = None,
 ) -> bool:
-    """Pure decision function: return True if static HTML likely requires JS rendering.
-
-    Shared across all output formats (HTML, Markdown, plain text, multi-format)
-    so SPA/app shells trigger Playwright rendering consistently.
-    """
+    """Pure decision function: return True if static HTML likely requires JS rendering."""
     cfg = settings if settings is not None else get_settings()
     if not cfg.content.enable_html_js_rendering or "html" not in content_type.lower():
         return False
@@ -309,11 +237,6 @@ def needs_js_render(
             return False
 
     return _classify_parsed_html_for_js(url, soup, len(content), cfg)
-
-
-def should_use_playwright_fallback(url: str, content: bytes, content_type: str) -> bool:
-    """Detect whether static HTML warrants a Playwright render fallback (unified with HTML)."""
-    return should_use_playwright_for_html(url, content, content_type)
 
 
 def should_use_playwright_for_html(url: str, content: bytes, content_type: str) -> bool:
@@ -332,109 +255,6 @@ def should_use_playwright_for_html(url: str, content: bytes, content_type: str) 
     else:
         _static_html_cache.add(url)
     return needs_js
-
-
-async def convert_content_with_playwright_fallback(
-    url: str,
-    output_format: Literal["text", "markdown"] = "text",
-    *,
-    generator: Any = None,
-    egress_policy: EgressPolicy | None = None,
-    max_output_bytes: int | None = None,
-) -> str:
-    """Render `url` via `BrowserSession` and extract text or markdown with `max_download_size` cap."""
-    active_gen = generator or get_shared_pdf_generator()
-    cfg = egress_policy.settings if egress_policy is not None else get_settings()
-    timeout_ms = cfg.content.html_js_rendering_timeout
-
-    try:
-        session = BrowserSession(active_gen, egress_policy=egress_policy)
-        async with session as (context, page):
-            await _navigate_and_settle(session, url, timeout_ms)
-            await close_page_modals(page)
-            await validate_browser_navigation(page, None, context, egress_policy=egress_policy)
-
-            html_content: str = await page.content()
-            html_bytes = html_content.encode("utf-8")
-            enforce_rendered_output_size(
-                html_bytes,
-                max_output_bytes=max_output_bytes,
-                egress_policy=egress_policy,
-            )
-            return await run_in_html_executor(_convert_html_to_format, html_content, output_format)
-    except (URLValidationError, ContentTooLargeError, ContentConversionError):
-        raise
-    except (PDFGeneratorError, PlaywrightError, TimeoutError, RuntimeError, OSError) as exc:
-        logger.debug(f"Playwright {output_format} fallback failed for {url}: {exc}")
-        raise
-
-
-async def render_html_with_playwright(  # noqa: PLR0913
-    url: str,
-    wait_for_selector: str | None = None,
-    *,
-    actions: Sequence[BrowserAction] | None = None,
-    generator: Any = None,
-    egress_policy: EgressPolicy | None = None,
-    max_output_bytes: int | None = None,
-) -> bytes:
-    """Render `url` via `BrowserSession` and return UTF-8 HTML bytes within `max_download_size`."""
-    active_gen = generator or get_shared_pdf_generator()
-    cfg = egress_policy.settings if egress_policy is not None else get_settings()
-    timeout_ms = cfg.content.html_js_rendering_timeout
-    tracer = get_tracer(__name__)
-
-    with tracer.start_as_current_span("playwright.render_html") as span:
-        span.set_attribute("http.url", url)
-        try:
-            session = BrowserSession(active_gen, egress_policy=egress_policy)
-            async with session as (context, page):
-                await _navigate_and_settle(
-                    session,
-                    url,
-                    timeout_ms,
-                    include_status_in_error=True,
-                )
-
-                if wait_for_selector:
-                    try:
-                        await page.wait_for_selector(
-                            wait_for_selector,
-                            timeout=timeout_ms,
-                            state="visible",
-                        )
-                    except (PlaywrightTimeoutError, TimeoutError) as exc:
-                        logger.warning(
-                            f"Selector '{wait_for_selector}' not found within {timeout_ms}ms on {url}"
-                        )
-                        raise SelectorTimeoutError(wait_for_selector, timeout_ms) from exc
-
-                if actions:
-                    await execute_browser_actions(page, actions, default_timeout_ms=timeout_ms)
-
-                await close_page_modals(page)
-                await validate_browser_navigation(page, None, context, egress_policy=egress_policy)
-
-                html_content: str = await page.content()
-                html_bytes = html_content.encode("utf-8")
-                enforce_rendered_output_size(
-                    html_bytes,
-                    max_output_bytes=max_output_bytes,
-                    egress_policy=egress_policy,
-                )
-                span.set_attribute("html.bytes", len(html_bytes))
-                logger.info(f"Rendered HTML extracted ({len(html_bytes)} bytes) from {url}")
-                return html_bytes
-        except (
-            SelectorTimeoutError,
-            BrowserActionError,
-            URLValidationError,
-            ContentTooLargeError,
-        ):
-            raise
-        except (PDFGeneratorError, PlaywrightError, TimeoutError, RuntimeError, OSError) as exc:
-            logger.debug(f"Playwright HTML rendering failed for {url}: {exc}")
-            raise
 
 
 def _convert_html_to_format(html_content: str, output_format: Literal["text", "markdown"]) -> str:
@@ -475,8 +295,7 @@ def convert_content(
             return _convert_html_to_format(text, output_format)
         except ContentConversionError:
             raise
-        except Exception as exc:  # noqa: BLE001
-            # BeautifulSoup/lxml/markdownify can raise RecursionError or parser errors on pathological DOMs.
+        except (RecursionError, ValueError, TypeError, RuntimeError, AttributeError) as exc:
             logger.error(f"HTML {output_format} conversion failed: {exc}")
             raise ContentConversionError(
                 f"Failed to convert HTML content to {output_format}: {exc}"

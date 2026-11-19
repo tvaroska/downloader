@@ -89,6 +89,39 @@ class TestPrometheusExpositionR64:
         panel_expr = dashboard["dashboard"]["panels"][0]["targets"][0]["expr"]
         assert panel_expr == "downloader_health_score"
 
+    def test_prometheus_trailing_newline_and_5xx_only_errors_total(self) -> None:
+        """Prometheus exposition ends with `\\n` and `downloader_errors_total` counts 5xx only (`R114`)."""
+        collector = MetricsCollector()
+        collector.record_request("/download", "GET", 404, 0.1)
+        collector.record_request("/download", "GET", 429, 0.1)
+        out_4xx = collector.get_prometheus_metrics()
+        assert out_4xx.endswith("\n")
+        assert 'downloader_errors_total{endpoint="GET_/download"}' not in out_4xx
+
+        collector.record_request("/download", "GET", 502, 0.1)
+        out_5xx = collector.get_prometheus_metrics()
+        assert out_5xx.endswith("\n")
+        assert 'downloader_errors_total{endpoint="GET_/download"} 1' in out_5xx
+
+    def test_drain_503_responses_are_counted_in_metrics(self) -> None:
+        """`MetricsMiddleware` wraps `DrainMiddleware` so drain 503s are recorded (`R114`)."""
+        from fastapi.testclient import TestClient
+
+        from downloader.main import app
+        from downloader.metrics import get_metrics_collector
+
+        collector = get_metrics_collector()
+        before = collector._counters.get("requests_total_status_503", 0.0)
+        with TestClient(app) as client:
+            app.state.drain_coordinator.start_drain()
+            try:
+                resp = client.get("/https://example.com")
+                assert resp.status_code == 503
+            finally:
+                app.state.drain_coordinator.reset()
+        after = collector._counters.get("requests_total_status_503", 0.0)
+        assert after >= before + 1.0
+
 
 @pytest.mark.unit
 class TestHealthScoreR64:
@@ -137,14 +170,9 @@ class TestPdfPoolGaugeR64:
     async def test_pdf_pool_available_uses_pool_queue_or_semaphore(self) -> None:
         collector = SystemMetricsCollector()
 
-        # 1. Pool queue present
-        queue: asyncio.Queue[object] = asyncio.Queue(maxsize=3)
-        await queue.put(object())
-        await queue.put(object())
-        pool = MagicMock()
-        pool._available_browsers = queue
+        # 1. Active pool exposes public `available_browsers` property (`R104`)
         pdf_gen = MagicMock()
-        pdf_gen.pool = pool
+        pdf_gen.available_browsers = 2
         app_state = MagicMock()
         app_state.pdf_generator = pdf_gen
         collector.app_state = app_state
@@ -152,8 +180,8 @@ class TestPdfPoolGaugeR64:
         await collector._collect_pdf_pool_metrics()
         assert collector.collector._gauges["pdf_pool_available"] == 2
 
-        # 2. Lazy pool (pool is None), falls back to pdf_semaphore._value
-        pdf_gen.pool = None
+        # 2. Lazy pool (`available_browsers` is None) falls back to pdf_semaphore._value
+        pdf_gen.available_browsers = None
         app_state.pdf_semaphore = asyncio.Semaphore(4)
         await app_state.pdf_semaphore.acquire()
         await collector._collect_pdf_pool_metrics()

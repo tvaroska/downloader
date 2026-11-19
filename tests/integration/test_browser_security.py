@@ -198,7 +198,6 @@ class TestProcessCleanup:
         assert pool.config.acquire_timeout == 30.0
         assert pool.config.headless is True
         assert pool.config.close_timeout == 5.0
-        assert pool.config.force_kill_timeout == 2.0
 
     async def test_pool_custom_config(self):
         """Test BrowserPool accepts custom config."""
@@ -206,11 +205,9 @@ class TestProcessCleanup:
             pool_size=5,
             memory_limit_mb=1024,
             close_timeout=10.0,
-            force_kill_timeout=5.0,
         )
         pool = BrowserPool(config)
 
         assert pool.config.pool_size == 5
         assert pool.config.memory_limit_mb == 1024
         assert pool.config.close_timeout == 10.0
-        assert pool.config.force_kill_timeout == 5.0

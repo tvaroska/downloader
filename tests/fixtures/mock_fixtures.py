@@ -1,11 +1,12 @@
 """Mock fixtures for external dependencies."""
 
-from collections.abc import Callable
+from __future__ import annotations
+
+import json
 from datetime import UTC, datetime, timedelta
 from typing import Any
 from unittest.mock import AsyncMock, MagicMock, patch
 
-import httpx
 import pytest
 import redis.asyncio as redis
 
@@ -13,17 +14,15 @@ from downloader.dependencies import (
     get_execution_storage_dependency,
     get_http_client,
     get_job_manager_dependency,
-    get_pdf_generator_dependency,
     get_scheduler_dependency,
 )
-from downloader.http_client import HTTPClient
 from downloader.main import app
 from downloader.models.responses import ResponseMetadata
 from downloader.models.schedule import ExecutionStatus, ScheduleExecution
 
 
 class FakeRedis:
-    """Unified in-memory async Redis fake for robots, throttle, and worker queue tests."""
+    """Unified in-memory async Redis fake for robots, throttle, schedules, and worker queue tests."""
 
     def __init__(self) -> None:
         self.store: dict[str, tuple[str, float | None]] = {}
@@ -31,9 +30,14 @@ class FakeRedis:
         self.fail_get: bool = False
         self.fail_set: bool = False
 
+    async def ping(self) -> bool:
+        if self.fail_get or self.fail_set:
+            raise redis.ConnectionError("simulated redis ping failure")
+        return True
+
     async def get(self, key: str) -> bytes | None:
         if self.fail_get:
-            raise ConnectionError("simulated redis read failure")
+            raise redis.ConnectionError("simulated redis read failure")
         entry = self.store.get(key)
         if entry is None:
             return None
@@ -46,52 +50,93 @@ class FakeRedis:
         *,
         ex: int | None = None,
         px: int | None = None,
+        nx: bool = False,
     ) -> bool:
         if self.fail_set:
-            raise ConnectionError("simulated redis write failure")
+            raise redis.ConnectionError("simulated redis write failure")
+        if nx and key in self.store:
+            return False
         ttl_s = float(ex) if ex is not None else (float(px) / 1000.0 if px is not None else None)
         self.store[key] = (value, ttl_s)
         return True
 
     async def psetex(self, key: str, time_ms: int, value: str) -> bool:
         if self.fail_set:
-            raise ConnectionError("simulated redis psetex failure")
+            raise redis.ConnectionError("simulated redis psetex failure")
         self.store[key] = (value, float(time_ms) / 1000.0)
         return True
 
     async def setex(self, key: str, ttl: int, value: str) -> bool:
         if self.fail_set:
-            raise ConnectionError("simulated redis setex failure")
+            raise redis.ConnectionError("simulated redis setex failure")
         self.store[key] = (value, float(ttl))
         return True
 
-    async def delete(self, key: str) -> int:
-        return 1 if self.store.pop(key, None) is not None else 0
+    async def delete(self, *keys: str) -> int:
+        deleted = 0
+        for key in keys:
+            if self.store.pop(key, None) is not None or self.lists.pop(key, None) is not None:
+                deleted += 1
+        return deleted
 
     async def scan(
         self, cursor: int = 0, match: str = "*", count: int = 100
     ) -> tuple[int, list[str]]:
+        del cursor, count
         prefix = match.rstrip("*")
-        keys = [k for k in self.store if k.startswith(prefix)]
+        keys = sorted(
+            {
+                *(k for k in self.store if k.startswith(prefix)),
+                *(k for k, vals in self.lists.items() if vals and k.startswith(prefix)),
+            }
+        )
         return 0, keys
 
     async def mget(self, keys: list[str]) -> list[str | None]:
         return [self.store[k][0] if k in self.store else None for k in keys]
 
-    async def eval(
-        self,
-        _script: str,
-        _numkeys: int,
-        key: str,
-        now_str: str,
-        delay_str: str,
-        max_wait_str: str | None = None,
-    ) -> str:
-        if self.fail_get or self.fail_set:
-            raise ConnectionError("Redis eval failed")
-        now_wall = float(now_str)
-        delay = float(delay_str)
-        max_wait = float(max_wait_str) if max_wait_str is not None else None
+    def _eval_release_lock(self, lock_key: str, token: str) -> int:
+        entry = self.store.get(lock_key)
+        if entry is not None and entry[0] == token:
+            self.store.pop(lock_key, None)
+            return 1
+        return 0
+
+    def _eval_reclaim_batch(self, proc_key: str, pending_key: str, max_attempts: int) -> Any:
+        bucket = self.lists.get(proc_key) or []
+        if not bucket:
+            return None
+        raw = bucket.pop()
+        try:
+            data = json.loads(raw)
+            if not isinstance(data, dict) or not data.get("job_id"):
+                return ["malformed", raw]
+        except (json.JSONDecodeError, TypeError, ValueError):
+            return ["malformed", raw]
+        next_attempt = int(data.get("attempt", 1)) + 1
+        data["attempt"] = next_attempt
+        updated = json.dumps(data, separators=(",", ":"))
+        if next_attempt > max_attempts:
+            return ["dead", updated]
+        self.lists.setdefault(pending_key, []).insert(0, updated)
+        return ["requeued", updated]
+
+    def _eval_refund_slot(self, key: str, args: list[str]) -> int:
+        expected_next, delay, now_wall = float(args[0]), float(args[1]), float(args[2])
+        entry = self.store.get(key)
+        if entry is None or abs(float(entry[0]) - expected_next) > 0.001:
+            return 0
+        refunded = float(entry[0]) - delay
+        if refunded <= now_wall:
+            self.store.pop(key, None)
+        else:
+            ttl_ms = max(1, int((refunded - now_wall) * 1000 + 0.5))
+            self.store[key] = (str(refunded), ttl_ms / 1000.0)
+        return 1
+
+    def _eval_reserve_slot(self, key: str, args: list[str]) -> str:
+        now_wall, delay = float(args[0]), float(args[1])
+        max_wait = float(args[2]) if len(args) > 2 and args[2] is not None else None
         entry = self.store.get(key)
         next_wall = float(entry[0]) if entry is not None else 0.0
         if now_wall < next_wall:
@@ -106,6 +151,26 @@ class FakeRedis:
         self.store[key] = (str(new_next), ttl_ms / 1000.0)
         return str(wait_s)
 
+    async def eval(
+        self,
+        script: str,
+        numkeys: int,
+        *keys_and_args: Any,
+    ) -> Any:
+        if self.fail_get or self.fail_set:
+            raise redis.ConnectionError("Redis eval failed")
+
+        keys = [str(k) for k in keys_and_args[:numkeys]]
+        args = [str(a) for a in keys_and_args[numkeys:]]
+
+        if "redis.call('get', KEYS[1]) == ARGV[1]" in script:
+            return self._eval_release_lock(keys[0], args[0])
+        if "RPOP" in script and "cjson.decode" in script:
+            return self._eval_reclaim_batch(keys[0], keys[1], int(args[0]))
+        if "expected_next" in script and "refunded" in script:
+            return self._eval_refund_slot(keys[0], args)
+        return self._eval_reserve_slot(keys[0], args)
+
     async def lpush(self, key: str, value: str) -> int:
         bucket = self.lists.setdefault(key, [])
         bucket.insert(0, value)
@@ -116,6 +181,14 @@ class FakeRedis:
         bucket.append(value)
         return len(bucket)
 
+    async def lrange(self, key: str, start: int, end: int) -> list[str]:
+        bucket = self.lists.get(key) or []
+        if end < 0:
+            end_idx = len(bucket) + end + 1
+        else:
+            end_idx = end + 1
+        return list(bucket[start:end_idx])
+
     async def blmove(
         self,
         first_list: str,
@@ -124,6 +197,7 @@ class FakeRedis:
         src: str = "RIGHT",
         dest: str = "LEFT",
     ) -> str | None:
+        del timeout
         src_bucket = self.lists.get(first_list) or []
         if not src_bucket:
             return None
@@ -153,6 +227,7 @@ class FakeRedis:
         return removed
 
     async def blpop(self, keys: list[str], timeout: float = 0) -> tuple[str, str] | None:
+        del timeout
         for key in keys:
             bucket = self.lists.get(key) or []
             if bucket:
@@ -160,6 +235,7 @@ class FakeRedis:
         return None
 
     async def brpop(self, keys: list[str], timeout: float = 0) -> tuple[str, str] | None:
+        del timeout
         for key in keys:
             bucket = self.lists.get(key) or []
             if bucket:
@@ -170,31 +246,64 @@ class FakeRedis:
         return len(self.lists.get(key) or [])
 
     def pipeline(self, transaction: bool = True) -> Any:
-        parent = self
+        del transaction
+        return _FakeRedisPipeline(self)
 
-        class _Pipe:
-            def __init__(self) -> None:
-                self._ops: list[tuple[str, tuple[object, ...]]] = []
 
-            async def __aenter__(self) -> "_Pipe":
-                return self
+class _FakeRedisPipeline:
+    """Minimal async Redis pipeline double for `FakeRedis`."""
 
-            async def __aexit__(self, *args: object) -> None:
-                return None
+    def __init__(self, parent: FakeRedis) -> None:
+        self._parent = parent
+        self._ops: list[tuple[str, tuple[Any, ...]]] = []
 
-            def rpush(self, key: str, value: str) -> None:
-                self._ops.append(("rpush", (key, value)))
+    async def __aenter__(self) -> _FakeRedisPipeline:
+        return self
 
-            def expire(self, key: str, ttl: int) -> None:
-                self._ops.append(("expire", (key, ttl)))
+    async def __aexit__(self, *args: object) -> None:
+        return None
 
-            async def execute(self) -> list[bool]:
-                for op, args in self._ops:
-                    if op == "rpush":
-                        await parent.rpush(str(args[0]), str(args[1]))
-                return [True] * len(self._ops)
+    async def watch(self, *keys: str) -> None:
+        del keys
 
-        return _Pipe()
+    def multi(self) -> None:
+        return None
+
+    def setex(self, key: str, ttl: int, value: str) -> _FakeRedisPipeline:
+        self._ops.append(("setex", (key, ttl, value)))
+        return self
+
+    def lpush(self, key: str, value: str) -> _FakeRedisPipeline:
+        self._ops.append(("lpush", (key, value)))
+        return self
+
+    def rpush(self, key: str, value: str) -> _FakeRedisPipeline:
+        self._ops.append(("rpush", (key, value)))
+        return self
+
+    def lrem(self, key: str, count: int, value: str) -> _FakeRedisPipeline:
+        self._ops.append(("lrem", (key, count, value)))
+        return self
+
+    def expire(self, key: str, ttl: int) -> _FakeRedisPipeline:
+        self._ops.append(("expire", (key, ttl)))
+        return self
+
+    async def execute(self) -> list[Any]:
+        results: list[Any] = []
+        for op, args in self._ops:
+            if op == "setex":
+                results.append(await self._parent.setex(str(args[0]), int(args[1]), str(args[2])))
+            elif op == "lpush":
+                results.append(await self._parent.lpush(str(args[0]), str(args[1])))
+            elif op == "rpush":
+                results.append(await self._parent.rpush(str(args[0]), str(args[1])))
+            elif op == "lrem":
+                results.append(await self._parent.lrem(str(args[0]), int(args[1]), str(args[2])))
+            else:
+                results.append(True)
+        self._ops.clear()
+        return results
 
 
 class MockPipeline:
@@ -202,11 +311,15 @@ class MockPipeline:
 
     def __init__(self) -> None:
         self.watch = AsyncMock()
-        self.multi = MagicMock()  # multi() is not async
+        self.multi = MagicMock()
         self.execute = AsyncMock(return_value=[True, True])
-        self.setex = AsyncMock()
+        self.setex = MagicMock()
+        self.lrem = MagicMock()
+        self.lpush = MagicMock()
+        self.rpush = MagicMock()
+        self.expire = MagicMock()
 
-    async def __aenter__(self) -> "MockPipeline":
+    async def __aenter__(self) -> MockPipeline:
         return self
 
     async def __aexit__(self, exc_type: object, exc_val: object, exc_tb: object) -> None:
@@ -232,30 +345,15 @@ class MockPipelineWithWatchError(MockPipeline):
 
 def make_response_metadata(**overrides: Any) -> ResponseMetadata:
     """Build a complete ResponseMetadata dictionary for tests."""
-    metadata: ResponseMetadata = {
-        "status_code": 200,
-        "headers": {"content-type": "text/html"},
-        "url": "https://example.com",
-        "size": 17,
-        "content_type": "text/html",
-        "http_version": "HTTP/1.1",
-        "connection_reused": False,
+    return {
+        "status_code": int(overrides.get("status_code", 200)),
+        "headers": dict(overrides.get("headers", {"content-type": "text/html"})),
+        "url": str(overrides.get("url", "https://example.com")),
+        "size": int(overrides.get("size", 17)),
+        "content_type": str(overrides.get("content_type", "text/html")),
+        "http_version": str(overrides.get("http_version", "HTTP/1.1")),
+        "connection_reused": overrides.get("connection_reused", False),
     }
-    metadata.update(overrides)  # type: ignore[typeddict-item]
-    return metadata
-
-
-def attach_mock_transport(
-    http_client: HTTPClient,
-    handler: Callable[[httpx.Request], httpx.Response],
-) -> None:
-    """Attach an httpx.MockTransport to an HTTPClient while preserving redirect hooks."""
-    http_client._client = httpx.AsyncClient(
-        transport=httpx.MockTransport(handler),
-        follow_redirects=True,
-        max_redirects=http_client.max_redirects,
-        event_hooks={"response": [http_client._on_response_hook]},
-    )
 
 
 @pytest.fixture
@@ -266,12 +364,7 @@ def mock_redis_client():
 
 @pytest.fixture
 def mock_http_client():
-    """
-    Fixture to mock the HTTP client with default successful response.
-
-    Returns a mock HTTP client that simulates a successful download
-    of HTML content from example.com.
-    """
+    """Fixture to mock the HTTP client with default successful response."""
     mock_client = AsyncMock()
     mock_client.download.return_value = (
         b"<html>test</html>",
@@ -282,11 +375,7 @@ def mock_http_client():
 
 @pytest.fixture
 def override_http_client(mock_http_client):
-    """
-    Fixture to override the HTTP client dependency with a mock.
-
-    Use this fixture when testing endpoints that use HTTPClientDep.
-    """
+    """Fixture to override the HTTP client dependency with a mock."""
 
     async def mock_get_http_client():
         return mock_http_client
@@ -298,11 +387,7 @@ def override_http_client(mock_http_client):
 
 @pytest.fixture
 def override_job_manager(mock_job_manager):
-    """
-    Fixture to override the job manager dependency with a mock.
-
-    Use this fixture when testing batch endpoints.
-    """
+    """Fixture to override the job manager dependency with a mock."""
 
     async def mock_get_job_manager():
         return mock_job_manager
@@ -310,22 +395,6 @@ def override_job_manager(mock_job_manager):
     app.dependency_overrides[get_job_manager_dependency] = mock_get_job_manager
     yield mock_job_manager
     app.dependency_overrides.pop(get_job_manager_dependency, None)
-
-
-@pytest.fixture
-def override_pdf_generator():
-    """
-    Fixture to override the PDF generator dependency with a mock.
-    """
-    mock_generator = AsyncMock()
-    mock_generator.generate_pdf.return_value = b"%PDF-1.4 mock content"
-
-    async def mock_get_pdf_generator():
-        return mock_generator
-
-    app.dependency_overrides[get_pdf_generator_dependency] = mock_get_pdf_generator
-    yield mock_generator
-    app.dependency_overrides.pop(get_pdf_generator_dependency, None)
 
 
 @pytest.fixture
@@ -338,16 +407,11 @@ def mock_job_manager():
 
 @pytest.fixture
 def mock_playwright():
-    """Mock playwright instance for PDF generation tests.
-
-    Creates unique browser mocks for each launch() call to ensure BrowserPool's
-    set-based storage works correctly (the set stores unique objects).
-    """
+    """Mock playwright instance for PDF generation tests."""
     with patch("downloader.browser.manager.async_playwright") as mock:
         playwright_instance = AsyncMock()
         mock.return_value.start = AsyncMock(return_value=playwright_instance)
 
-        # Track all browser instances for assertions
         browsers = []
 
         def create_browser():
@@ -356,24 +420,21 @@ def mock_playwright():
             browsers.append(browser)
             return browser
 
-        # Create a wrapper that tracks the first browser for backward compatibility
         first_browser = create_browser()
 
         async def mock_launch(*args, **kwargs):
+            del args, kwargs
             if len(browsers) == 1:
                 return first_browser
             return create_browser()
 
         playwright_instance.chromium.launch = AsyncMock(side_effect=mock_launch)
-
-        # Yield first_browser for backward compatibility with existing tests
         yield mock, playwright_instance, first_browser
 
 
 @pytest.fixture
 def mock_browser_pool():
     """Mock browser pool for PDF generation tests."""
-    # Patch both locations for backward compatibility
     with patch("downloader.pdf_generator.BrowserPool") as mock_pool_class:
         pool_instance = AsyncMock()
         mock_pool_class.return_value = pool_instance
@@ -387,7 +448,7 @@ def mock_browser_pool():
         pool_instance.get_browser = AsyncMock(return_value=browser)
         pool_instance.release_browser = AsyncMock()
         pool_instance.create_context = AsyncMock(side_effect=_delegate_create_context)
-
+        pool_instance.available_count = 3
         yield pool_instance, browser
 
 
@@ -403,8 +464,6 @@ def mock_scheduler_service():
     mock_svc.get_job.return_value = None
     mock_svc.remove_job = MagicMock()
     mock_svc._scheduler = MagicMock()
-
-    # The scheduler property returns the underlying _scheduler
     type(mock_svc).scheduler = property(lambda self: self._scheduler)
     return mock_svc
 
@@ -435,15 +494,12 @@ def mock_apscheduler_job():
         "created_at": datetime.now(UTC).isoformat(),
     }
     job.trigger = MagicMock()
-    # Simulating APScheduler CronTrigger fields (month, day, week, day_of_week, hour, minute, second)
     job.trigger.fields = [
-        MagicMock(),
-        "*",
-        MagicMock(),
-        "*",
-        "*",
-        "9",
-        "0",
+        MagicMock(name="month"),
+        MagicMock(name="day"),
+        MagicMock(name="day_of_week"),
+        MagicMock(name="hour"),
+        MagicMock(name="minute"),
     ]
     job.pause = MagicMock()
     return job

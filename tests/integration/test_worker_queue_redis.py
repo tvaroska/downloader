@@ -87,7 +87,45 @@ class TestWorkerQueueRealRedis:
             reclaimed = await q2.pop_batch_job(timeout=1.0)
             assert reclaimed is not None
             assert reclaimed.job_id == "job-live"
+            assert reclaimed.attempt == 2
+            # Requeueing already-reclaimed envelope returns False without duplicating (`R113`).
+            assert await q1.requeue_batch_job(env) is False
             await q2.ack_batch_job(reclaimed.raw_payload)
         finally:
             await q1.close()
             await q2.close()
+
+    async def test_job_manager_watch_multi_and_domain_throttle_lua_on_real_redis(
+        self, real_redis_client: redis.Redis
+    ) -> None:
+        """Exercise real-Redis WATCH/MULTI transitions, `complete_job`, and Lua throttle (`R85`, `R113`)."""
+        from downloader.crawling.throttle import DomainThrottle
+        from downloader.job_manager import JobManager, JobStatus
+
+        jm = JobManager(os.getenv("REDIS_URI", "redis://localhost:6379/15"))
+        jm.redis_client = real_redis_client
+        try:
+            job_id = await jm.create_job({"urls": [{"url": "https://example.com"}]})
+            assert await jm.update_job_status(job_id, JobStatus.RUNNING) is True
+            assert (
+                await jm.complete_job(
+                    job_id,
+                    [{"url": "https://example.com", "success": True}],
+                    {"total_requests": 1, "successful_requests": 1, "failed_requests": 0},
+                )
+                is True
+            )
+            res = await jm.get_job_results(job_id)
+            assert res is not None and res.status == JobStatus.COMPLETED
+
+            # Cancelled job cannot be completed
+            cancel_id = await jm.create_job({"urls": [{"url": "https://example.com"}]})
+            assert await jm.update_job_status(cancel_id, JobStatus.CANCELLED) is True
+            assert await jm.complete_job(cancel_id, [], {}) is False
+            assert await jm.get_job_results(cancel_id) is None
+
+            throttle = DomainThrottle(max_crawl_delay=5.0, redis_client=real_redis_client)
+            waited = await throttle.wait_if_needed("real-redis.example.com", 0.05)
+            assert waited == 0.0
+        finally:
+            await real_redis_client.delete("throttle:v1:real-redis.example.com")

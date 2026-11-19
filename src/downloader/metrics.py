@@ -5,6 +5,7 @@ from __future__ import annotations
 import logging
 import time
 from collections import defaultdict, deque
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -56,13 +57,19 @@ class PerformanceMetrics:
 class MetricsCollector:
     """Centralized in-process metrics collector."""
 
-    def __init__(self, history_size: int = 10000) -> None:
+    def __init__(
+        self,
+        history_size: int = 10000,
+        *,
+        clock: Callable[[], float] = time.time,
+    ) -> None:
         self.history_size = history_size
+        self._clock = clock
         self._metrics_history: dict[str, deque[MetricSnapshot]] = defaultdict(
             lambda: deque(maxlen=history_size)
         )
         self._performance_metrics: dict[str, PerformanceMetrics] = defaultdict(PerformanceMetrics)
-        self._start_time = time.time()
+        self._start_time = self._clock()
         self._counters: dict[str, float] = defaultdict(float)
         self._gauges: dict[str, float] = defaultdict(float)
         self._histogram_buckets = [0.1, 0.25, 0.5, 1.0, 2.5, 5.0, 10.0, float("inf")]
@@ -89,9 +96,9 @@ class MetricsCollector:
 
         if status_code >= 400:
             perf.error_count += 1
-            self._counters[f"errors_total_{key}"] += 1
         if status_code >= 500:
             perf.server_error_count += 1
+            self._counters[f"errors_total_{key}"] += 1
 
         self._counters[f"requests_total_{key}"] += 1
         self._counters[f"requests_total_status_{status_code}"] += 1
@@ -105,7 +112,7 @@ class MetricsCollector:
 
         self._metrics_history[f"response_time_{key}"].append(
             MetricSnapshot(
-                time.time(),
+                self._clock(),
                 response_time,
                 {"method": method, "endpoint": endpoint, "status": str(status_code)},
             )
@@ -113,7 +120,7 @@ class MetricsCollector:
 
     def set_gauge(self, name: str, value: float) -> None:
         self._gauges[name] = value
-        self._metrics_history[name].append(MetricSnapshot(time.time(), value))
+        self._metrics_history[name].append(MetricSnapshot(self._clock(), value))
 
     def increment_counter(self, name: str, value: float = 1.0) -> None:
         self._counters[name] += value
@@ -123,7 +130,7 @@ class MetricsCollector:
         total_errors = sum(perf.error_count for perf in self._performance_metrics.values())
         endpoints: dict[str, dict[str, float | int]] = {}
         summary: dict[str, Any] = {
-            "uptime_seconds": time.time() - self._start_time,
+            "uptime_seconds": self._clock() - self._start_time,
             "total_requests": total_requests,
             "total_errors": total_errors,
             "endpoints": endpoints,
@@ -185,7 +192,7 @@ class MetricsCollector:
         lines.extend(
             [
                 "",
-                "# HELP downloader_errors_total Total number of errors",
+                "# HELP downloader_errors_total Total number of server (5xx) errors",
                 "# TYPE downloader_errors_total counter",
             ]
         )
@@ -249,11 +256,28 @@ class MetricsCollector:
             f"html_rendering_duration_seconds_count {self._histogram_counts.get('html_rendering_duration_seconds', 0)}"
         )
 
+    def _append_worker_prometheus_lines(self, lines: list[str]) -> None:
+        worker_counters = sorted(
+            (name, value) for name, value in self._counters.items() if name.startswith("worker_")
+        )
+        if not worker_counters:
+            return
+        lines.append("")
+        for name, value in worker_counters:
+            formatted = int(value) if float(value).is_integer() else value
+            lines.extend(
+                [
+                    f"# HELP {name} Worker counter {name}",
+                    f"# TYPE {name} counter",
+                    f"{name} {formatted}",
+                ]
+            )
+
     def get_prometheus_metrics(self) -> str:
         lines = [
             "# HELP downloader_uptime_seconds Time since service started",
             "# TYPE downloader_uptime_seconds gauge",
-            f"downloader_uptime_seconds {time.time() - self._start_time}",
+            f"downloader_uptime_seconds {self._clock() - self._start_time}",
         ]
         self._append_request_prometheus_lines(lines)
         self._append_histogram_prometheus_lines(lines)
@@ -290,7 +314,8 @@ class MetricsCollector:
                 f"robots_disallowed_total {int(self._counters.get('robots_disallowed_total', 0))}",
             ]
         )
-        return "\n".join(lines)
+        self._append_worker_prometheus_lines(lines)
+        return "\n".join(lines) + "\n"
 
     def get_system_health_score(self) -> dict[str, Any]:
         performance = self.get_performance_summary()
@@ -340,6 +365,13 @@ def get_metrics_collector() -> MetricsCollector:
     global _metrics_collector
     if _metrics_collector is None:
         _metrics_collector = MetricsCollector()
+    return _metrics_collector
+
+
+def reset_metrics_collector(*, clock: Callable[[], float] = time.time) -> MetricsCollector:
+    """Replace and return a fresh process-wide `MetricsCollector` instance."""
+    global _metrics_collector
+    _metrics_collector = MetricsCollector(clock=clock)
     return _metrics_collector
 
 

@@ -1,6 +1,6 @@
 // @ts-check
 /**
- * Typed zero-dependency client for the REST API Downloader v0.7.1+ service.
+ * Typed zero-dependency client for the REST API Downloader service.
  */
 
 /** @type {Record<string, string>} */
@@ -30,17 +30,30 @@ export function encodeTargetUrlPath(url) {
     .replace(/#/g, "%23");
 }
 
+/**
+ * Validate and percent-encode a single URL path segment.
+ * @param {string} id
+ * @param {string} field
+ * @returns {string}
+ */
+export function encodePathSegment(id, field) {
+  if (!id || id === "." || id === "..") {
+    throw new Error(`${field} must be a non-empty path segment and not '.' or '..'`);
+  }
+  return encodeURIComponent(id);
+}
+
 export class DownloaderApiError extends Error {
   /**
    * @param {string} message
-   * @param {number} statusCode
+   * @param {number | null} statusCode
    * @param {string | null} [errorType]
    * @param {number | null} [retryAfter]
    */
   constructor(message, statusCode, errorType = null, retryAfter = null) {
     super(message);
     this.name = "DownloaderApiError";
-    /** @type {number} */
+    /** @type {number | null} */
     this.statusCode = statusCode;
     /** @type {string | null} */
     this.errorType = errorType;
@@ -276,17 +289,22 @@ export class DownloaderClient {
    * @returns {Promise<import("./index.js").DownloadResult>}
    */
   async render(url, options = {}) {
+    /** @type {Record<string, unknown>} */
+    const payload = {
+      url,
+      output: options.output ?? "html",
+      wait_for: options.waitFor ?? null,
+      actions: options.actions ?? [],
+      full_page: options.fullPage ?? false,
+      screenshot_format: options.screenshotFormat ?? "png",
+    };
+    if (options.timeoutMs !== undefined) {
+      payload.timeout_ms = options.timeoutMs;
+    }
     const resp = await this.fetchImpl(`${this.baseUrl}/render`, {
       method: "POST",
       headers: this.headers({ "Content-Type": "application/json" }),
-      body: JSON.stringify({
-        url,
-        output: options.output ?? "html",
-        wait_for: options.waitFor ?? null,
-        actions: options.actions ?? [],
-        full_page: options.fullPage ?? false,
-        screenshot_format: options.screenshotFormat ?? "png",
-      }),
+      body: JSON.stringify(payload),
       signal: options.signal,
     });
     return this.toDownloadResult(url, resp);
@@ -333,7 +351,8 @@ export class DownloaderClient {
    * @returns {Promise<import("./index.js").BatchJobStatus>}
    */
   async getJobStatus(jobId, signal) {
-    const resp = await this.fetchImpl(`${this.baseUrl}/jobs/${encodeURIComponent(jobId)}/status`, {
+    const encoded = encodePathSegment(jobId, "jobId");
+    const resp = await this.fetchImpl(`${this.baseUrl}/jobs/${encoded}/status`, {
       method: "GET",
       headers: this.headers(),
       signal,
@@ -350,7 +369,8 @@ export class DownloaderClient {
    * @returns {Promise<import("./index.js").BatchJobResults>}
    */
   async getJobResults(jobId, signal) {
-    const resp = await this.fetchImpl(`${this.baseUrl}/jobs/${encodeURIComponent(jobId)}/results`, {
+    const encoded = encodePathSegment(jobId, "jobId");
+    const resp = await this.fetchImpl(`${this.baseUrl}/jobs/${encoded}/results`, {
       method: "GET",
       headers: this.headers(),
       signal,
@@ -367,7 +387,8 @@ export class DownloaderClient {
    * @returns {Promise<import("./index.js").JobCancelResult>}
    */
   async cancelJob(jobId, signal) {
-    const resp = await this.fetchImpl(`${this.baseUrl}/jobs/${encodeURIComponent(jobId)}`, {
+    const encoded = encodePathSegment(jobId, "jobId");
+    const resp = await this.fetchImpl(`${this.baseUrl}/jobs/${encoded}`, {
       method: "DELETE",
       headers: this.headers(),
       signal,
@@ -394,7 +415,7 @@ export class DownloaderClient {
       if (status.status === "failed" || status.status === "cancelled") {
         throw new DownloaderApiError(
           status.error_message ?? `Batch job ${jobId} ${status.status}`,
-          500,
+          null,
           `batch_${status.status}`,
         );
       }
@@ -448,14 +469,12 @@ export class DownloaderClient {
    * @returns {Promise<import("./index.js").ScheduleInfo>}
    */
   async getSchedule(scheduleId, signal) {
-    const resp = await this.fetchImpl(
-      `${this.baseUrl}/schedules/${encodeURIComponent(scheduleId)}`,
-      {
-        method: "GET",
-        headers: this.headers(),
-        signal,
-      },
-    );
+    const encoded = encodePathSegment(scheduleId, "scheduleId");
+    const resp = await this.fetchImpl(`${this.baseUrl}/schedules/${encoded}`, {
+      method: "GET",
+      headers: this.headers(),
+      signal,
+    });
     if (!resp.ok) {
       await this.handleError(resp);
     }
@@ -468,11 +487,12 @@ export class DownloaderClient {
    * @returns {Promise<import("./index.js").ScheduleHistory>}
    */
   async getScheduleHistory(scheduleId, options = {}) {
+    const encoded = encodePathSegment(scheduleId, "scheduleId");
     const params = new URLSearchParams();
     params.set("limit", String(options.limit ?? 20));
     params.set("offset", String(options.offset ?? 0));
     const resp = await this.fetchImpl(
-      `${this.baseUrl}/schedules/${encodeURIComponent(scheduleId)}/history?${params.toString()}`,
+      `${this.baseUrl}/schedules/${encoded}/history?${params.toString()}`,
       {
         method: "GET",
         headers: this.headers(),
@@ -491,14 +511,12 @@ export class DownloaderClient {
    * @returns {Promise<{ success: boolean }>}
    */
   async deleteSchedule(scheduleId, signal) {
-    const resp = await this.fetchImpl(
-      `${this.baseUrl}/schedules/${encodeURIComponent(scheduleId)}`,
-      {
-        method: "DELETE",
-        headers: this.headers(),
-        signal,
-      },
-    );
+    const encoded = encodePathSegment(scheduleId, "scheduleId");
+    const resp = await this.fetchImpl(`${this.baseUrl}/schedules/${encoded}`, {
+      method: "DELETE",
+      headers: this.headers(),
+      signal,
+    });
     if (!resp.ok) {
       await this.handleError(resp);
     }

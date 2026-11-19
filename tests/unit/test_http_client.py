@@ -10,33 +10,24 @@ from downloader.http_client import (
 )
 
 
-def _attach_mock_transport(http_client: HTTPClient, handler) -> None:
-    http_client._client = httpx.AsyncClient(
-        transport=httpx.MockTransport(handler),
-        follow_redirects=True,
-        max_redirects=http_client.max_redirects,
-        event_hooks={"response": [http_client._on_response_hook]},
-    )
-
-
 @pytest.mark.unit
 class TestHTTPClient:
-    @pytest.fixture
-    def http_client(self):
-        return HTTPClient(timeout=5.0, max_redirects=5, user_agent="TestAgent/1.0")
-
     @pytest.mark.asyncio
-    async def test_successful_download(self, http_client):
+    async def test_successful_download(self):
         def handler(request: httpx.Request) -> httpx.Response:
             return httpx.Response(
                 200,
                 headers={"content-type": "text/html"},
-                content=b"<html>test</html>",
+                stream=httpx.ByteStream(b"<html>test</html>"),
                 request=request,
             )
 
-        _attach_mock_transport(http_client, handler)
-        try:
+        async with HTTPClient(
+            timeout=5.0,
+            max_redirects=5,
+            user_agent="TestAgent/1.0",
+            transport=httpx.MockTransport(handler),
+        ) as http_client:
             content, metadata = await http_client.download("https://example.com")
 
             assert content == b"<html>test</html>"
@@ -44,50 +35,58 @@ class TestHTTPClient:
             assert metadata["url"] == "https://example.com"
             assert metadata["content_type"] == "text/html"
             assert metadata["size"] == 17
-        finally:
-            await http_client.close()
 
     @pytest.mark.asyncio
-    async def test_timeout_error(self, http_client):
+    async def test_timeout_error(self):
         def handler(request: httpx.Request) -> httpx.Response:
             raise httpx.TimeoutException("Timeout", request=request)
 
-        _attach_mock_transport(http_client, handler)
-        try:
+        async with HTTPClient(
+            timeout=5.0,
+            max_redirects=5,
+            user_agent="TestAgent/1.0",
+            transport=httpx.MockTransport(handler),
+        ) as http_client:
             with pytest.raises(HTTPTimeoutError) as exc_info:
                 await http_client.download("https://example.com")
 
             assert "timed out" in str(exc_info.value)
-        finally:
-            await http_client.close()
 
     @pytest.mark.asyncio
-    async def test_http_error_response(self, http_client):
+    async def test_http_error_response(self):
         def handler(request: httpx.Request) -> httpx.Response:
-            return httpx.Response(404, content=b"Not Found", request=request)
+            return httpx.Response(
+                404,
+                stream=httpx.ByteStream(b"Not Found"),
+                request=request,
+            )
 
-        _attach_mock_transport(http_client, handler)
-        try:
+        async with HTTPClient(
+            timeout=5.0,
+            max_redirects=5,
+            user_agent="TestAgent/1.0",
+            transport=httpx.MockTransport(handler),
+        ) as http_client:
             with pytest.raises(HTTPClientError) as exc_info:
                 await http_client.download("https://example.com")
 
             assert "HTTP 404" in str(exc_info.value)
-        finally:
-            await http_client.close()
 
     @pytest.mark.asyncio
-    async def test_request_error(self, http_client):
+    async def test_request_error(self):
         def handler(request: httpx.Request) -> httpx.Response:
             raise httpx.RequestError("Connection failed", request=request)
 
-        _attach_mock_transport(http_client, handler)
-        try:
+        async with HTTPClient(
+            timeout=5.0,
+            max_redirects=5,
+            user_agent="TestAgent/1.0",
+            transport=httpx.MockTransport(handler),
+        ) as http_client:
             with pytest.raises(HTTPClientError) as exc_info:
                 await http_client.download("https://example.com")
 
             assert "Request failed" in str(exc_info.value)
-        finally:
-            await http_client.close()
 
     @pytest.mark.asyncio
     async def test_context_manager(self):
@@ -97,7 +96,9 @@ class TestHTTPClient:
     @pytest.mark.asyncio
     async def test_injected_transport(self):
         transport = httpx.MockTransport(
-            lambda request: httpx.Response(200, content=b"injected", request=request)
+            lambda request: httpx.Response(
+                200, stream=httpx.ByteStream(b"injected"), request=request
+            )
         )
         async with HTTPClient(transport=transport) as client:
             body, meta = await client.download("https://example.com")

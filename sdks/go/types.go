@@ -55,6 +55,7 @@ type RenderRequest struct {
 	Actions          []BrowserAction `json:"actions,omitempty"`
 	FullPage         bool            `json:"full_page,omitempty"`
 	ScreenshotFormat string          `json:"screenshot_format,omitempty"`
+	TimeoutMs        int             `json:"timeout_ms,omitempty"`
 }
 
 // BatchURLItem represents one URL inside a batch submission.
@@ -201,4 +202,19 @@ func (e *APIError) Error() string {
 		return fmt.Sprintf("downloader api error (%d %s): %s", e.StatusCode, e.ErrorType, e.Message)
 	}
 	return fmt.Sprintf("downloader api error (%d): %s", e.StatusCode, e.Message)
+}
+
+// BatchJobError is returned when WaitForBatch observes a failed or cancelled batch job.
+type BatchJobError struct {
+	JobID     string
+	JobStatus string
+	ErrorType string
+	Message   string
+}
+
+func (e *BatchJobError) Error() string {
+	if e.ErrorType != "" {
+		return fmt.Sprintf("downloader batch job error (%s %s): %s", e.JobID, e.ErrorType, e.Message)
+	}
+	return fmt.Sprintf("downloader batch job error (%s %s): %s", e.JobID, e.JobStatus, e.Message)
 }

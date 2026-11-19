@@ -9,10 +9,7 @@ import sys
 from pathlib import Path
 from typing import Any
 
-try:
-    from pythonjsonlogger.json import JsonFormatter
-except ImportError:  # pragma: no cover
-    from pythonjsonlogger.jsonlogger import JsonFormatter  # type: ignore[no-redef]
+from pythonjsonlogger.json import JsonFormatter
 
 from .config import LoggingConfig
 from .telemetry import get_current_trace_context
@@ -187,8 +184,3 @@ def setup_logging(config: LoggingConfig) -> None:
     root_logger.info(f"JSON logs: {config.json_logs}")
     root_logger.info(f"Error logs: {config.error_log_file or 'stderr'}")
     root_logger.info(f"Access logs: {config.access_log_file or 'stdout'}")
-
-
-def get_logger(name: str) -> logging.Logger:
-    """Return a named `logging.Logger`."""
-    return logging.getLogger(name)

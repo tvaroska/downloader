@@ -32,6 +32,26 @@ class TestBatchValidation:
         finally:
             app.dependency_overrides.pop(get_job_manager_dependency, None)
 
+    def test_exactly_max_urls_is_accepted(self, api_client, mock_job_manager):
+        """Exact `max_urls_per_batch` (50) succeeds while `max_urls_per_batch + 1` returns 400 (`R93`)."""
+
+        async def mock_get_job_manager():
+            return mock_job_manager
+
+        app.dependency_overrides[get_job_manager_dependency] = mock_get_job_manager
+        try:
+            urls_50 = [{"url": f"https://example{i}.com"} for i in range(50)]
+            ok = api_client.post("/batch", json={"urls": urls_50})
+            assert ok.status_code == 200
+            assert ok.json()["job_id"] == "test_job_id"
+
+            urls_51 = [{"url": f"https://example{i}.com"} for i in range(51)]
+            too_many = api_client.post("/batch", json={"urls": urls_51})
+            assert too_many.status_code == 400
+            assert too_many.json()["detail"]["error_type"] == "validation_error"
+        finally:
+            app.dependency_overrides.pop(get_job_manager_dependency, None)
+
     def test_batch_empty_request(self, api_client, mock_job_manager):
         """Test batch endpoint with invalid request body."""
 

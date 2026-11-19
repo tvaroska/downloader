@@ -1,6 +1,6 @@
 # Downloader Go SDK (`downloaderclient`)
 
-Zero-dependency standard library Go client for the REST API Downloader `v0.7.0+` API.
+Zero-dependency standard library Go client for the REST API Downloader service.
 
 ## Usage
 

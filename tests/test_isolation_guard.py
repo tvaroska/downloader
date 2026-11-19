@@ -1,8 +1,9 @@
-"""Architectural port-isolation and declarative AST rule verification (`R45`, `R46`, `R54`, `R72`)."""
+"""Architectural port-isolation and declarative AST rule verification (`R45`, `R46`, `R54`, `R72`, `R95`)."""
 
 from __future__ import annotations
 
 import ast
+import json
 import shutil
 import subprocess
 import sys
@@ -23,6 +24,15 @@ _DRIVING_ADAPTER_PATHS = frozenset(
         "worker.py",
     }
 )
+_PURE_CORE_FILES = frozenset(
+    {
+        "ports.py",
+        "errors.py",
+        "content_converter.py",
+        "content_encoding.py",
+    }
+)
+_FORBIDDEN_FRAMEWORKS = frozenset({"fastapi", "starlette", "redis", "playwright"})
 
 
 def _find_ast_grep() -> Path:
@@ -68,10 +78,11 @@ def _check_pkg_file(rel: str, text: str, dual_prefix: str) -> list[str]:
         if target == dual_prefix or target.startswith(f"{dual_prefix}."):
             errors.append(f"src/downloader/{rel}: dual-module import {target}")
 
-    if rel.startswith("services/"):
+    is_pure_core = rel.startswith(("services/", "models/")) or rel in _PURE_CORE_FILES
+    if is_pure_core:
         for target in targets:
-            if target.split(".", 1)[0] in {"fastapi", "starlette"}:
-                errors.append(f"src/downloader/{rel}: forbidden web framework import {target}")
+            if target.split(".", 1)[0] in _FORBIDDEN_FRAMEWORKS:
+                errors.append(f"src/downloader/{rel}: forbidden framework import {target}")
 
     is_driving = rel in _DRIVING_ADAPTER_PATHS or rel.startswith("routes/")
     if not is_driving:
@@ -87,7 +98,7 @@ def _check_pkg_file(rel: str, text: str, dual_prefix: str) -> list[str]:
 
 @pytest.mark.smoke
 def test_services_and_core_respect_hexagonal_boundaries() -> None:
-    """Verify `services/` never imports FastAPI/Starlette and core never imports `main`, `routes`, or `pytest`."""
+    """Verify pure core/services/models never import frameworks and core never imports main/routes/pytest."""
     violations: list[str] = []
     dual_prefix = "src." + "downloader"
 
@@ -96,6 +107,40 @@ def test_services_and_core_respect_hexagonal_boundaries() -> None:
         violations.extend(_check_pkg_file(rel, py_file.read_text(encoding="utf-8"), dual_prefix))
 
     assert not violations, "Hexagonal boundary violations:\n" + "\n".join(violations)
+
+
+@pytest.mark.smoke
+def test_core_modules_do_not_load_frameworks_transitively() -> None:
+    """Importing pure core, port, and service modules must not load FastAPI, Redis, or Playwright."""
+    core_modules = [
+        "downloader.ports",
+        "downloader.errors",
+        "downloader.content_converter",
+        "downloader.content_encoding",
+        "downloader.services.content_processor",
+        "downloader.services.batch_processor",
+        "downloader.services.multi_format",
+    ]
+    probe = (
+        "import importlib, json, sys; "
+        f"mods = {core_modules!r}; "
+        "loaded = {}; "
+        "forbidden = ('fastapi', 'starlette', 'redis', 'playwright'); "
+        "[importlib.import_module(m) for m in mods]; "
+        "hits = [f for f in forbidden if f in sys.modules]; "
+        "print(json.dumps(hits))"
+    )
+    res = subprocess.run(
+        [sys.executable, "-c", probe],
+        cwd=REPO_ROOT,
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+    loaded_frameworks = json.loads(res.stdout.strip())
+    assert loaded_frameworks == [], (
+        f"Importing core modules transitively loaded frameworks: {loaded_frameworks}"
+    )
 
 
 @pytest.mark.smoke

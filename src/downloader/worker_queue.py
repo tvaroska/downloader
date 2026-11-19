@@ -3,19 +3,37 @@
 from __future__ import annotations
 
 import asyncio
-import base64
 import json
 import logging
 import time
-import uuid
-from dataclasses import dataclass
+from collections.abc import Awaitable, Callable
 from datetime import UTC, datetime
-from typing import Any, Literal, cast
+from typing import Any, cast
 
 import redis.asyncio as redis
-from pydantic import BaseModel, Field
 
+from .ports import (
+    BatchQueueEnvelope,
+    BrowserCapacityError,
+    BrowserTaskRequest,
+    BrowserTaskResponse,
+    WorkerTimeoutError,
+)
 from .telemetry import inject_trace_headers
+
+__all__ = [
+    "BATCH_PENDING_QUEUE",
+    "BATCH_PROCESSING_PREFIX",
+    "BATCH_PROCESSING_QUEUE",
+    "BROWSER_PENDING_QUEUE",
+    "BROWSER_RESULT_PREFIX",
+    "WORKER_HEARTBEAT_PREFIX",
+    "BatchQueueEnvelope",
+    "BrowserTaskRequest",
+    "BrowserTaskResponse",
+    "WorkerQueue",
+    "WorkerTimeoutError",
+]
 
 logger = logging.getLogger(__name__)
 
@@ -26,52 +44,42 @@ BROWSER_PENDING_QUEUE = "queue:browser:pending"
 BROWSER_RESULT_PREFIX = "browser_result:"
 WORKER_HEARTBEAT_PREFIX = "worker:heartbeat:"
 
+_BROWSER_RESULT_TTL_SECONDS = 120
 
-@dataclass(frozen=True)
-class BatchQueueEnvelope:
-    """Dequeued batch job reference along with its raw Redis list entry for acking."""
-
-    job_id: str
-    trace_headers: dict[str, str]
-    raw_payload: str
-    attempt: int = 1
-
-
-class BrowserTaskRequest(BaseModel):
-    """Serializable browser task delegated from stateless API pods to worker pods."""
-
-    task_id: str = Field(default_factory=lambda: str(uuid.uuid4()))
-    kind: Literal["render_html", "pdf", "screenshot"]
-    url: str
-    wait_for_selector: str | None = None
-    actions: list[dict[str, Any]] = Field(default_factory=list)
-    full_page: bool = False
-    screenshot_format: Literal["png", "jpeg"] = "png"
-    trace_headers: dict[str, str] = Field(default_factory=dict)
-    deadline: float | None = None
-
-    def is_expired(self, now: float | None = None) -> bool:
-        """Return True when the task carries a deadline that has already passed."""
-        if self.deadline is None:
-            return False
-        current = time.time() if now is None else now
-        return current > self.deadline
+_RECLAIM_PROCESSING_LUA = """
+local proc_key = KEYS[1]
+local pending_key = KEYS[2]
+local max_attempts = tonumber(ARGV[1])
+local raw = redis.call('RPOP', proc_key)
+if not raw then
+    return nil
+end
+local ok, data = pcall(cjson.decode, raw)
+if not ok or type(data) ~= 'table' or not data['job_id'] then
+    return {'malformed', raw}
+end
+local next_attempt = (tonumber(data['attempt']) or 1) + 1
+data['attempt'] = next_attempt
+local updated = cjson.encode(data)
+if next_attempt > max_attempts then
+    return {'dead', updated}
+end
+redis.call('LPUSH', pending_key, updated)
+return {'requeued', updated}
+"""
 
 
-class BrowserTaskResponse(BaseModel):
-    """Result payload returned from a worker pod over Redis."""
-
-    task_id: str
-    success: bool
-    content_base64: str | None = None
-    error: str | None = None
-    error_type: str | None = None
-    status_code: int | None = None
-
-    def decode_bytes(self) -> bytes:
-        if not self.content_base64:
-            return b""
-        return base64.b64decode(self.content_base64)
+def _parse_batch_envelope(raw: str) -> BatchQueueEnvelope | None:
+    try:
+        data = json.loads(raw)
+        return BatchQueueEnvelope(
+            job_id=str(data["job_id"]),
+            trace_headers=dict(data.get("trace_headers") or {}),
+            raw_payload=str(raw),
+            attempt=int(data.get("attempt", 1)),
+        )
+    except (json.JSONDecodeError, KeyError, TypeError, ValueError):
+        return None
 
 
 class WorkerQueue:
@@ -79,14 +87,16 @@ class WorkerQueue:
 
     def __init__(
         self,
-        redis_client: redis.Redis,
+        redis_client: Any,
         *,
         worker_id: str | None = None,
         max_remote_browser_calls: int = 8,
-        browser_redis_client: redis.Redis | None = None,
+        max_attempts: int = 3,
+        browser_redis_client: Any = None,
     ) -> None:
         self.redis = redis_client
         self.worker_id = worker_id
+        self.max_attempts = max(1, max_attempts)
         self.processing_queue = (
             f"{BATCH_PROCESSING_PREFIX}{worker_id}" if worker_id else BATCH_PROCESSING_QUEUE
         )
@@ -148,25 +158,23 @@ class WorkerQueue:
         )
         if not raw:
             return None
-        try:
-            data = json.loads(raw)
-            return BatchQueueEnvelope(
-                job_id=str(data["job_id"]),
-                trace_headers=dict(data.get("trace_headers") or {}),
-                raw_payload=str(raw),
-                attempt=int(data.get("attempt", 1)),
-            )
-        except (json.JSONDecodeError, KeyError, TypeError, ValueError) as exc:
-            logger.error(f"Malformed batch queue payload discarded: {exc}")
+        parsed = _parse_batch_envelope(str(raw))
+        if parsed is None:
+            logger.error("Malformed batch queue payload discarded")
             await self.ack_batch_job(str(raw))
             return None
+        return parsed
 
     async def ack_batch_job(self, raw_payload: str) -> None:
         await cast(Any, self.redis.lrem(self.processing_queue, 1, raw_payload))
 
-    async def requeue_batch_job(self, envelope: BatchQueueEnvelope) -> None:
-        """Return an interrupted batch job to pending with an incremented attempt counter."""
-        await self.ack_batch_job(envelope.raw_payload)
+    async def requeue_batch_job(
+        self,
+        envelope: BatchQueueEnvelope,
+        *,
+        max_retries: int = 3,
+    ) -> bool:
+        """Atomically move an interrupted batch job back to pending if still owned by this worker."""
         try:
             data = json.loads(envelope.raw_payload)
         except (json.JSONDecodeError, TypeError, ValueError):
@@ -177,10 +185,33 @@ class WorkerQueue:
             }
         data["attempt"] = envelope.attempt + 1
         updated_payload = json.dumps(data, separators=(",", ":"))
-        await cast(Any, self.redis.lpush(BATCH_PENDING_QUEUE, updated_payload))
-        logger.info(
-            f"Requeued batch job {envelope.job_id} (attempt={data['attempt']}) to {BATCH_PENDING_QUEUE}"
-        )
+
+        for attempt in range(max_retries):
+            try:
+                async with self.redis.pipeline(transaction=True) as pipe:
+                    await pipe.watch(self.processing_queue)
+                    entries = await cast(Any, self.redis.lrange(self.processing_queue, 0, -1))
+                    if envelope.raw_payload not in entries:
+                        logger.info(
+                            f"Skipping requeue for job {envelope.job_id}: "
+                            "entry already reclaimed from processing queue"
+                        )
+                        return False
+                    pipe.multi()
+                    pipe.lrem(self.processing_queue, 1, envelope.raw_payload)
+                    pipe.lpush(BATCH_PENDING_QUEUE, updated_payload)
+                    await pipe.execute()
+                    logger.info(
+                        f"Requeued batch job {envelope.job_id} "
+                        f"(attempt={data['attempt']}) to {BATCH_PENDING_QUEUE}"
+                    )
+                    return True
+            except redis.WatchError:
+                if attempt < max_retries - 1:
+                    await asyncio.sleep(0.01 * (2**attempt))
+                    continue
+                raise
+        return False
 
     async def _discover_processing_queues(self) -> list[str]:
         keys: set[str] = {BATCH_PROCESSING_QUEUE, self.processing_queue}
@@ -193,37 +224,66 @@ class WorkerQueue:
             keys.update(str(k) for k in cast(list[str], batch))
             if cursor == 0:
                 break
-        fake_lists = getattr(self.redis, "lists", None)
-        if isinstance(fake_lists, dict):
-            keys.update(k for k in fake_lists if k.startswith(BATCH_PROCESSING_PREFIX))
         return sorted(keys)
 
-    async def _drain_processing_list(self, proc_key: str) -> int:
+    async def _reclaim_processing_list(
+        self,
+        proc_key: str,
+        *,
+        max_attempts: int,
+        on_dead_letter: Callable[[BatchQueueEnvelope], Awaitable[None]] | None,
+    ) -> int:
         moved = 0
         while True:
-            item = await cast(
+            result = await cast(
                 Any,
-                self.redis.lmove(
+                self.redis.eval(
+                    _RECLAIM_PROCESSING_LUA,
+                    2,
                     proc_key,
                     BATCH_PENDING_QUEUE,
-                    src="RIGHT",
-                    dest="LEFT",
+                    str(max_attempts),
                 ),
             )
-            if not item:
+            if not result:
                 break
-            moved += 1
+            outcome, payload = result[0], str(result[1])
+            if isinstance(outcome, bytes):
+                outcome = outcome.decode("utf-8")
+            if outcome == "requeued":
+                moved += 1
+            elif outcome == "dead":
+                envelope = _parse_batch_envelope(payload)
+                if envelope is not None:
+                    logger.error(
+                        f"Batch job {envelope.job_id} exceeded max attempts ({max_attempts}); "
+                        "dead-lettering"
+                    )
+                    if on_dead_letter is not None:
+                        await on_dead_letter(envelope)
+            else:
+                logger.warning(f"Discarded malformed entry during reclaim from {proc_key}")
         return moved
 
-    async def requeue_processing_jobs(self) -> int:
-        """Reclaim orphaned batch entries only from dead workers or legacy processing lists."""
+    async def requeue_processing_jobs(
+        self,
+        *,
+        max_attempts: int | None = None,
+        on_dead_letter: Callable[[BatchQueueEnvelope], Awaitable[None]] | None = None,
+    ) -> int:
+        """Atomically reclaim orphaned batch entries from dead workers with attempt tracking."""
+        limit = max(1, max_attempts if max_attempts is not None else self.max_attempts)
         moved = 0
         for proc_key in await self._discover_processing_queues():
             if proc_key.startswith(BATCH_PROCESSING_PREFIX):
                 owner_id = proc_key.removeprefix(BATCH_PROCESSING_PREFIX)
                 if owner_id and owner_id != self.worker_id and await self.has_heartbeat(owner_id):
                     continue
-            moved += await self._drain_processing_list(proc_key)
+            moved += await self._reclaim_processing_list(
+                proc_key,
+                max_attempts=limit,
+                on_dead_letter=on_dead_letter,
+            )
         if moved:
             logger.warning(f"Requeued {moved} orphaned batch job(s) back to {BATCH_PENDING_QUEUE}")
         return moved
@@ -235,8 +295,6 @@ class WorkerQueue:
         timeout: float = 45.0,
     ) -> BrowserTaskResponse:
         if self._browser_inflight_semaphore.locked():
-            from .ports import BrowserCapacityError
-
             raise BrowserCapacityError(
                 "Remote browser rendering queue is at capacity. Please try again later."
             )
@@ -254,7 +312,7 @@ class WorkerQueue:
             await cast(Any, self.redis.lpush(BROWSER_PENDING_QUEUE, task.model_dump_json()))
             raw = await cast(Any, self._browser_redis.blpop([result_key], timeout=timeout))
             if not raw:
-                raise TimeoutError(
+                raise WorkerTimeoutError(
                     f"Remote browser worker timed out after {timeout:.1f}s for task {task.task_id}"
                 )
             _, payload = raw
@@ -267,16 +325,11 @@ class WorkerQueue:
         _, payload = raw
         return BrowserTaskRequest.model_validate_json(payload)
 
-    async def publish_browser_result(
-        self,
-        response: BrowserTaskResponse,
-        *,
-        ttl_seconds: int = 120,
-    ) -> None:
+    async def publish_browser_result(self, response: BrowserTaskResponse) -> None:
         result_key = f"{BROWSER_RESULT_PREFIX}{response.task_id}"
         async with self.redis.pipeline(transaction=True) as pipe:
             pipe.rpush(result_key, response.model_dump_json())
-            pipe.expire(result_key, ttl_seconds)
+            pipe.expire(result_key, _BROWSER_RESULT_TTL_SECONDS)
             await pipe.execute()
 
     async def publish_heartbeat(
@@ -284,7 +337,7 @@ class WorkerQueue:
         worker_id: str,
         metadata: dict[str, Any],
         *,
-        ttl: int = 30,
+        ttl: int = 60,
     ) -> None:
         key = f"{WORKER_HEARTBEAT_PREFIX}{worker_id}"
         payload = {
@@ -299,34 +352,6 @@ class WorkerQueue:
 
     async def has_heartbeat(self, worker_id: str) -> bool:
         return (await self.redis.get(f"{WORKER_HEARTBEAT_PREFIX}{worker_id}")) is not None
-
-    async def list_active_workers(self) -> list[dict[str, Any]]:
-        keys: list[str] = []
-        cursor: int = 0
-        while True:
-            next_cursor, batch = await self.redis.scan(
-                cursor=cursor, match=f"{WORKER_HEARTBEAT_PREFIX}*", count=100
-            )
-            cursor = int(next_cursor)
-            keys.extend(cast(list[str], batch))
-            if cursor == 0:
-                break
-
-        if not keys:
-            return []
-
-        raw_values = await self.redis.mget(keys)
-        workers: list[dict[str, Any]] = []
-        for raw in raw_values:
-            if not raw:
-                continue
-            try:
-                parsed = json.loads(raw)
-                if isinstance(parsed, dict):
-                    workers.append(parsed)
-            except (json.JSONDecodeError, TypeError, ValueError):
-                continue
-        return workers
 
     async def get_queue_depths(self) -> dict[str, int]:
         processing_keys = await self._discover_processing_queues()

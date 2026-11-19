@@ -48,10 +48,11 @@ steps:
         set -euo pipefail
         uv lock --check --offline --no-config
         uv sync --frozen
+        /workspace/.venv/bin/ast-grep scan --rule specs/ast.rules.yaml .
         /workspace/.venv/bin/ruff check src/ tests/ examples/
         /workspace/.venv/bin/ruff format --check src/ tests/ examples/
         /workspace/.venv/bin/mypy src/ tests/
-        /workspace/.venv/bin/pytest tests/ --cov=src/downloader -n auto -m "not (integration or e2e or network or requires_redis or requires_playwright)" -v --timeout=30
+        /workspace/.venv/bin/pytest tests/ --cov=src/downloader --cov-fail-under=83 -n auto -m "not (integration or e2e or network or requires_redis or requires_playwright)" -v --timeout=30
         /workspace/.venv/bin/pytest sdks/python/tests -c sdks/python/pyproject.toml -v
 
   - id: redis-integration-tests
@@ -183,6 +184,23 @@ steps:
         print('Playwright Chromium headless PDF smoke check passed')
         "
 
+  - id: playwright-integration-tests
+    name: gcr.io/cloud-builders/docker
+    waitFor:
+      - python-lint-typecheck-and-tests
+      - docker-build-and-push
+    entrypoint: bash
+    args:
+      - -c
+      - |
+        set -euo pipefail
+        docker run --rm \
+          -v /workspace:/workspace -w /workspace \
+          -e PLAYWRIGHT_BROWSERS_PATH=/usr/local/share/playwright/browsers \
+          --entrypoint /workspace/.venv/bin/pytest \
+          downloader:ci \
+          tests/ -m requires_playwright --no-cov -v --timeout=60
+
   - id: trivy-vulnerability-scan
     name: gcr.io/cloud-builders/docker
     waitFor:
@@ -205,6 +223,8 @@ steps:
   - id: push-release-image
     name: gcr.io/cloud-builders/docker
     waitFor:
+      - redis-integration-tests
+      - playwright-integration-tests
       - verify-nonroot-and-healthcheck
       - trivy-vulnerability-scan
     entrypoint: bash

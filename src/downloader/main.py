@@ -3,9 +3,12 @@
 from __future__ import annotations
 
 import asyncio
+import inspect
+import logging
 import multiprocessing
 import time
-from collections.abc import AsyncIterator, Awaitable
+import weakref
+from collections.abc import AsyncIterator, Awaitable, Callable
 from contextlib import asynccontextmanager
 from datetime import datetime
 from typing import Any, cast
@@ -20,8 +23,6 @@ from fastapi.openapi.docs import (
     get_swagger_ui_oauth2_redirect_html,
 )
 from fastapi.responses import HTMLResponse, JSONResponse
-from slowapi import Limiter
-from slowapi.util import get_remote_address
 
 from . import __version__
 from .api import router
@@ -32,7 +33,7 @@ from .dependencies import build_browser_renderer
 from .drain import DrainCoordinator, DrainMiddleware, install_sigterm_drain_handler
 from .http_client import HTTPClient, RedirectPolicyHook
 from .job_manager import JobManager
-from .logging_config import get_logger, setup_logging
+from .logging_config import setup_logging
 from .middleware import MetricsMiddleware, get_system_metrics_collector
 from .models.responses import ErrorResponse
 from .pdf_generator import (
@@ -52,16 +53,12 @@ from .worker_queue import WorkerQueue
 
 settings = get_settings()
 setup_logging(settings.logging)
-logger = get_logger(__name__)
+logger = logging.getLogger(__name__)
 
-storage_uri = settings.ratelimit.storage_uri or settings.redis.redis_uri or "memory://"
-limiter = Limiter(
-    key_func=get_remote_address,
-    storage_uri=storage_uri,
-    default_limits=[],
-    headers_enabled=settings.ratelimit.headers_enabled,
+_REDIS_HEALTH_PROBE_TTL_SECONDS = 10.0
+_JOB_MANAGER_PROBE_CACHE: weakref.WeakKeyDictionary[Any, tuple[float, int, dict[str, Any]]] = (
+    weakref.WeakKeyDictionary()
 )
-logger.info(f"Rate limiter initialized with storage: {storage_uri}")
 
 
 def _log_startup_validation(current_settings: Settings) -> None:
@@ -80,7 +77,7 @@ def _log_startup_validation(current_settings: Settings) -> None:
 
 
 def _make_redirect_policy(app: FastAPI) -> RedirectPolicyHook:
-    """Enforce `robots.txt` and `Crawl-delay` when `HTTPClient` follows cross-origin redirects."""
+    """Enforce `robots.txt` and `Crawl-delay` when HTTP or browser clients cross origins."""
 
     async def _check_cross_origin_redirect(_source_url: str, next_url: str) -> None:
         active_cfg: Settings = getattr(app.state, "settings", None) or get_settings()
@@ -111,7 +108,13 @@ async def _init_redis_and_crawling(
         await job_manager.connect()
         app.state.job_manager = job_manager
         app.state.worker_queue = (
-            WorkerQueue(job_manager.redis_client) if job_manager.redis_client else None
+            WorkerQueue(
+                job_manager.redis_client,
+                max_remote_browser_calls=current_settings.worker.max_remote_browser_calls,
+                max_attempts=current_settings.worker.max_attempts,
+            )
+            if job_manager.redis_client
+            else None
         )
     else:
         app.state.job_manager = None
@@ -139,6 +142,7 @@ def _init_pdf_generator(
     app: FastAPI,
     current_settings: Settings,
     egress_policy: EgressPolicy,
+    redirect_policy: RedirectPolicyHook,
 ) -> None:
     try:
         pdf_generator = PlaywrightPDFGenerator(
@@ -150,6 +154,7 @@ def _init_pdf_generator(
             idle_timeout=current_settings.pdf.idle_timeout,
             user_agent=None,
             egress_policy=egress_policy,
+            redirect_policy=redirect_policy,
         )
         set_shared_pdf_generator(pdf_generator)
         app.state.pdf_generator = pdf_generator
@@ -189,9 +194,20 @@ async def _init_scheduler(
         domain_throttle=app.state.domain_throttle,
         max_workers=current_settings.scheduler.max_workers,
         renderer=app.state.browser_renderer,
+        settings=current_settings,
     )
     set_schedules_executor(executor)
     app.state.execution_storage = execution_storage
+
+
+async def _run_teardown_step(name: str, step: Callable[[], Any]) -> None:
+    """Isolate each shutdown step so one failure never skips subsequent cleanup."""
+    try:
+        result = step()
+        if inspect.isawaitable(result):
+            await result
+    except (redis_exc.RedisError, OSError, RuntimeError, ValueError, TimeoutError) as exc:
+        logger.warning(f"Shutdown step '{name}' failed: {exc}")
 
 
 async def _teardown_services(
@@ -205,26 +221,42 @@ async def _teardown_services(
     drain_coordinator.start_drain()
     shutdown_start = time.monotonic()
     drain_timeout = current_settings.shutdown.drain_timeout
-    await drain_coordinator.wait_until_drained(drain_timeout)
-
-    if app.state.job_manager:
-        remaining_drain = max(0.0, drain_timeout - (time.monotonic() - shutdown_start))
-        await app.state.job_manager.wait_for_active_jobs(remaining_drain)
-
-    await system_metrics.stop()
-    if app.state.scheduler:
-        await app.state.scheduler.shutdown(wait=True)
-    if getattr(app.state, "robots_checker", None):
-        await app.state.robots_checker.close()
-    await http_client.close()
-    if app.state.pdf_generator:
-        await app.state.pdf_generator.close()
-    await cleanup_pdf_generator()
-    if app.state.job_manager:
-        await app.state.job_manager.disconnect()
-    shutdown_ocr_executor()
-    shutdown_telemetry()
-    drain_coordinator.reset()
+    try:
+        await _run_teardown_step(
+            "drain_coordinator.wait_until_drained",
+            lambda: drain_coordinator.wait_until_drained(drain_timeout),
+        )
+        job_manager = getattr(app.state, "job_manager", None)
+        if job_manager is not None:
+            remaining_drain = max(0.0, drain_timeout - (time.monotonic() - shutdown_start))
+            await _run_teardown_step(
+                "job_manager.wait_for_active_jobs",
+                lambda: job_manager.wait_for_active_jobs(remaining_drain),
+            )
+        await _run_teardown_step("system_metrics.stop", system_metrics.stop)
+        scheduler = getattr(app.state, "scheduler", None)
+        if scheduler is not None:
+            await _run_teardown_step(
+                "scheduler.shutdown",
+                lambda: scheduler.shutdown(wait=True),
+            )
+        worker_queue = getattr(app.state, "worker_queue", None)
+        if worker_queue is not None and hasattr(worker_queue, "close"):
+            await _run_teardown_step("worker_queue.close", worker_queue.close)
+        if job_manager is not None:
+            await _run_teardown_step("job_manager.disconnect", job_manager.disconnect)
+        robots_checker = getattr(app.state, "robots_checker", None)
+        if robots_checker is not None:
+            await _run_teardown_step("robots_checker.close", robots_checker.close)
+        await _run_teardown_step("http_client.close", http_client.close)
+        pdf_generator = getattr(app.state, "pdf_generator", None)
+        if pdf_generator is not None:
+            await _run_teardown_step("pdf_generator.close", pdf_generator.close)
+        await _run_teardown_step("cleanup_pdf_generator", cleanup_pdf_generator)
+    finally:
+        shutdown_ocr_executor()
+        shutdown_telemetry()
+        drain_coordinator.reset()
     logger.info("All services shut down successfully")
 
 
@@ -235,13 +267,18 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     app.state.settings = current_settings
     egress_policy = EgressPolicy(current_settings)
     app.state.egress_policy = egress_policy
+    redirect_policy = _make_redirect_policy(app)
+    app.state.redirect_policy = redirect_policy
 
     drain_coordinator: DrainCoordinator = (
         getattr(app.state, "drain_coordinator", None) or DrainCoordinator()
     )
     drain_coordinator.reset()
     app.state.drain_coordinator = drain_coordinator
-    restore_sigterm = install_sigterm_drain_handler(drain_coordinator)
+    restore_sigterm = install_sigterm_drain_handler(
+        drain_coordinator,
+        pre_stop_delay=current_settings.shutdown.pre_stop_delay,
+    )
     try:
         active_rl_uri = (
             current_settings.ratelimit.storage_uri
@@ -249,7 +286,7 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
             or "memory://"
         )
         if active_rl_uri.startswith("memory://"):
-            reset_rate_limiter(limiter)
+            reset_rate_limiter()
         configure_telemetry(current_settings.telemetry, app=app, service_version=__version__)
         _log_startup_validation(current_settings)
 
@@ -267,23 +304,18 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
             keepalive_expiry=current_settings.http.keepalive_expiry,
             http2=current_settings.http.http2_enabled,
             egress_policy=egress_policy,
-            redirect_policy=_make_redirect_policy(app),
+            redirect_policy=redirect_policy,
         )
         app.state.http_client = http_client
 
-        _init_pdf_generator(app, current_settings, egress_policy)
+        _init_pdf_generator(app, current_settings, egress_policy, redirect_policy)
 
         # Choose local vs remote BrowserRenderer adapter once at startup.
         app.state.browser_renderer = build_browser_renderer(
             current_settings,
             pdf_semaphore=app.state.pdf_semaphore,
             work_queue=app.state.worker_queue,
-        )
-        app.state._browser_renderer_mode = (
-            current_settings.worker.deployment_mode,
-            current_settings.worker.remote_browser_enabled,
-            current_settings.worker.remote_browser_timeout,
-            current_settings.content.max_download_size,
+            redirect_policy=redirect_policy,
         )
 
         await _init_scheduler(app, current_settings, job_manager, http_client)
@@ -311,12 +343,11 @@ app = FastAPI(
     lifespan=lifespan,
 )
 
-app.state.limiter = limiter
 app.state.drain_coordinator = DrainCoordinator()
 
-app.add_middleware(RateLimitMiddleware, limiter=limiter)
-app.add_middleware(MetricsMiddleware)
+app.add_middleware(RateLimitMiddleware)
 app.add_middleware(DrainMiddleware)
+app.add_middleware(MetricsMiddleware)
 
 app.add_middleware(
     CORSMiddleware,
@@ -329,17 +360,25 @@ app.add_middleware(
 
 @app.exception_handler(RequestValidationError)
 async def request_validation_exception_handler(
-    _request: Request, exc: RequestValidationError
+    request: Request, exc: RequestValidationError
 ) -> JSONResponse:
     """Return the standard ErrorResponse envelope for FastAPI request validation errors."""
     messages: list[str] = []
+    is_invalid_cron = False
     for err in exc.errors():
-        loc = ".".join(str(part) for part in err.get("loc", ()) if part != "body")
-        msg = err.get("msg", "Invalid value")
+        loc_tuple = tuple(err.get("loc", ()))
+        loc = ".".join(str(part) for part in loc_tuple if part != "body")
+        msg = str(err.get("msg", "Invalid value")).removeprefix("Value error, ")
         messages.append(f"{loc}: {msg}" if loc else msg)
+        if (
+            request.url.path == "/schedules"
+            and loc_tuple == ("body", "cron_expression")
+            and err.get("type") != "missing"
+        ):
+            is_invalid_cron = True
     summary = "; ".join(messages) if messages else "Request validation failed"
     return JSONResponse(
-        status_code=422,
+        status_code=400 if is_invalid_cron else 422,
         content={
             "detail": ErrorResponse(
                 error=summary,
@@ -390,23 +429,40 @@ async def custom_redoc(request: Request) -> HTMLResponse:
 async def _probe_job_manager_status(job_manager: Any) -> dict[str, Any]:
     status_dict: dict[str, Any] = {"available": job_manager is not None}
     if job_manager is None:
+        status_dict["status"] = "disabled"
         status_dict["reason"] = "Redis connection required"
         return status_dict
     redis_client = getattr(job_manager, "redis_client", None)
     if redis_client is None:
         status_dict["status"] = "not_connected"
         return status_dict
+
+    now = time.monotonic()
+    client_id = id(redis_client)
+    try:
+        cached = _JOB_MANAGER_PROBE_CACHE.get(job_manager)
+    except TypeError:
+        cached = None
+    if (
+        cached is not None
+        and cached[1] == client_id
+        and (now - cached[0]) < _REDIS_HEALTH_PROBE_TTL_SECONDS
+    ):
+        return dict(cached[2])
+
     try:
         await cast(Awaitable[bool], redis_client.ping())
         status_dict["status"] = "connected"
     except (redis_exc.RedisError, OSError, RuntimeError):
         status_dict["status"] = "error"
+    try:
+        _JOB_MANAGER_PROBE_CACHE[job_manager] = (now, client_id, dict(status_dict))
+    except TypeError:
+        pass
     return status_dict
 
 
-async def _probe_workers_status(
-    app_settings: Settings, worker_queue: WorkQueue | None
-) -> dict[str, Any]:
+def _probe_workers_status(app_settings: Settings, worker_queue: WorkQueue | None) -> dict[str, Any]:
     return {
         "deployment_mode": app_settings.worker.deployment_mode,
         "remote_browser_enabled": app_settings.worker.remote_browser_enabled,
@@ -416,6 +472,14 @@ async def _probe_workers_status(
 
 async def _get_scheduler_status_nonblocking(scheduler: SchedulerService) -> dict[str, Any]:
     """Read scheduler status without running synchronous RedisJobStore I/O on the event loop."""
+    cached_getter = getattr(scheduler, "get_cached_status", None)
+    if callable(cached_getter):
+        maybe_coro = cached_getter()
+        if inspect.isawaitable(maybe_coro):
+            cached_result = await maybe_coro
+            if isinstance(cached_result, dict):
+                return cached_result
+
     inner = getattr(scheduler, "_scheduler", None)
     started = getattr(scheduler, "_started", None)
     if inner is None or not isinstance(started, bool):
@@ -485,7 +549,7 @@ async def health_check(request: Request) -> dict[str, Any] | Response:
         scheduler_status["reason"] = "Redis connection required"
 
     worker_queue: WorkQueue | None = getattr(request.app.state, "worker_queue", None)
-    workers_status = await _probe_workers_status(app_settings, worker_queue)
+    workers_status = _probe_workers_status(app_settings, worker_queue)
 
     health_info: dict[str, Any] = {
         "status": "draining" if is_draining else "healthy",

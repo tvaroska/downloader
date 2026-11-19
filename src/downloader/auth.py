@@ -3,20 +3,19 @@
 from __future__ import annotations
 
 import logging
-import os
 import secrets
 from collections.abc import Mapping
-from pathlib import Path
 from typing import Any
 
 from fastapi import Depends, HTTPException, Request, status
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 
-from .config import AuthConfig, Settings, get_settings
+from .config import Settings, get_settings
 
 logger = logging.getLogger(__name__)
 
 security = HTTPBearer(auto_error=False)
+_BEARER_SCHEMES = frozenset({"bearer"})
 
 
 class APIKeyError(Exception):
@@ -24,23 +23,12 @@ class APIKeyError(Exception):
 
 
 def _resolve_configured_api_key(settings: Settings | None = None) -> str | None:
-    """Resolve the active API key consistently across explicit Settings, os.environ, and .env."""
+    """Read the configured API key from Settings without per-request os.environ probes."""
     active = settings if isinstance(settings, Settings) else get_settings()
-    raw: str | None = None
-    if isinstance(active, Settings):
-        if getattr(active.auth, "_explicit_api_key", False):
-            raw = active.auth.api_key
-        elif "DOWNLOADER_KEY" in os.environ:
-            raw = os.environ.get("DOWNLOADER_KEY")
-        elif not getattr(active.auth, "_loaded_from_env", False):
-            raw = active.auth.api_key
-    elif "DOWNLOADER_KEY" in os.environ:
-        raw = os.environ.get("DOWNLOADER_KEY")
-    elif AuthConfig.model_config.get("env_file") and Path(".env").is_file():
-        raw = AuthConfig().api_key
-
-    cleaned = raw.strip() if isinstance(raw, str) else ""
-    return cleaned or None
+    raw = active.auth.api_key
+    if not isinstance(raw, str):
+        return None
+    return raw.strip() or None
 
 
 def is_auth_enabled(settings: Settings | None = None) -> bool:
@@ -63,7 +51,7 @@ def extract_request_api_key(request: Request) -> str | None:
     auth_header = request.headers.get("authorization")
     if isinstance(auth_header, str) and " " in auth_header:
         scheme, token = auth_header.split(None, 1)
-        if scheme.lower() == "bearer" and token.strip():
+        if scheme.casefold() in _BEARER_SCHEMES and token.strip():
             return token.strip()
 
     x_key = request.headers.get("x-api-key")

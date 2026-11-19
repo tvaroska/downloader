@@ -28,11 +28,11 @@ from ..metrics import (
     record_robots_disallowed,
     record_robots_evaluation,
 )
+from ..ports import RobotsDisallowedError as RobotsDisallowedError
 from ..ssrf_transport import SSRFSafeHTTPTransport, SSRFSafeNetworkBackend
 from ..validation import (
     DNSResolutionError,
     EgressPolicy,
-    SSRFProtectionError,
     URLValidationError,
     canonical_origin,
     format_origin_url,
@@ -53,21 +53,6 @@ _MAX_ROBOTS_TXT_BYTES = 512 * 1024
 OriginTuple = tuple[str, str, int]
 
 
-class RobotsDisallowedError(Exception):
-    """Raised when an origin's robots.txt disallows fetching a URL for the active User-Agent."""
-
-    def __init__(
-        self,
-        url: str,
-        user_agent: str = "REST-API-Downloader/1.0",
-        reason: str | None = None,
-    ) -> None:
-        self.url = url
-        self.user_agent = user_agent
-        self.reason = reason or f"Disallowed by robots.txt for User-Agent '{user_agent}': {url}"
-        super().__init__(self.reason)
-
-
 @dataclass
 class _RobotsGroup:
     agents: list[str] = field(default_factory=list)
@@ -82,6 +67,7 @@ def _strip_comment(raw_line: str) -> str:
 
 def _is_malformed_robots_txt(raw_text: str) -> bool:
     """Detect binary payloads, HTML error pages, or non-directive garbage returned as 200 OK."""
+    raw_text = raw_text.removeprefix("\ufeff")
     if "\x00" in raw_text:
         return True
     stripped_lead = raw_text.lstrip()[:32].lower()
@@ -110,6 +96,7 @@ def _parse_crawl_delay_value(val: str) -> float | None:
 
 def _parse_robots_groups(raw_text: str) -> list[_RobotsGroup]:
     """Parse robots.txt lines into RFC 9309 user-agent rule groups."""
+    raw_text = raw_text.removeprefix("\ufeff")
     groups: list[_RobotsGroup] = []
     current: _RobotsGroup | None = None
     in_rules = False
@@ -357,19 +344,20 @@ class RobotsChecker:
                 if isinstance(raw_cached, bytes):
                     raw_cached = raw_cached.decode("utf-8", errors="ignore")
                 if isinstance(raw_cached, str):
+                    txt = raw_cached
+                    allow_all = False
                     try:
                         parsed = json.loads(raw_cached)
                         if isinstance(parsed, dict) and "allow_all" in parsed:
                             txt = str(parsed.get("raw", ""))
                             allow_all = bool(parsed["allow_all"])
-                            groups = (
-                                [] if allow_all or not txt.strip() else _parse_robots_groups(txt)
-                            )
-                            return txt, allow_all, groups
                     except ValueError:
                         pass
-                    groups = [] if not raw_cached.strip() else _parse_robots_groups(raw_cached)
-                    return raw_cached, False, groups
+                    mem = self._get_memory_cache(origin)
+                    if mem is not None and mem[0] == txt and mem[1] == allow_all:
+                        return mem
+                    groups = self._set_memory_cache(origin, txt, allow_all, self.negative_cache_ttl)
+                    return txt, allow_all, groups
                 return None
             except (RedisError, OSError, RuntimeError, ValueError) as exc:
                 logger.warning(
@@ -424,7 +412,6 @@ class RobotsChecker:
             active_transport = self._transport or SSRFSafeHTTPTransport(
                 limits=httpx.Limits(max_connections=20, max_keepalive_connections=10),
                 http2=False,
-                trust_env=False,
                 backend=backend,
                 egress_policy=self._egress_policy,
             )
@@ -461,49 +448,56 @@ class RobotsChecker:
             body, _ = resolve_charset_and_decode(raw_bytes, response.headers.get("content-type"))
             return response.status_code, body
 
+    async def _cache_fail_open(
+        self,
+        origin: OriginTuple,
+        warning_msg: str,
+        *,
+        ttl: int | None = None,
+    ) -> tuple[str, bool, list[_RobotsGroup]]:
+        if warning_msg:
+            logger.warning(warning_msg)
+        effective_ttl = self.negative_cache_ttl if ttl is None else ttl
+        groups = await self._set_cached_entry(origin, "", True, ttl=effective_ttl)
+        return "", True, groups
+
     async def _fetch_and_cache(self, origin: OriginTuple) -> tuple[str, bool, list[_RobotsGroup]]:
         robots_url = f"{format_origin_url(*origin)}/robots.txt"
         safe_robots_url = redact_url_for_log(robots_url)
-        _, host, _ = origin
 
         try:
             await self._validate_candidate_url(robots_url)
-        except DNSResolutionError as exc:
-            if self._fetcher is None or host.endswith("localhost"):
-                logger.warning(
-                    f"DNS resolution failed fetching {safe_robots_url} ({exc}); failing open"
-                )
-                groups = await self._set_cached_entry(origin, "", True, ttl=self.negative_cache_ttl)
-                return "", True, groups
-        except SSRFProtectionError:
-            raise
-
-        try:
             status_code, raw_text = (
                 await self._fetcher(robots_url)
                 if self._fetcher is not None
                 else await self._default_fetch(robots_url)
             )
+            raw_text = raw_text.removeprefix("\ufeff")
+        except DNSResolutionError as exc:
+            return await self._cache_fail_open(
+                origin,
+                f"DNS resolution failed fetching {safe_robots_url} ({exc}); failing open",
+            )
         except URLValidationError:
             raise
         except (httpx.HTTPError, OSError, TimeoutError, ValueError, RuntimeError) as exc:
-            logger.warning(f"Unreachable robots.txt at {safe_robots_url} ({exc}); failing open")
-            groups = await self._set_cached_entry(origin, "", True, ttl=self.negative_cache_ttl)
-            return "", True, groups
+            return await self._cache_fail_open(
+                origin,
+                f"Unreachable robots.txt at {safe_robots_url} ({exc}); failing open",
+            )
 
         if status_code in {404, 410}:
-            groups = await self._set_cached_entry(origin, "", True, ttl=self.cache_ttl)
-            return "", True, groups
+            return await self._cache_fail_open(origin, "", ttl=self.cache_ttl)
         if status_code >= 400:
-            logger.warning(
-                f"robots.txt at {safe_robots_url} returned HTTP {status_code}; failing open"
+            return await self._cache_fail_open(
+                origin,
+                f"robots.txt at {safe_robots_url} returned HTTP {status_code}; failing open",
             )
-            groups = await self._set_cached_entry(origin, "", True, ttl=self.negative_cache_ttl)
-            return "", True, groups
         if _is_malformed_robots_txt(raw_text):
-            logger.warning(f"Malformed robots.txt at {safe_robots_url}; failing open")
-            groups = await self._set_cached_entry(origin, "", True, ttl=self.negative_cache_ttl)
-            return "", True, groups
+            return await self._cache_fail_open(
+                origin,
+                f"Malformed robots.txt at {safe_robots_url}; failing open",
+            )
 
         groups = await self._set_cached_entry(origin, raw_text, False, ttl=self.cache_ttl)
         return raw_text, False, groups
@@ -540,6 +534,12 @@ class RobotsChecker:
             raise RobotsDisallowedError(url=url, user_agent=effective_ua)
 
         return min(delay, self.max_crawl_delay) if delay is not None else None
+
+    async def __aenter__(self) -> RobotsChecker:
+        return self
+
+    async def __aexit__(self, exc_type: Any, exc_val: Any, exc_tb: Any) -> None:
+        await self.close()
 
     async def close(self) -> None:
         """Close dedicated HTTP client if initialized."""

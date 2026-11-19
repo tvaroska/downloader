@@ -1,9 +1,10 @@
 """Tests for multi-format support."""
 
-from unittest.mock import AsyncMock
+from unittest.mock import AsyncMock, MagicMock
 
-from downloader.dependencies import get_http_client
+from downloader.dependencies import get_browser_renderer, get_http_client
 from downloader.main import app
+from downloader.ports import BrowserRenderer
 from downloader.services.content_negotiation import format_to_mime_type, parse_accept_headers
 
 
@@ -140,7 +141,12 @@ class TestMultiFormat:
         async def mock_get_http_client():
             return mock_client
 
+        stub_renderer = MagicMock(spec=BrowserRenderer)
+        stub_renderer.render_html = AsyncMock(return_value=None)
+        stub_renderer.convert_fallback = AsyncMock(return_value=None)
+
         app.dependency_overrides[get_http_client] = mock_get_http_client
+        app.dependency_overrides[get_browser_renderer] = lambda: stub_renderer
         try:
             response = api_client.get(
                 "/https://example.com", headers={"Accept": "text/html, text/plain"}
@@ -154,3 +160,4 @@ class TestMultiFormat:
             assert "text/plain" in data
         finally:
             app.dependency_overrides.pop(get_http_client, None)
+            app.dependency_overrides.pop(get_browser_renderer, None)

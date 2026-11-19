@@ -77,9 +77,11 @@ class TestScheduleModelValidation:
     def test_schedule_create_url_required(self):
         """Test that url is a required field."""
         with pytest.raises(ValidationError) as exc_info:
-            ScheduleCreate(  # type: ignore[call-arg]
-                name="Test",
-                cron_expression="0 9 * * *",
+            ScheduleCreate.model_validate(
+                {
+                    "name": "Test",
+                    "cron_expression": "0 9 * * *",
+                }
             )
         assert "url" in str(exc_info.value)
 
@@ -390,6 +392,95 @@ class TestCronExpressionValidation:
         fire_seven = sun_seven.get_next_fire_time(None, datetime(2026, 11, 16, 0, 0, tzinfo=UTC))
         assert fire_seven is not None and fire_seven.weekday() == 6
 
+    def test_weekday_step_and_0_7_range_use_unix_numbering(self):
+        """`*/2` fires Sun/Tue/Thu/Sat, `0-7` fires all 7 days, DOM+DOW uses OR, and tz is UTC (`R79`, `R112`)."""
+        # 0 9 * * */2 -> Sun (6), Tue (1), Thu (3), Sat (5)
+        step_trigger = cron_trigger_from_unix_crontab("0 9 * * */2")
+        assert getattr(step_trigger, "timezone", None) == UTC
+        cursor = datetime(2026, 11, 15, 0, 0, tzinfo=UTC)  # Sunday
+        step_days: list[int] = []
+        for _ in range(4):
+            nxt = step_trigger.get_next_fire_time(None, cursor)
+            assert nxt is not None
+            step_days.append(nxt.weekday())
+            cursor = nxt + timedelta(minutes=1)
+        assert step_days == [6, 1, 3, 5]
+
+        # 0 9 * * 0-7 -> every day of the week (7 consecutive days)
+        all_days_trigger = cron_trigger_from_unix_crontab("0 9 * * 0-7")
+        cursor = datetime(2026, 11, 15, 0, 0, tzinfo=UTC)
+        all_days: list[int] = []
+        for _ in range(7):
+            nxt = all_days_trigger.get_next_fire_time(None, cursor)
+            assert nxt is not None
+            all_days.append(nxt.weekday())
+            cursor = nxt + timedelta(minutes=1)
+        assert all_days == [6, 0, 1, 2, 3, 4, 5]
+
+        # Restricted DOM + DOW uses UNIX OR semantics: 0 9 13 * 5 fires on 13th AND every Friday
+        or_trigger = cron_trigger_from_unix_crontab("0 9 13 * 5")
+        # 2026-11-12 is Thursday -> next fire is Fri Nov 13, then Fri Nov 20, ..., and Sun Dec 13
+        fire1 = or_trigger.get_next_fire_time(None, datetime(2026, 12, 1, 0, 0, tzinfo=UTC))
+        assert fire1 is not None and (fire1.day, fire1.weekday()) == (4, 4)  # Fri Dec 4
+        fire_dec13 = or_trigger.get_next_fire_time(None, datetime(2026, 12, 12, 0, 0, tzinfo=UTC))
+        assert fire_dec13 is not None and (fire_dec13.day, fire_dec13.weekday()) == (
+            13,
+            6,
+        )  # Sun Dec 13
+
+        # Unmappable DOW token is rejected
+        with pytest.raises(ValueError):
+            cron_trigger_from_unix_crontab("0 9 * * 8")
+
+    def test_sunday_ranges_and_steps(self):
+        """Ranges starting at 0 or ending at 7 include Sunday (`R113`)."""
+        # 0-3 -> Sun (6), Mon (0), Tue (1), Wed (2)
+        t_0_3 = cron_trigger_from_unix_crontab("0 9 * * 0-3")
+        cursor = datetime(2026, 11, 15, 0, 0, tzinfo=UTC)
+        days_0_3 = []
+        for _ in range(4):
+            nxt = t_0_3.get_next_fire_time(None, cursor)
+            assert nxt is not None
+            days_0_3.append(nxt.weekday())
+            cursor = nxt + timedelta(minutes=1)
+        assert days_0_3 == [6, 0, 1, 2]
+
+        # 5-7 -> Fri (4), Sat (5), Sun (6)
+        t_5_7 = cron_trigger_from_unix_crontab("0 9 * * 5-7")
+        cursor = datetime(2026, 11, 20, 0, 0, tzinfo=UTC)  # Friday
+        days_5_7 = []
+        for _ in range(3):
+            nxt = t_5_7.get_next_fire_time(None, cursor)
+            assert nxt is not None
+            days_5_7.append(nxt.weekday())
+            cursor = nxt + timedelta(minutes=1)
+        assert days_5_7 == [4, 5, 6]
+
+        # 0-6/2 -> Sun (6), Tue (1), Thu (3), Sat (5)
+        t_0_6_step = cron_trigger_from_unix_crontab("0 9 * * 0-6/2")
+        cursor = datetime(2026, 11, 15, 0, 0, tzinfo=UTC)
+        days_step = []
+        for _ in range(4):
+            nxt = t_0_6_step.get_next_fire_time(None, cursor)
+            assert nxt is not None
+            days_step.append(nxt.weekday())
+            cursor = nxt + timedelta(minutes=1)
+        assert days_step == [6, 1, 3, 5]
+
+
+@pytest.mark.unit
+def test_schedule_create_rejects_unknown_fields() -> None:
+    """`ScheduleCreate` uses `extra='forbid'` so typos like `enable=False` fail validation (`R105`)."""
+    with pytest.raises(ValidationError):
+        ScheduleCreate.model_validate(
+            {
+                "name": "Daily",
+                "url": "https://example.com/page",
+                "cron_expression": "0 9 * * *",
+                "enable": False,
+            }
+        )
+
 
 # ============= ExecutionStorage Tests =============
 
@@ -591,7 +682,7 @@ class TestExecutionStorageOperations:
                 return key in self.zsets
 
         fake_redis = _InMemoryZSetRedis()
-        storage = ExecutionStorage(fake_redis, ttl=3600)  # type: ignore[arg-type]
+        storage = ExecutionStorage(fake_redis, ttl=3600)
         now = datetime.now(UTC)
 
         expired_exec = ScheduleExecution(
@@ -645,24 +736,23 @@ class TestSchedulerServiceInit:
         assert service._started is False
 
     def test_init_with_memory_job_store_when_no_redis(self):
-        """Test in-memory job store when redis_uri is None."""
+        """Redis job store raises cleanly when `redis_uri` is missing instead of silent memory fallback (`R114`)."""
         settings = SchedulerConfig(job_store_type="redis")
-        service = SchedulerService(redis_uri=None, settings=settings)
+        with pytest.raises(RuntimeError, match="REDIS_URI is required"):
+            SchedulerService(redis_uri=None, settings=settings)
 
-        assert service._scheduler is not None
-
-    def test_init_redis_fallback_on_error(self):
-        """Test fallback to memory store when Redis connection fails."""
+    def test_init_redis_error_propagates_without_silent_memory_fallback(self):
+        """When Redis job store is explicitly configured, connection errors raise instead of silently falling back (`R114`)."""
         settings = SchedulerConfig(job_store_type="redis")
 
-        with patch(
-            "downloader.scheduler.service._get_redis_job_store",
-            side_effect=OSError("Connection refused"),
+        with (
+            patch(
+                "downloader.scheduler.service._get_redis_job_store",
+                side_effect=OSError("Connection refused"),
+            ),
+            pytest.raises(OSError, match="Connection refused"),
         ):
-            service = SchedulerService(redis_uri="redis://badhost:6379", settings=settings)
-
-            # Should still initialize with memory store
-            assert service._scheduler is not None
+            SchedulerService(redis_uri="redis://badhost:6379", settings=settings)
 
     def test_init_with_custom_settings(self):
         """Test that custom settings are applied."""
@@ -928,12 +1018,20 @@ class TestScheduledJobExecutorProcessContent:
 
     @pytest.fixture
     def executor(self, mock_http_client, mock_storage):
-        """Create a ScheduledJobExecutor with mocks."""
+        """Create a ScheduledJobExecutor with mocks and a stub BrowserRenderer (`R114`)."""
+        from unittest.mock import MagicMock
+
+        from downloader.ports import BrowserRenderer
+
+        stub_renderer = MagicMock(spec=BrowserRenderer)
+        stub_renderer.render_html = AsyncMock(return_value=None)
+        stub_renderer.convert_fallback = AsyncMock(return_value=None)
         return ScheduledJobExecutor(
             http_client=mock_http_client,
             storage=mock_storage,
             pdf_generator=None,
             pdf_semaphore=None,
+            renderer=stub_renderer,
         )
 
     @pytest.mark.asyncio
@@ -1018,8 +1116,14 @@ class TestScheduledJobExecutorProcessContent:
         assert result == content
 
     @pytest.mark.asyncio
-    async def test_process_content_pdf_no_semaphore(self, executor):
+    async def test_process_content_pdf_no_semaphore(self, mock_http_client, mock_storage):
         """Test PDF format raises when semaphore not configured."""
+        executor = ScheduledJobExecutor(
+            http_client=mock_http_client,
+            storage=mock_storage,
+            pdf_generator=None,
+            pdf_semaphore=None,
+        )
         content = b"<html>test</html>"
         metadata = {"content_type": "text/html"}
 
@@ -1058,7 +1162,10 @@ class TestScheduledJobExecutorProcessContent:
                 format="pdf",
             )
 
-            mock_pdf.assert_awaited_once_with("https://example.com")
+            mock_pdf.assert_awaited_once_with(
+                "https://example.com",
+                max_output_bytes=52428800,
+            )
             assert result == b"%PDF-1.4 content"
 
     @pytest.mark.asyncio
@@ -1143,6 +1250,7 @@ async def test_scheduled_download_job_skips_when_run_lock_held():
 
     mock_redis = AsyncMock()
     mock_redis.set = AsyncMock(side_effect=[True, None])
+    mock_redis.eval = AsyncMock(return_value=1)
     mock_storage = AsyncMock(spec=ExecutionStorage)
     mock_storage.redis = mock_redis
 
@@ -1174,5 +1282,29 @@ async def test_scheduled_download_job_skips_when_run_lock_held():
         )
         assert mock_executor.execute.await_count == 1
         assert mock_redis.set.await_count == 2
+        # Token-owned release Lua script runs once after execution finishes (`R110`).
+        assert mock_redis.eval.await_count == 1
     finally:
         schedules_routes.set_executor(prev_executor)
+
+
+@pytest.mark.unit
+def test_reconstruct_legacy_cron_expr_handles_cron_and_or_triggers() -> None:
+    """Legacy persisted triggers without `cron_expression` kwarg reconstruct cleanly (`R114`)."""
+    from downloader.routes.schedules import _reconstruct_legacy_cron_expr
+
+    probe = datetime(2026, 3, 1, 0, 0, tzinfo=UTC)
+
+    t_simple = cron_trigger_from_unix_crontab("30 9 * * 1-5")
+    reconstructed_simple = _reconstruct_legacy_cron_expr(t_simple)
+    assert reconstructed_simple == "30 9 * * mon,tue,wed,thu,fri"
+    assert cron_trigger_from_unix_crontab(reconstructed_simple).get_next_fire_time(
+        None, probe
+    ) == t_simple.get_next_fire_time(None, probe)
+
+    t_or = cron_trigger_from_unix_crontab("0 9 13 * 5")
+    reconstructed_or = _reconstruct_legacy_cron_expr(t_or)
+    assert reconstructed_or == "0 9 13 * fri"
+    assert cron_trigger_from_unix_crontab(reconstructed_or).get_next_fire_time(
+        None, probe
+    ) == t_or.get_next_fire_time(None, probe)

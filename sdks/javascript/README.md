@@ -24,6 +24,7 @@ const rendered = await client.render("https://example.com", {
   output: "markdown",
   waitFor: "article",
   actions: [{ type: "scroll", y: 600 }],
+  timeoutMs: 15000,
 });
 
 const batch = await client.submitBatch(["https://example.com"], {

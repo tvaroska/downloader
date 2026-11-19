@@ -34,9 +34,7 @@ class TestHealthEndpointSanitizedR66:
         mock_jm.redis_client = mock_redis
 
         mock_queue = MagicMock()
-        mock_queue.list_active_workers = AsyncMock(
-            return_value=[{"worker_id": "prod-node-1-abcd1234", "hostname": "prod-node-1"}]
-        )
+        mock_queue.has_heartbeat = AsyncMock(return_value=True)
         mock_queue.get_queue_depths = AsyncMock(return_value={"batch_pending": 42})
 
         orig_jm = getattr(app.state, "job_manager", None)
@@ -62,7 +60,7 @@ class TestHealthEndpointSanitizedR66:
         assert "queues" not in workers_status
         assert "active_workers" not in workers_status
         assert "prod-node-1" not in response.text
-        mock_queue.list_active_workers.assert_not_called()
+        mock_queue.has_heartbeat.assert_not_called()
         mock_queue.get_queue_depths.assert_not_called()
 
 
@@ -160,8 +158,9 @@ class TestJobInfoExpiresAtRenewalR66:
             def multi(self) -> None:
                 return None
 
-            async def setex(self, key: str, _ttl: int, value: str) -> None:
+            def setex(self, key: str, _ttl: int, value: str) -> _FakePipe:
                 self._ops.append((key, value))
+                return self
 
             async def execute(self) -> None:
                 for key, value in self._ops:

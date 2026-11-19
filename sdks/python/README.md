@@ -1,6 +1,6 @@
 # Downloader Python SDK (`downloader-sdk`)
 
-Typed synchronous (`DownloaderClient`) and asynchronous (`AsyncDownloaderClient`) client for the REST API Downloader `v0.7.0+` API.
+Typed synchronous (`DownloaderClient`) and asynchronous (`AsyncDownloaderClient`) client for the REST API Downloader service.
 
 ## Installation
 

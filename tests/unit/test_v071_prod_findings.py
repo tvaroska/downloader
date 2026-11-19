@@ -12,6 +12,7 @@ import pytest
 from fastapi.testclient import TestClient
 
 from downloader import content_converter
+from downloader.browser.renderer import LocalBrowserRenderer
 from downloader.content_converter import (
     convert_content,
     should_use_playwright_for_html,
@@ -20,7 +21,6 @@ from downloader.dependencies import get_domain_throttle, get_http_client, get_ro
 from downloader.http_client import HTTPClient, HTTPClientError, UnsupportedMediaTypeError
 from downloader.main import app
 from downloader.models.responses import BatchURLRequest, ResponseMetadata
-from downloader.ports import LocalBrowserRenderer
 from downloader.services.batch_processor import process_single_url_in_batch
 from downloader.services.content_processor import ConversionDeps, ConversionRequest, convert
 
@@ -50,14 +50,10 @@ class TestBinaryContentTypeGuardF20261116002:
                 request=request,
             )
 
-        client = HTTPClient(max_download_size=50 * 1024 * 1024)
-        await client.close()
-        client._client = httpx.AsyncClient(
+        async with HTTPClient(
+            max_download_size=50 * 1024 * 1024,
             transport=httpx.MockTransport(handler),
-            follow_redirects=True,
-            event_hooks={"response": [client._on_response_hook]},
-        )
-        try:
+        ) as client:
             with pytest.raises(UnsupportedMediaTypeError):
                 await client.download(
                     "https://example.com/episode.mp3",
@@ -66,8 +62,6 @@ class TestBinaryContentTypeGuardF20261116002:
                     target_format="html,markdown",
                 )
             assert stream.chunks_read == 0
-        finally:
-            await client.close()
 
     @pytest.mark.parametrize(
         ("accept_header", "binary_ct"),
@@ -94,12 +88,7 @@ class TestBinaryContentTypeGuardF20261116002:
                 request=request,
             )
 
-        real_http = HTTPClient()
-        real_http._client = httpx.AsyncClient(
-            transport=httpx.MockTransport(handler),
-            follow_redirects=True,
-            event_hooks={"response": [real_http._on_response_hook]},
-        )
+        real_http = HTTPClient(transport=httpx.MockTransport(handler))
         mock_robots = AsyncMock()
         mock_robots.check_allowed.return_value = None
         mock_throttle = AsyncMock()
@@ -223,7 +212,7 @@ class TestAutoRenderHeuristicsAndLogLevelsF20261117002:
 
         caplog.set_level(logging.WARNING)
         with patch(
-            "downloader.content_converter.render_html_with_playwright",
+            "downloader.browser.renderer.render_html_with_playwright",
             new=AsyncMock(side_effect=RuntimeError("Page.goto: Timeout 10000ms exceeded")),
         ):
             resp = await convert(

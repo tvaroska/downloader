@@ -7,5 +7,7 @@
     "ruff:S"
   ],
   "oversized_files": {},
-  "narration_comments": 0
+  "narration_comments": 0,
+  "noqa_comments": 56,
+  "type_ignore_comments": 2
 }

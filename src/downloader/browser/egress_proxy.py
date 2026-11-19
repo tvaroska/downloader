@@ -124,6 +124,7 @@ class BrowserEgressProxy:
             self._handle_client,
             host="127.0.0.1",
             port=0,
+            limit=_HEADER_READ_LIMIT,
         )
         sockets = self._server.sockets
         if not sockets:
@@ -231,10 +232,7 @@ class BrowserEgressProxy:
                 timeout=_CONNECT_TIMEOUT_SECONDS,
             )
             if len(raw_head) > _HEADER_READ_LIMIT:
-                await self._send_error(
-                    client_writer, b"HTTP/1.1 431 Request Header Fields Too Large"
-                )
-                return
+                raise asyncio.LimitOverrunError("Request header fields too large", len(raw_head))
 
             lines = raw_head[:-4].decode("latin-1").split("\r\n")
             if not lines or not lines[0]:
@@ -251,6 +249,8 @@ class BrowserEgressProxy:
                 upstream_writer = await self._forward_http(
                     (method, target, version), lines[1:], client_reader, client_writer
                 )
+        except asyncio.LimitOverrunError:
+            await self._send_error(client_writer, b"HTTP/1.1 431 Request Header Fields Too Large")
         except URLValidationError as exc:
             logger.warning(f"Blocked Chromium egress via SSRF proxy: {exc}")
             await self._send_error(

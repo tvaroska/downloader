@@ -24,7 +24,7 @@ from downloader.services.batch_processor import process_background_batch_job
 def _make_mock_http_client() -> AsyncMock:
     mock_client = AsyncMock()
 
-    async def _download(url: str, priority=None):
+    async def _download(url: str, priority=None, **_kwargs):
         body = f"<html><body><h1>Allowed content from {url}</h1></body></html>".encode()
         return (
             body,

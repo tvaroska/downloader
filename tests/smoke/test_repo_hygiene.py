@@ -2,8 +2,10 @@
 
 from __future__ import annotations
 
+import json
 import os
 import re
+import tomllib
 from pathlib import Path
 
 import pytest
@@ -200,3 +202,28 @@ def test_governance_spine_and_claude_symlink() -> None:
     assert decisions_md.stat().st_size <= 25_600, "DECISIONS.md must stay <= 25 KB"
 
     assert ast_rules.is_file() and ast_rules.stat().st_size > 0, "specs/ast.rules.yaml must exist"
+
+
+@pytest.mark.smoke
+def test_version_strings_match_package_manifest() -> None:
+    """Active package, SDK, and contract manifests must agree on the current service version (`R111`)."""
+    root_pyproject = tomllib.loads((REPO_ROOT / "pyproject.toml").read_text(encoding="utf-8"))
+    expected = str(root_pyproject["project"]["version"])
+
+    from downloader import __version__
+
+    assert __version__ == expected
+
+    py_sdk = tomllib.loads(
+        (REPO_ROOT / "sdks" / "python" / "pyproject.toml").read_text(encoding="utf-8")
+    )
+    assert str(py_sdk["project"]["version"]) == expected
+
+    js_pkg = json.loads(
+        (REPO_ROOT / "sdks" / "javascript" / "package.json").read_text(encoding="utf-8")
+    )
+    assert str(js_pkg["version"]) == expected
+
+    spec_text = (REPO_ROOT / "spec" / "contracts.md").read_text(encoding="utf-8")
+    assert f"(service `{expected}`)" in spec_text
+    assert f'"version": "{expected}"' in spec_text

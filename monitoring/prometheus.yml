@@ -12,18 +12,25 @@ alerting:
 
 scrape_configs:
   # REST API Downloader metrics
+  # /metrics requires Bearer auth when DOWNLOADER_KEY is set.
+  # Mount the secret token at /etc/prometheus/downloader_bearer_token (never commit secrets).
   - job_name: 'downloader'
     static_configs:
-      - targets: ['host.docker.internal:8000']  # Adjust port if needed
+      - targets: ['host.docker.internal:8000']
     metrics_path: '/metrics'
     scrape_interval: 10s
     scrape_timeout: 5s
-    # /metrics requires API key authentication when DOWNLOADER_KEY is configured.
-    # Mount the token file (never commit secrets) and uncomment one of the options below:
-    # authorization:
-    #   type: Bearer
-    #   credentials_file: /etc/prometheus/downloader_bearer_token
-    # bearer_token_file: /etc/prometheus/downloader_bearer_token
+    authorization:
+      type: Bearer
+      credentials_file: /etc/prometheus/downloader_bearer_token
+
+  # Optional standalone split-worker Prometheus listener (enabled via WORKER_METRICS_PORT=9108)
+  - job_name: 'downloader-worker'
+    static_configs:
+      - targets: ['host.docker.internal:9108']
+    metrics_path: '/metrics'
+    scrape_interval: 15s
+    scrape_timeout: 5s
 
   # Prometheus self-monitoring
   - job_name: 'prometheus'
@@ -39,5 +46,5 @@ scrape_configs:
   # System metrics (node_exporter if available)
   - job_name: 'node'
     static_configs:
-      - targets: ['host.docker.internal:9100']  # Optional: add node_exporter
+      - targets: ['host.docker.internal:9100']
     scrape_interval: 30s

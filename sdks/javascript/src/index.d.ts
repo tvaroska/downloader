@@ -60,6 +60,7 @@ export interface RenderOptions {
   actions?: BrowserAction[];
   fullPage?: boolean;
   screenshotFormat?: "png" | "jpeg";
+  timeoutMs?: number;
   signal?: AbortSignal;
 }
 
@@ -185,14 +186,15 @@ export interface DownloaderClientOptions {
 }
 
 export declare function encodeTargetUrlPath(url: string): string;
+export declare function encodePathSegment(id: string, field: string): string;
 
 export declare class DownloaderApiError extends Error {
-  readonly statusCode: number;
+  readonly statusCode: number | null;
   readonly errorType: string | null;
   readonly retryAfter: number | null;
   constructor(
     message: string,
-    statusCode: number,
+    statusCode: number | null,
     errorType?: string | null,
     retryAfter?: number | null,
   );

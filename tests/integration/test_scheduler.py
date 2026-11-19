@@ -118,7 +118,8 @@ class TestScheduleRoutes:
 
         response = api_client.post("/schedules", json=request_data)
 
-        assert response.status_code == 422  # Validation error
+        assert response.status_code == 400
+        assert response.json()["detail"]["error_type"] == "validation_error"
 
     def test_create_schedule_disabled(self, api_client, override_scheduler):
         """Test POST /schedules with enabled=False pauses the job."""

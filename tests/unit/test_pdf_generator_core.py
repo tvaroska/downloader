@@ -29,7 +29,7 @@ class TestPlaywrightPDFGenerator:
     async def test_start_failure(self, mock_playwright):
         """Test failure during start."""
         mock, _, _ = mock_playwright
-        mock.return_value.start.side_effect = Exception("Browser start failed")
+        mock.return_value.start.side_effect = RuntimeError("Browser start failed")
 
         generator = PlaywrightPDFGenerator()
 

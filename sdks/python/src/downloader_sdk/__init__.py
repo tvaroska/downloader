@@ -3,6 +3,7 @@
 from .client import AsyncDownloaderClient, DownloaderClient
 from .exceptions import (
     APIError,
+    BatchJobError,
     DownloaderError,
     RateLimitError,
     ServiceUnavailableError,
@@ -22,11 +23,12 @@ from .models import (
     ScheduleInfo,
 )
 
-__version__ = "0.7.0"
+__version__ = "0.7.1"
 
 __all__ = [
     "APIError",
     "AsyncDownloaderClient",
+    "BatchJobError",
     "BatchJobResults",
     "BatchJobStatus",
     "BatchJobSubmission",

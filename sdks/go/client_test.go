@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"testing"
+	"time"
 )
 
 func TestDownloaderClientEndToEnd(t *testing.T) {
@@ -18,13 +19,13 @@ func TestDownloaderClientEndToEnd(t *testing.T) {
 		switch r.URL.Path {
 		case "/health":
 			w.Header().Set("Content-Type", "application/json")
-			_, _ = w.Write([]byte(`{"status":"healthy","version":"0.7.0","environment":"test","draining":false}`))
+			_, _ = w.Write([]byte(`{"status":"healthy","version":"0.7.1","environment":"test","draining":false}`))
 		case "/render":
 			var body RenderRequest
 			if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
 				t.Fatalf("decode render body: %v", err)
 			}
-			if body.Output != "markdown" || len(body.Actions) != 1 {
+			if body.Output != "markdown" || len(body.Actions) != 1 || body.TimeoutMs != 5000 {
 				t.Fatalf("unexpected render payload: %+v", body)
 			}
 			w.Header().Set("Content-Type", "text/markdown")
@@ -36,6 +37,9 @@ func TestDownloaderClientEndToEnd(t *testing.T) {
 		case "/jobs/job-go-1/status":
 			w.Header().Set("Content-Type", "application/json")
 			_, _ = w.Write([]byte(`{"job_id":"job-go-1","status":"completed","progress":100,"total_urls":1,"processed_urls":1,"successful_urls":1,"failed_urls":0,"results_available":true,"expires_at":"2026-11-13T00:00:00Z"}`))
+		case "/jobs/job-cancelled/status":
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(`{"job_id":"job-cancelled","status":"cancelled","progress":50,"total_urls":2,"processed_urls":1,"successful_urls":1,"failed_urls":0,"results_available":false}`))
 		case "/jobs/job-go-1/results":
 			w.Header().Set("Content-Type", "application/json")
 			_, _ = w.Write([]byte(`{"job_id":"job-go-1","status":"completed","total_duration":0.3,"results":[{"url":"https://example.com","success":true}],"summary":{"successful_requests":1},"created_at":"2026-11-12T00:00:00Z","completed_at":"2026-11-12T00:00:01Z"}`))
@@ -99,8 +103,8 @@ func TestDownloaderClientEndToEnd(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Health failed: %v", err)
 	}
-	if health.Version != "0.7.0" {
-		t.Fatalf("expected version 0.7.0, got %s", health.Version)
+	if health.Version != "0.7.1" {
+		t.Fatalf("expected version 0.7.1, got %s", health.Version)
 	}
 
 	shot, err := client.Screenshot(ctx, "https://example.com/shot", true, "png", nil)
@@ -112,9 +116,10 @@ func TestDownloaderClientEndToEnd(t *testing.T) {
 	}
 
 	rendered, err := client.Render(ctx, RenderRequest{
-		URL:     "https://example.com",
-		Output:  "markdown",
-		Actions: []BrowserAction{{Type: "click", Selector: "#go"}},
+		URL:       "https://example.com",
+		Output:    "markdown",
+		Actions:   []BrowserAction{{Type: "click", Selector: "#go"}},
+		TimeoutMs: 5000,
 	})
 	if err != nil {
 		t.Fatalf("Render failed: %v", err)
@@ -134,9 +139,17 @@ func TestDownloaderClientEndToEnd(t *testing.T) {
 	if err != nil || !st.ResultsAvailable || st.ExpiresAt == nil || *st.ExpiresAt != "2026-11-13T00:00:00Z" {
 		t.Fatalf("GetJobStatus failed: st=%+v err=%v", st, err)
 	}
-	res, err := client.GetJobResults(ctx, sub.JobID)
+	res, err := client.WaitForBatch(ctx, sub.JobID, 5*time.Millisecond)
 	if err != nil || len(res.Results) != 1 {
-		t.Fatalf("GetJobResults failed: res=%+v err=%v", res, err)
+		t.Fatalf("WaitForBatch failed: res=%+v err=%v", res, err)
+	}
+	_, err = client.WaitForBatch(ctx, "job-cancelled", 5*time.Millisecond)
+	var batchErr *BatchJobError
+	if !errors.As(err, &batchErr) || batchErr.JobStatus != "cancelled" || batchErr.ErrorType != "batch_cancelled" {
+		t.Fatalf("expected BatchJobError for cancelled job, got %v", err)
+	}
+	if _, err := client.GetJobStatus(ctx, ".."); err == nil {
+		t.Fatalf("expected error for traversal job ID '..'")
 	}
 	cancelled, err := client.CancelJob(ctx, sub.JobID)
 	if err != nil || !cancelled.Success {

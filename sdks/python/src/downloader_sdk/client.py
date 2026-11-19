@@ -7,11 +7,13 @@ import json
 import time
 from collections.abc import Sequence
 from typing import Any, Literal
+from urllib.parse import quote
 
 import httpx
 
 from .exceptions import (
     APIError,
+    BatchJobError,
     RateLimitError,
     ServiceUnavailableError,
     ValidationError,
@@ -101,6 +103,39 @@ def _encode_target_url_path(url: str) -> str:
     """Percent-encode '%', '?' and '#' so target query/fragment survive GET /{url:path}."""
     stripped = url.lstrip("/")
     return stripped.replace("%", "%25").replace("?", "%3F").replace("#", "%23")
+
+
+def _encode_path_segment(value: str, field: str) -> str:
+    """Validate and percent-encode a single URL path segment."""
+    if not value or value in {".", ".."}:
+        raise ValueError(f"{field} must be a non-empty path segment and not '.' or '..'")
+    return quote(value, safe="")
+
+
+def _serialize_render_payload(  # noqa: PLR0913
+    url: str,
+    *,
+    output: Literal["html", "text", "markdown", "pdf", "screenshot"] = "html",
+    wait_for: str | None = None,
+    actions: Sequence[BrowserAction | dict[str, Any]] = (),
+    full_page: bool = False,
+    screenshot_format: Literal["png", "jpeg"] = "png",
+    timeout_ms: int | None = None,
+) -> dict[str, Any]:
+    payload: dict[str, Any] = {
+        "url": url,
+        "output": output,
+        "wait_for": wait_for,
+        "actions": [
+            a.model_dump(exclude_none=True) if isinstance(a, BrowserAction) else dict(a)
+            for a in actions
+        ],
+        "full_page": full_page,
+        "screenshot_format": screenshot_format,
+    }
+    if timeout_ms is not None:
+        payload["timeout_ms"] = timeout_ms
+    return payload
 
 
 def _download_request_args(  # noqa: PLR0913
@@ -339,18 +374,17 @@ class DownloaderClient:
         actions: Sequence[BrowserAction | dict[str, Any]] = (),
         full_page: bool = False,
         screenshot_format: Literal["png", "jpeg"] = "png",
+        timeout_ms: int | None = None,
     ) -> DownloadResult:
-        payload = {
-            "url": url,
-            "output": output,
-            "wait_for": wait_for,
-            "actions": [
-                a.model_dump(exclude_none=True) if isinstance(a, BrowserAction) else dict(a)
-                for a in actions
-            ],
-            "full_page": full_page,
-            "screenshot_format": screenshot_format,
-        }
+        payload = _serialize_render_payload(
+            url,
+            output=output,
+            wait_for=wait_for,
+            actions=actions,
+            full_page=full_page,
+            screenshot_format=screenshot_format,
+            timeout_ms=timeout_ms,
+        )
         resp = self._client.post("/render", json=payload)
         _raise_for_api_error(resp)
         return _to_download_result(url, resp)
@@ -378,17 +412,20 @@ class DownloaderClient:
         return BatchJobSubmission.model_validate(resp.json())
 
     def get_job_status(self, job_id: str) -> BatchJobStatus:
-        resp = self._client.get(f"/jobs/{job_id}/status")
+        encoded = _encode_path_segment(job_id, "job_id")
+        resp = self._client.get(f"/jobs/{encoded}/status")
         _raise_for_api_error(resp)
         return BatchJobStatus.model_validate(resp.json())
 
     def get_job_results(self, job_id: str) -> BatchJobResults:
-        resp = self._client.get(f"/jobs/{job_id}/results")
+        encoded = _encode_path_segment(job_id, "job_id")
+        resp = self._client.get(f"/jobs/{encoded}/results")
         _raise_for_api_error(resp)
         return BatchJobResults.model_validate(resp.json())
 
     def cancel_job(self, job_id: str) -> dict[str, Any]:
-        resp = self._client.delete(f"/jobs/{job_id}")
+        encoded = _encode_path_segment(job_id, "job_id")
+        resp = self._client.delete(f"/jobs/{encoded}")
         _raise_for_api_error(resp)
         return dict(resp.json())
 
@@ -405,9 +442,10 @@ class DownloaderClient:
             if status.status == "completed":
                 return self.get_job_results(job_id)
             if status.status in {"failed", "cancelled"}:
-                raise APIError(
+                raise BatchJobError(
                     status.error_message or f"Batch job {job_id} ended with status {status.status}",
-                    status_code=500,
+                    job_id=job_id,
+                    job_status=status.status,
                     error_type=f"batch_{status.status}",
                 )
             if time.monotonic() >= deadline:
@@ -426,22 +464,25 @@ class DownloaderClient:
         return [ScheduleInfo.model_validate(item) for item in data.get("schedules", [])]
 
     def get_schedule(self, schedule_id: str) -> ScheduleInfo:
-        resp = self._client.get(f"/schedules/{schedule_id}")
+        encoded = _encode_path_segment(schedule_id, "schedule_id")
+        resp = self._client.get(f"/schedules/{encoded}")
         _raise_for_api_error(resp)
         return ScheduleInfo.model_validate(resp.json())
 
     def get_schedule_history(
         self, schedule_id: str, *, limit: int = 20, offset: int = 0
     ) -> ScheduleHistory:
+        encoded = _encode_path_segment(schedule_id, "schedule_id")
         resp = self._client.get(
-            f"/schedules/{schedule_id}/history",
+            f"/schedules/{encoded}/history",
             params={"limit": limit, "offset": offset},
         )
         _raise_for_api_error(resp)
         return ScheduleHistory.model_validate(resp.json())
 
     def delete_schedule(self, schedule_id: str) -> dict[str, Any]:
-        resp = self._client.delete(f"/schedules/{schedule_id}")
+        encoded = _encode_path_segment(schedule_id, "schedule_id")
+        resp = self._client.delete(f"/schedules/{encoded}")
         _raise_for_api_error(resp)
         return dict(resp.json())
 
@@ -576,18 +617,17 @@ class AsyncDownloaderClient:
         actions: Sequence[BrowserAction | dict[str, Any]] = (),
         full_page: bool = False,
         screenshot_format: Literal["png", "jpeg"] = "png",
+        timeout_ms: int | None = None,
     ) -> DownloadResult:
-        payload = {
-            "url": url,
-            "output": output,
-            "wait_for": wait_for,
-            "actions": [
-                a.model_dump(exclude_none=True) if isinstance(a, BrowserAction) else dict(a)
-                for a in actions
-            ],
-            "full_page": full_page,
-            "screenshot_format": screenshot_format,
-        }
+        payload = _serialize_render_payload(
+            url,
+            output=output,
+            wait_for=wait_for,
+            actions=actions,
+            full_page=full_page,
+            screenshot_format=screenshot_format,
+            timeout_ms=timeout_ms,
+        )
         resp = await self._client.post("/render", json=payload)
         _raise_for_api_error(resp)
         return _to_download_result(url, resp)
@@ -615,17 +655,20 @@ class AsyncDownloaderClient:
         return BatchJobSubmission.model_validate(resp.json())
 
     async def get_job_status(self, job_id: str) -> BatchJobStatus:
-        resp = await self._client.get(f"/jobs/{job_id}/status")
+        encoded = _encode_path_segment(job_id, "job_id")
+        resp = await self._client.get(f"/jobs/{encoded}/status")
         _raise_for_api_error(resp)
         return BatchJobStatus.model_validate(resp.json())
 
     async def get_job_results(self, job_id: str) -> BatchJobResults:
-        resp = await self._client.get(f"/jobs/{job_id}/results")
+        encoded = _encode_path_segment(job_id, "job_id")
+        resp = await self._client.get(f"/jobs/{encoded}/results")
         _raise_for_api_error(resp)
         return BatchJobResults.model_validate(resp.json())
 
     async def cancel_job(self, job_id: str) -> dict[str, Any]:
-        resp = await self._client.delete(f"/jobs/{job_id}")
+        encoded = _encode_path_segment(job_id, "job_id")
+        resp = await self._client.delete(f"/jobs/{encoded}")
         _raise_for_api_error(resp)
         return dict(resp.json())
 
@@ -642,9 +685,10 @@ class AsyncDownloaderClient:
             if status.status == "completed":
                 return await self.get_job_results(job_id)
             if status.status in {"failed", "cancelled"}:
-                raise APIError(
+                raise BatchJobError(
                     status.error_message or f"Batch job {job_id} ended with status {status.status}",
-                    status_code=500,
+                    job_id=job_id,
+                    job_status=status.status,
                     error_type=f"batch_{status.status}",
                 )
             if time.monotonic() >= deadline:
@@ -663,21 +707,24 @@ class AsyncDownloaderClient:
         return [ScheduleInfo.model_validate(item) for item in data.get("schedules", [])]
 
     async def get_schedule(self, schedule_id: str) -> ScheduleInfo:
-        resp = await self._client.get(f"/schedules/{schedule_id}")
+        encoded = _encode_path_segment(schedule_id, "schedule_id")
+        resp = await self._client.get(f"/schedules/{encoded}")
         _raise_for_api_error(resp)
         return ScheduleInfo.model_validate(resp.json())
 
     async def get_schedule_history(
         self, schedule_id: str, *, limit: int = 20, offset: int = 0
     ) -> ScheduleHistory:
+        encoded = _encode_path_segment(schedule_id, "schedule_id")
         resp = await self._client.get(
-            f"/schedules/{schedule_id}/history",
+            f"/schedules/{encoded}/history",
             params={"limit": limit, "offset": offset},
         )
         _raise_for_api_error(resp)
         return ScheduleHistory.model_validate(resp.json())
 
     async def delete_schedule(self, schedule_id: str) -> dict[str, Any]:
-        resp = await self._client.delete(f"/schedules/{schedule_id}")
+        encoded = _encode_path_segment(schedule_id, "schedule_id")
+        resp = await self._client.delete(f"/schedules/{encoded}")
         _raise_for_api_error(resp)
         return dict(resp.json())

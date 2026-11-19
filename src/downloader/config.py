@@ -2,11 +2,11 @@
 
 from __future__ import annotations
 
+import math
 import multiprocessing
-import os
 from typing import Annotated, Any, Literal
 
-from pydantic import Field, PrivateAttr, field_validator, model_validator
+from pydantic import AliasChoices, Field, field_validator, model_validator
 from pydantic_settings import BaseSettings, NoDecode, SettingsConfigDict
 
 from .runtime_config import (
@@ -51,18 +51,6 @@ class HTTPClientConfig(BaseSettings):
         le=50,
         description="Maximum number of redirects to follow",
     )
-    max_concurrent_api: int = Field(
-        default=20,
-        ge=1,
-        le=100,
-        description="Max concurrent HTTP requests for API endpoints",
-    )
-    max_concurrent_batch: int = Field(
-        default=5,
-        ge=1,
-        le=50,
-        description="Max concurrent HTTP requests for batch processing",
-    )
     http2_enabled: bool = Field(
         default=True,
         description="Enable HTTP/2 support for better multiplexing",
@@ -94,7 +82,7 @@ class PDFConfig(BaseSettings):
         default=3,
         ge=1,
         le=50,
-        description="Max concurrent browser sessions (defaults to pool_size)",
+        description="Max concurrent browser sessions (defaults to pool_size, must be <= pool_size)",
     )
     page_load_timeout: int = Field(
         default=30000,
@@ -136,6 +124,10 @@ class PDFConfig(BaseSettings):
     def _sync_concurrency_with_pool_size(self) -> PDFConfig:
         if "concurrency" not in self.model_fields_set:
             self.concurrency = self.pool_size
+        elif self.concurrency > self.pool_size:
+            raise ValueError(
+                f"PDF_CONCURRENCY ({self.concurrency}) must not exceed PDF_POOL_SIZE ({self.pool_size})"
+            )
         return self
 
 
@@ -271,9 +263,6 @@ class SchedulerConfig(BaseSettings):
 class AuthConfig(BaseSettings):
     """API-key authentication configuration."""
 
-    _explicit_api_key: bool = PrivateAttr(default=False)
-    _loaded_from_env: bool = PrivateAttr(default=False)
-
     api_key: str | None = Field(
         default=None,
         alias="DOWNLOADER_KEY",
@@ -293,19 +282,21 @@ class AuthConfig(BaseSettings):
         extra="ignore",
     )
 
-    def __init__(self, **values: Any) -> None:
-        explicit = "api_key" in values or "DOWNLOADER_KEY" in values
-        from_env = not explicit and "DOWNLOADER_KEY" in os.environ
-        super().__init__(**values)
-        self._explicit_api_key = explicit
-        self._loaded_from_env = from_env
+    @field_validator("api_key", mode="before")
+    @classmethod
+    def _strip_blank_api_key(cls, v: Any) -> Any:
+        if isinstance(v, str):
+            return v.strip() or None
+        return v
 
 
 class LoggingConfig(BaseSettings):
     """Structured and rotating file logging configuration."""
 
     log_level: Literal["DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"] = Field(
-        default="INFO", description="Application log level"
+        default="INFO",
+        validation_alias=AliasChoices("LOG_LEVEL", "LOG_LOG_LEVEL"),
+        description="Application log level",
     )
     access_log_level: Literal["DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"] = Field(
         default="INFO", description="Uvicorn access log level"
@@ -323,16 +314,18 @@ class LoggingConfig(BaseSettings):
     log_rotation_size: int = Field(
         default=10 * 1024 * 1024,
         ge=1024 * 1024,
+        validation_alias=AliasChoices("LOG_ROTATION_SIZE", "LOG_LOG_ROTATION_SIZE"),
         description="Log file size before rotation (bytes)",
     )
     log_rotation_count: int = Field(
         default=5,
         ge=1,
         le=100,
+        validation_alias=AliasChoices("LOG_ROTATION_COUNT", "LOG_LOG_ROTATION_COUNT"),
         description="Number of rotated log files to keep",
     )
 
-    model_config = SettingsConfigDict(env_prefix="LOG_", extra="ignore")
+    model_config = SettingsConfigDict(env_prefix="LOG_", populate_by_name=True, extra="ignore")
 
 
 class SSRFConfig(BaseSettings):
@@ -554,9 +547,23 @@ class Settings(BaseSettings):
                 )
         return self
 
+    @model_validator(mode="after")
+    def validate_worker_heartbeat_covers_drain(self) -> Settings:
+        """Ensure worker heartbeat TTL covers shutdown drain plus one heartbeat interval (`R83`)."""
+        min_ttl = self.shutdown.drain_timeout + self.worker.heartbeat_interval
+        if "heartbeat_ttl" not in self.worker.model_fields_set:
+            if self.worker.heartbeat_ttl < min_ttl:
+                self.worker.heartbeat_ttl = min(600, math.ceil(min_ttl))
+        elif self.worker.heartbeat_ttl < min_ttl:
+            raise ValueError(
+                f"worker.heartbeat_ttl ({self.worker.heartbeat_ttl}s) must be >= "
+                f"shutdown.drain_timeout + worker.heartbeat_interval ({min_ttl:.1f}s)"
+            )
+        return self
+
     def _production_warnings(self) -> list[str]:
         warnings: list[str] = []
-        if not (self.auth.api_key and self.auth.api_key.strip()):
+        if not self.auth.api_key:
             warnings.append("WARNING: No API key configured in production")
         if "*" in self.cors.allowed_origins:
             warnings.append("WARNING: CORS allows all origins in production - security risk!")

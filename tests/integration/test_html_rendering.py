@@ -4,9 +4,8 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
-from downloader.content_converter import render_html_with_playwright
+from downloader.browser.renderer import LocalBrowserRenderer, render_html_with_playwright
 from downloader.models.responses import ResponseMetadata
-from downloader.ports import LocalBrowserRenderer
 from downloader.services.content_processor import ConversionDeps, ConversionRequest, convert
 
 
@@ -119,7 +118,7 @@ class TestPlaywrightHTMLRendering:
     async def test_render_html_browser_not_initialized(self):
         """Test error when browser pool is not initialized."""
         # Mock get_shared_pdf_generator to return None
-        with patch("downloader.content_converter.get_shared_pdf_generator", return_value=None):
+        with patch("downloader.pdf_generator.get_shared_pdf_generator", return_value=None):
             url = "https://example.com/article"
 
             with pytest.raises(Exception, match="PDF generator pool not initialized"):
@@ -280,7 +279,7 @@ def mock_playwright_for_html():
 
     # Patch get_shared_pdf_generator
     with patch(
-        "downloader.content_converter.get_shared_pdf_generator",
+        "downloader.pdf_generator.get_shared_pdf_generator",
         return_value=mock_generator,
     ):
         yield mock_generator, mock_browser, mock_context, mock_page

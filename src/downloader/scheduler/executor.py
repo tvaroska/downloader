@@ -15,10 +15,16 @@ from ..errors import classify_domain_error
 from ..http_client import HTTPClient
 from ..models.responses import ResponseMetadata
 from ..models.schedule import ExecutionStatus, ScheduleExecution
-from ..ports import BrowserRenderer, LocalBrowserRenderer
+from ..ports import BrowserRenderer
 from ..services.content_processor import ConversionDeps, ConversionRequest, OutputFormat, convert
-from ..services.webhooks import deliver_webhook
-from ..validation import canonical_host, sanitize_custom_headers, validate_url_async
+from ..services.webhooks import deliver_webhook, open_webhook_secret
+from ..validation import (
+    EgressPolicy,
+    canonical_host,
+    redact_url_for_log,
+    sanitize_custom_headers,
+    validate_url_async,
+)
 
 if TYPE_CHECKING:
     from ..pdf_generator import PlaywrightPDFGenerator
@@ -74,12 +80,19 @@ class ScheduledJobExecutor:
         self._renderer = renderer
         self._settings = settings
 
-    def _resolve_renderer(self) -> BrowserRenderer:
+    def _resolve_renderer(self, *, require_semaphore: bool = True) -> BrowserRenderer:
         if self._renderer is not None:
             return self._renderer
-        if self.pdf_semaphore is None:
+        if require_semaphore and self.pdf_semaphore is None:
             raise RuntimeError("Browser rendering not available: semaphore not configured")
-        return LocalBrowserRenderer(self.pdf_semaphore)
+        from ..browser.renderer import LocalBrowserRenderer
+
+        cfg = self._settings or get_settings()
+        return LocalBrowserRenderer(
+            self.pdf_semaphore,
+            egress_policy=EgressPolicy(cfg),
+            max_output_bytes=cfg.content.max_download_size,
+        )
 
     async def _emit_schedule_webhook(  # noqa: PLR0913
         self,
@@ -91,6 +104,8 @@ class ScheduledJobExecutor:
     ) -> None:
         if not webhook_url:
             return
+        cfg = self._settings or get_settings()
+        resolved_secret = open_webhook_secret(webhook_secret, cfg)
         event = "schedule.completed" if execution.success else "schedule.failed"
         await deliver_webhook(
             webhook_url,
@@ -108,8 +123,8 @@ class ScheduledJobExecutor:
                 "attempt": execution.attempt,
                 "error_message": execution.error_message,
             },
-            secret=webhook_secret,
-            settings=self._settings or get_settings(),
+            secret=resolved_secret,
+            settings=cfg,
         )
 
     async def execute(  # noqa: PLR0913
@@ -256,7 +271,8 @@ class ScheduledJobExecutor:
                 completed_at = datetime.now(UTC)
                 classified = classify_domain_error(exc, context="schedule")
                 logger.warning(
-                    f"[SCHEDULE-{schedule_id}] Attempt {attempt} failed: {type(exc).__name__}: {exc}"
+                    f"[SCHEDULE-{schedule_id}] Attempt {attempt} failed for "
+                    f"{redact_url_for_log(url)}: {type(exc).__name__}: {exc}"
                 )
                 return (
                     ScheduleExecution(
@@ -289,15 +305,11 @@ class ScheduledJobExecutor:
         if format in {"pdf", "screenshot"}:
             res = await convert(
                 ConversionRequest(url=url, output_format=cast(OutputFormat, format)),
-                ConversionDeps(renderer=self._resolve_renderer()),
+                ConversionDeps(renderer=self._resolve_renderer(require_semaphore=True)),
             )
             return res.body
 
-        renderer = (
-            self._renderer
-            if self._renderer is not None
-            else LocalBrowserRenderer(self.pdf_semaphore)
-        )
+        renderer = self._resolve_renderer(require_semaphore=False)
         normalized_meta = _coerce_metadata(url, content, metadata)
         res = await convert(
             ConversionRequest(

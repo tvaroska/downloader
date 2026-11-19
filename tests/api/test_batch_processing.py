@@ -90,108 +90,23 @@ class TestBatchProcessing:
             assert response.status_code == 200
 
             data = response.json()
-            assert data["job_id"] is not None
+            assert data["job_id"] == "test_job_id"
+            mock_job_manager.create_job.assert_awaited_once()
+            mock_job_manager.start_background_job.assert_awaited_once()
         finally:
             app.dependency_overrides.pop(get_http_client, None)
             app.dependency_overrides.pop(get_job_manager_dependency, None)
 
-    def test_batch_mixed_success_failure(
-        self,
-        api_client,
-        mock_job_manager,
-    ):
-        """Test batch processing with mix of successful and failed URLs."""
-        from downloader.http_client import HTTPClientError
-
-        def mock_download_side_effect(url, priority=None):
-            if "fail.com" in url:
-                raise HTTPClientError("HTTP 404: Not Found", status_code=404)
-            return (
-                b"<html>Success</html>",
-                {
-                    "url": url,
-                    "status_code": 200,
-                    "content_type": "text/html",
-                    "size": 19,
-                    "headers": {"content-type": "text/html"},
-                },
-            )
-
-        mock_client = AsyncMock()
-        mock_client.download.side_effect = mock_download_side_effect
-
-        async def mock_get_http_client():
-            return mock_client
-
-        async def mock_get_job_manager():
-            return mock_job_manager
-
-        app.dependency_overrides[get_http_client] = mock_get_http_client
-        app.dependency_overrides[get_job_manager_dependency] = mock_get_job_manager
-        try:
-            batch_request = {
-                "urls": [
-                    {"url": "https://success.com"},
-                    {"url": "https://fail.com"},
-                    {"url": "https://success2.com"},
-                ],
-                "default_format": "text",
-            }
-
-            response = api_client.post("/batch", json=batch_request)
-            assert response.status_code == 200
-            assert response.json()["job_id"] is not None
-        finally:
-            app.dependency_overrides.pop(get_http_client, None)
-            app.dependency_overrides.pop(get_job_manager_dependency, None)
-
-    def test_batch_different_formats(
-        self,
-        api_client,
-        mock_job_manager,
-        sample_html_content,
-        sample_metadata,
-    ):
-        """Test batch processing with different output formats."""
-        mock_client = AsyncMock()
-        mock_client.download.return_value = (
-            sample_html_content,
-            sample_metadata,
-        )
-
-        async def mock_get_http_client():
-            return mock_client
-
-        async def mock_get_job_manager():
-            return mock_job_manager
-
-        app.dependency_overrides[get_http_client] = mock_get_http_client
-        app.dependency_overrides[get_job_manager_dependency] = mock_get_job_manager
-        try:
-            batch_request = {
-                "urls": [
-                    {"url": "https://example.com", "format": "text"},
-                    {"url": "https://example.com", "format": "markdown"},
-                    {"url": "https://example.com", "format": "html"},
-                    {"url": "https://example.com", "format": "json"},
-                ],
-                "default_format": "text",
-            }
-
-            response = api_client.post("/batch", json=batch_request)
-            assert response.status_code == 200
-            assert response.json()["job_id"] is not None
-        finally:
-            app.dependency_overrides.pop(get_http_client, None)
-            app.dependency_overrides.pop(get_job_manager_dependency, None)
-
-    def test_batch_pdf_format(
+    def test_submit_batch_persists_sanitized_request_without_cleartext_secret(
         self,
         api_client,
         mock_job_manager,
         mock_http_client,
     ):
-        """Test batch processing with PDF format."""
+        """`POST /batch` strips cleartext `webhook_secret` in all mode and seals it in api mode (`R92`, `R113`)."""
+        from downloader.config import Settings
+        from downloader.worker_queue import WorkerQueue
+        from tests.unit.test_v070_ops_drain_worker_otel import FakeRedis
 
         async def mock_get_http_client():
             return mock_http_client
@@ -201,135 +116,44 @@ class TestBatchProcessing:
 
         app.dependency_overrides[get_http_client] = mock_get_http_client
         app.dependency_overrides[get_job_manager_dependency] = mock_get_job_manager
+        prev_settings = getattr(app.state, "settings", None)
+        prev_queue = getattr(app.state, "worker_queue", None)
         try:
             batch_request = {
-                "urls": [{"url": "https://example.com", "format": "pdf"}],
-                "default_format": "text",
-            }
-
-            response = api_client.post("/batch", json=batch_request)
-            assert response.status_code == 200
-            assert response.json()["job_id"] is not None
-        finally:
-            app.dependency_overrides.pop(get_http_client, None)
-            app.dependency_overrides.pop(get_job_manager_dependency, None)
-
-    def test_batch_timeout_handling(
-        self,
-        api_client,
-        mock_job_manager,
-    ):
-        """Test batch processing with timeout scenarios."""
-        from downloader.http_client import HTTPTimeoutError
-
-        mock_client = AsyncMock()
-        mock_client.download.side_effect = HTTPTimeoutError("Request timed out")
-
-        async def mock_get_http_client():
-            return mock_client
-
-        async def mock_get_job_manager():
-            return mock_job_manager
-
-        app.dependency_overrides[get_http_client] = mock_get_http_client
-        app.dependency_overrides[get_job_manager_dependency] = mock_get_job_manager
-        try:
-            batch_request = {
-                "urls": [{"url": "https://slow.com"}],
-                "default_format": "text",
-                "timeout_per_url": 5,
-            }
-
-            response = api_client.post("/batch", json=batch_request)
-            assert response.status_code == 200
-            assert response.json()["job_id"] is not None
-        finally:
-            app.dependency_overrides.pop(get_http_client, None)
-            app.dependency_overrides.pop(get_job_manager_dependency, None)
-
-    def test_batch_concurrency_control(
-        self,
-        api_client,
-        mock_job_manager,
-    ):
-        """Test batch processing respects concurrency limits."""
-
-        async def mock_download(url, priority=None):
-            await asyncio.sleep(0.01)
-            return (
-                b"<html>Content</html>",
-                {
-                    "url": url,
-                    "status_code": 200,
-                    "content_type": "text/html",
-                    "size": 20,
-                    "headers": {"content-type": "text/html"},
-                },
-            )
-
-        mock_client = AsyncMock()
-        mock_client.download.side_effect = mock_download
-
-        async def mock_get_http_client():
-            return mock_client
-
-        async def mock_get_job_manager():
-            return mock_job_manager
-
-        app.dependency_overrides[get_http_client] = mock_get_http_client
-        app.dependency_overrides[get_job_manager_dependency] = mock_get_job_manager
-        try:
-            batch_request = {
-                "urls": [{"url": f"https://example{i}.com"} for i in range(5)],
+                "urls": [
+                    {"url": "https://example.com", "format": "text"},
+                    {"url": "https://test.com", "format": "markdown"},
+                ],
                 "default_format": "text",
                 "concurrency_limit": 2,
+                "timeout_per_url": 15,
+                "webhook_url": "https://example.com/hook",
+                "webhook_secret": "super-secret-hmac-key",  # pragma: allowlist secret
             }
-
+            # In default `all` mode, secret stays in-memory only and is omitted from Redis payload.
             response = api_client.post("/batch", json=batch_request)
             assert response.status_code == 200
-            assert response.json()["job_id"] is not None
+            persisted_all = mock_job_manager.create_job.call_args.args[0]
+            assert "webhook_secret" not in persisted_all
+            assert "webhook_secret_enc" not in persisted_all
+            assert "super-secret-hmac-key" not in json.dumps(persisted_all)
+
+            # In `api` split mode, secret is sealed into `webhook_secret_enc` (never cleartext).
+            mock_job_manager.create_job.reset_mock()
+            split_cfg = Settings()
+            split_cfg.worker.deployment_mode = "api"
+            split_cfg.webhook.secret_key = "unit-test-batch-master-key"  # pragma: allowlist secret
+            app.state.settings = split_cfg
+            app.state.worker_queue = WorkerQueue(FakeRedis())
+            response_api = api_client.post("/batch", json=batch_request)
+            assert response_api.status_code == 200
+            persisted_api = mock_job_manager.create_job.call_args.args[0]
+            assert "webhook_secret" not in persisted_api
+            assert persisted_api["webhook_secret_enc"].startswith("enc:v1:")
+            assert "super-secret-hmac-key" not in json.dumps(persisted_api)
         finally:
-            app.dependency_overrides.pop(get_http_client, None)
-            app.dependency_overrides.pop(get_job_manager_dependency, None)
-
-    def test_batch_large_content_handling(
-        self,
-        api_client,
-        mock_job_manager,
-    ):
-        """Test batch processing handles large content properly."""
-        large_content = b"<html>" + b"x" * 10000 + b"</html>"
-
-        mock_client = AsyncMock()
-        mock_client.download.return_value = (
-            large_content,
-            {
-                "url": "https://large.com",
-                "status_code": 200,
-                "content_type": "text/html",
-                "size": len(large_content),
-                "headers": {"content-type": "text/html"},
-            },
-        )
-
-        async def mock_get_http_client():
-            return mock_client
-
-        async def mock_get_job_manager():
-            return mock_job_manager
-
-        app.dependency_overrides[get_http_client] = mock_get_http_client
-        app.dependency_overrides[get_job_manager_dependency] = mock_get_job_manager
-        try:
-            batch_request = {
-                "urls": [{"url": "https://large.com"}],
-                "default_format": "text",
-            }
-
-            response = api_client.post("/batch", json=batch_request)
-            assert response.status_code == 200
-            assert response.json()["job_id"] is not None
-        finally:
+            app.state.settings = prev_settings
+            app.state.worker_queue = prev_queue
             app.dependency_overrides.pop(get_http_client, None)
             app.dependency_overrides.pop(get_job_manager_dependency, None)
 
@@ -429,7 +253,7 @@ class TestProcessSingleUrlInBatch:
         """Test successful PDF format processing."""
         url_request = BatchURLRequest(url="https://example.com", format="pdf")
 
-        async def mock_generate_pdf(url):
+        async def mock_generate_pdf(url, **_kwargs):
             return b"%PDF-1.4 test pdf content"
 
         with patch(
@@ -614,7 +438,7 @@ class TestProcessSingleUrlInBatch:
         """Test PDF generator error handling."""
         url_request = BatchURLRequest(url="https://example.com", format="pdf")
 
-        async def mock_generate_pdf_error(url):
+        async def mock_generate_pdf_error(url, **_kwargs):
             raise PDFGeneratorError("Failed to generate PDF")
 
         with patch(
@@ -803,7 +627,7 @@ class TestProcessBackgroundBatchJob:
     async def test_partial_failure(self, mock_job_manager, batch_semaphore, pdf_semaphore):
         """Test batch job with mix of success and failure."""
 
-        async def mock_download(url, priority=None):
+        async def mock_download(url, priority=None, **_kwargs):
             if "fail" in url:
                 raise HTTPClientError("Not Found", status_code=404)
             return (
@@ -938,6 +762,200 @@ class TestProcessBackgroundBatchJob:
 
         assert len(results) == 1
         assert summary["total_requests"] == 1
+
+    @pytest.mark.asyncio
+    async def test_concurrency_limit_bounds_in_flight(self, mock_job_manager, pdf_semaphore):
+        """Both per-job `concurrency_limit` and global `batch_semaphore` bound concurrent fetches (`R92`)."""
+        active = 0
+        peak = 0
+
+        async def _counting_download(url: str, **_kwargs):
+            nonlocal active, peak
+            active += 1
+            peak = max(peak, active)
+            await asyncio.sleep(0.03)
+            active -= 1
+            return (
+                b"<html><body>ok</body></html>",
+                {"url": url, "content_type": "text/html", "size": 28},
+            )
+
+        counting_http = AsyncMock()
+        counting_http.download.side_effect = _counting_download
+
+        req = BatchRequest(
+            urls=[BatchURLRequest(url=f"https://example{i}.com") for i in range(6)],
+            default_format="html",
+            concurrency_limit=2,
+            timeout_per_url=10,
+        )
+        results, summary = await process_background_batch_job(
+            job_id="job-conc-1",
+            batch_request=req,
+            job_manager=mock_job_manager,
+            batch_semaphore=asyncio.Semaphore(10),
+            http_client=counting_http,
+            pdf_semaphore=pdf_semaphore,
+        )
+        assert summary["successful_requests"] == 6
+        assert len(results) == 6
+        assert peak == 2
+
+        # Global batch_semaphore=1 must further cap concurrency even when concurrency_limit=5.
+        peak = 0
+        req_wide = BatchRequest(
+            urls=[BatchURLRequest(url=f"https://example{i}.com") for i in range(4)],
+            default_format="html",
+            concurrency_limit=5,
+            timeout_per_url=10,
+        )
+        await process_background_batch_job(
+            job_id="job-conc-2",
+            batch_request=req_wide,
+            job_manager=mock_job_manager,
+            batch_semaphore=asyncio.Semaphore(1),
+            http_client=counting_http,
+            pdf_semaphore=pdf_semaphore,
+        )
+        assert peak == 1
+
+    @pytest.mark.asyncio
+    async def test_timeout_per_url_is_enforced(
+        self, mock_job_manager, batch_semaphore, pdf_semaphore
+    ):
+        """A URL exceeding `timeout_per_url` fails with `408 timeout_error` while peers succeed (`R92`)."""
+
+        async def _slow_or_fast(url: str, **_kwargs):
+            if "example1" in url:
+                await asyncio.sleep(5.0)
+            return (
+                b"<html><body>fast</body></html>",
+                {"url": url, "content_type": "text/html", "size": 30},
+            )
+
+        http_client = AsyncMock()
+        http_client.download.side_effect = _slow_or_fast
+
+        req = BatchRequest(
+            urls=[
+                BatchURLRequest(url="https://example1.com"),
+                BatchURLRequest(url="https://example2.com"),
+            ],
+            default_format="html",
+            concurrency_limit=2,
+            timeout_per_url=5,
+        )
+        # Bypass Pydantic `ge=5` floor in-test so `asyncio.wait_for` triggers quickly.
+        object.__setattr__(req, "timeout_per_url", 0.05)
+        results, summary = await process_background_batch_job(
+            job_id="job-timeout",
+            batch_request=req,
+            job_manager=mock_job_manager,
+            batch_semaphore=batch_semaphore,
+            http_client=http_client,
+            pdf_semaphore=pdf_semaphore,
+        )
+        assert summary["successful_requests"] == 1
+        assert summary["failed_requests"] == 1
+        by_url = {r["url"]: r for r in results}
+        assert by_url["https://example1.com"]["success"] is False
+        assert by_url["https://example1.com"]["status_code"] == 408
+        assert by_url["https://example1.com"]["error_type"] == "timeout_error"
+        assert by_url["https://example2.com"]["success"] is True
+
+    @pytest.mark.asyncio
+    async def test_cancelled_job_stops_before_next_url(self, batch_semaphore, pdf_semaphore):
+        """A job marked CANCELLED in storage halts before starting remaining URLs (`R92`)."""
+        from tests.fixtures.in_memory_ports import InMemoryJobStore
+
+        store = InMemoryJobStore()
+        job_id = await store.create_job(
+            {"urls": [{"url": f"https://example{i}.com"} for i in range(4)]}
+        )
+        await store.update_job_status(job_id, JobStatus.RUNNING)
+
+        fetched: list[str] = []
+
+        async def _cancel_after_first(url: str, **_kwargs):
+            fetched.append(url)
+            if len(fetched) == 1:
+                await store.update_job_status(job_id, JobStatus.CANCELLED)
+            return (
+                b"<html><body>ok</body></html>",
+                {"url": url, "content_type": "text/html", "size": 28},
+            )
+
+        http_client = AsyncMock()
+        http_client.download.side_effect = _cancel_after_first
+
+        req = BatchRequest(
+            urls=[BatchURLRequest(url=f"https://example{i}.com") for i in range(4)],
+            default_format="html",
+            concurrency_limit=1,
+            timeout_per_url=10,
+        )
+        with pytest.raises(asyncio.CancelledError):
+            await process_background_batch_job(
+                job_id=job_id,
+                batch_request=req,
+                job_manager=store,
+                batch_semaphore=batch_semaphore,
+                http_client=http_client,
+                pdf_semaphore=pdf_semaphore,
+            )
+        assert fetched == ["https://example0.com"]
+
+    @pytest.mark.asyncio
+    async def test_crawl_delay_outside_semaphore_and_progress_redis_error_tolerated(
+        self, pdf_semaphore
+    ):
+        """Crawl-delay sleep runs outside `batch_semaphore` (`R114`) and Redis progress errors don't abort (`R85`)."""
+        import redis.exceptions as redis_exc
+
+        batch_sem = asyncio.Semaphore(1)
+        sem_value_during_throttle: list[int] = []
+
+        class _SpyThrottle:
+            async def wait_if_needed(self, _domain: str, _delay: float | None) -> float:
+                sem_value_during_throttle.append(batch_sem._value)
+                return 0.0
+
+        class _SpyRobots:
+            async def check_allowed(self, _url: str, _ua: str | None = None) -> float | None:
+                return 0.25
+
+        http_client = AsyncMock()
+        http_client.download.return_value = (
+            b"<html><body>ok</body></html>",
+            {"url": "https://example.com", "content_type": "text/html", "size": 28},
+        )
+        flaky_jm = AsyncMock()
+        flaky_jm.get_job_info = AsyncMock(return_value=None)
+        flaky_jm.update_job_status = AsyncMock(
+            side_effect=redis_exc.ConnectionError("transient progress write error")
+        )
+
+        req = BatchRequest(
+            urls=[BatchURLRequest(url="https://example.com")],
+            default_format="html",
+            concurrency_limit=1,
+            timeout_per_url=10,
+        )
+        from typing import Any, cast
+
+        results, summary = await process_background_batch_job(
+            job_id="job-resilient",
+            batch_request=req,
+            job_manager=flaky_jm,
+            batch_semaphore=batch_sem,
+            http_client=http_client,
+            pdf_semaphore=pdf_semaphore,
+            robots_checker=cast(Any, _SpyRobots()),
+            domain_throttle=cast(Any, _SpyThrottle()),
+        )
+        assert sem_value_during_throttle == [1]
+        assert summary["successful_requests"] == 1
+        assert len(results) == 1
 
 
 class TestBatchEndpointEdgeCases:

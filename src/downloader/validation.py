@@ -279,7 +279,7 @@ async def validate_url_async(url: str, settings: Settings | None = None) -> str:
 
 
 def _validate_resolved_addr_info(
-    addr_info: Sequence[tuple[object, ...]],
+    addr_info: Sequence[tuple[object, object, object, object, tuple[object, ...]]],
     hostname: str,
     cfg: Settings,
 ) -> list[str]:
@@ -288,7 +288,7 @@ def _validate_resolved_addr_info(
     seen: set[str] = set()
     for info in addr_info:
         sockaddr = info[4]
-        raw_ip = str(sockaddr[0]).split("%", 1)[0]  # type: ignore[index]
+        raw_ip = str(sockaddr[0]).split("%", 1)[0]
         ip_obj = ipaddress.ip_address(raw_ip)
         _validate_ip_address(ip_obj, hostname, cfg)
         ip_str = str(ip_obj)

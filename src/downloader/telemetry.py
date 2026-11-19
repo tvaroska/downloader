@@ -4,26 +4,17 @@ from __future__ import annotations
 
 import logging
 from collections.abc import Mapping
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from opentelemetry import propagate, trace
 from opentelemetry.context import Context
-from opentelemetry.exporter.otlp.proto.http.trace_exporter import OTLPSpanExporter
-from opentelemetry.instrumentation.fastapi import FastAPIInstrumentor
-from opentelemetry.instrumentation.httpx import HTTPXClientInstrumentor
-from opentelemetry.instrumentation.redis import RedisInstrumentor
-from opentelemetry.sdk.resources import Resource
-from opentelemetry.sdk.trace import TracerProvider
-from opentelemetry.sdk.trace.export import (
-    BatchSpanProcessor,
-    ConsoleSpanExporter,
-    SimpleSpanProcessor,
-    SpanExporter,
-)
-from opentelemetry.sdk.trace.sampling import TraceIdRatioBased
 
 from . import __version__
 from .config import TelemetryConfig
+
+if TYPE_CHECKING:
+    from opentelemetry.sdk.trace import TracerProvider
+    from opentelemetry.sdk.trace.export import SpanExporter
 
 logger = logging.getLogger(__name__)
 
@@ -62,7 +53,17 @@ def extract_trace_context(headers: Mapping[str, str] | None) -> Context:
     return propagate.extract(dict(headers))
 
 
+def _resolve_otlp_traces_endpoint(endpoint: str) -> str:
+    """Ensure explicit OTLP HTTP endpoints target `/v1/traces` (`R111`)."""
+    cleaned = endpoint.strip().rstrip("/")
+    return cleaned if cleaned.endswith("/v1/traces") else f"{cleaned}/v1/traces"
+
+
 def _instrument_app_and_clients(app: Any, provider: TracerProvider) -> None:
+    from opentelemetry.instrumentation.fastapi import FastAPIInstrumentor
+    from opentelemetry.instrumentation.httpx import HTTPXClientInstrumentor
+    from opentelemetry.instrumentation.redis import RedisInstrumentor
+
     global _instrumented_app, _global_instrumented
 
     if app is not None and _instrumented_app is not app:
@@ -105,6 +106,16 @@ def configure_telemetry(
         logger.debug("OpenTelemetry disabled (OTEL_ENABLED=false)")
         return None
 
+    from opentelemetry.exporter.otlp.proto.http.trace_exporter import OTLPSpanExporter
+    from opentelemetry.sdk.resources import Resource
+    from opentelemetry.sdk.trace import TracerProvider
+    from opentelemetry.sdk.trace.export import (
+        BatchSpanProcessor,
+        ConsoleSpanExporter,
+        SimpleSpanProcessor,
+    )
+    from opentelemetry.sdk.trace.sampling import TraceIdRatioBased
+
     resource = Resource.create(
         {
             "service.name": config.service_name,
@@ -117,9 +128,10 @@ def configure_telemetry(
     )
 
     if config.exporter_otlp_endpoint:
-        otlp_exporter = OTLPSpanExporter(endpoint=config.exporter_otlp_endpoint)
+        resolved_endpoint = _resolve_otlp_traces_endpoint(config.exporter_otlp_endpoint)
+        otlp_exporter = OTLPSpanExporter(endpoint=resolved_endpoint)
         provider.add_span_processor(BatchSpanProcessor(otlp_exporter))
-        logger.info(f"OpenTelemetry OTLP HTTP exporter configured: {config.exporter_otlp_endpoint}")
+        logger.info(f"OpenTelemetry OTLP HTTP exporter configured: {resolved_endpoint}")
 
     if config.console_exporter:
         provider.add_span_processor(SimpleSpanProcessor(ConsoleSpanExporter()))
@@ -143,6 +155,8 @@ def shutdown_telemetry() -> None:
     global _provider, _instrumented_app, _global_instrumented
 
     if _instrumented_app is not None:
+        from opentelemetry.instrumentation.fastapi import FastAPIInstrumentor
+
         try:
             FastAPIInstrumentor.uninstrument_app(_instrumented_app)
             if hasattr(_instrumented_app, "middleware_stack"):
@@ -152,6 +166,9 @@ def shutdown_telemetry() -> None:
         _instrumented_app = None
 
     if _global_instrumented:
+        from opentelemetry.instrumentation.httpx import HTTPXClientInstrumentor
+        from opentelemetry.instrumentation.redis import RedisInstrumentor
+
         for instr_cls, label in (
             (HTTPXClientInstrumentor, "HTTPX"),
             (RedisInstrumentor, "Redis"),

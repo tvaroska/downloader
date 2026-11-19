@@ -227,11 +227,13 @@ Continuous integration and tag releases run via [`../cloudbuild.yaml`](../cloudb
 
 ```bash
 # Exact fast verification steps executed in cloudbuild.yaml:
+uv lock --check --offline --no-config
 uv sync --frozen
+uv run --no-sync ast-grep scan --rule specs/ast.rules.yaml .
 uv run --no-sync ruff check src/ tests/ examples/
 uv run --no-sync ruff format --check src/ tests/ examples/
-uv run --no-sync mypy src/
-uv run --no-sync pytest -m "not (integration or e2e or network or requires_redis or requires_playwright)" -v --timeout=30
+uv run --no-sync mypy src/ tests/
+uv run --no-sync pytest tests/ --cov=src/downloader --cov-fail-under=83 -n auto -m "not (integration or e2e or network or requires_redis or requires_playwright)" -v --timeout=30
 ```
 
 ## Writing New Tests

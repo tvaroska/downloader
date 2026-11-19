@@ -204,8 +204,9 @@ class TestLiveMetricsEndpoint:
             app.dependency_overrides[get_batch_semaphore] = mock_get_batch_semaphore
             app.state.job_manager = mock_job_manager
             app.state.http_client = mock_http_client
+            mock_pdf_semaphore._value = 6
             app.state.settings = Settings(
-                pdf=PDFConfig(concurrency=12),
+                pdf=PDFConfig(pool_size=10, concurrency=10),
                 batch=BatchConfig(concurrency=50),
             )
 
@@ -218,11 +219,11 @@ class TestLiveMetricsEndpoint:
                 pdf = data["concurrency"]["pdf"]
                 batch = data["concurrency"]["batch"]
 
-                # PDF: 12 limit, 8 available, 4 in use
-                assert pdf["limit"] == 12
-                assert pdf["available"] == 8
+                # PDF: 10 limit, 6 available, 4 in use
+                assert pdf["limit"] == 10
+                assert pdf["available"] == 6
                 assert pdf["active"] == 4
-                assert pdf["utilization_percent"] == pytest.approx(33.3, abs=0.1)
+                assert pdf["utilization_percent"] == pytest.approx(40.0, abs=0.1)
 
                 # Batch: 50 limit, 40 available, 10 in use
                 assert batch["limit"] == 50

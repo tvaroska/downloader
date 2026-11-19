@@ -10,14 +10,20 @@ from collections.abc import Sequence
 from dataclasses import dataclass
 from typing import Any, Literal, cast
 
-from ..browser.actions import BrowserAction, BrowserActionError
-from ..content_converter import SelectorTimeoutError, should_use_playwright_for_html
+from ..content_converter import run_in_html_executor, should_use_playwright_for_html
 from ..content_encoding import resolve_charset_and_decode
-from ..http_client import ContentTooLargeError
 from ..metrics import record_html_rendering_failure
+from ..models.browser_actions import BrowserAction, BrowserActionError
 from ..models.responses import ResponseMetadata
-from ..pdf_generator import PDFGeneratorError
-from ..ports import BrowserCapacityError
+from ..ports import (
+    BrowserCapacityError,
+    BrowserPoolError,
+    ContentTooLargeError,
+    CrawlDelayExceededError,
+    PDFGeneratorError,
+    RobotsDisallowedError,
+    SelectorTimeoutError,
+)
 from ..validation import URLValidationError
 from .content_negotiation import format_to_mime_type
 from .content_processor import (
@@ -113,6 +119,8 @@ async def _convert_one_format(
     )
     try:
         res = await convert(single_req, deps)
+        if format_type == "html":
+            return await run_in_html_executor(_encode_result_for_json_map, format_type, res)
         return _encode_result_for_json_map(format_type, res)
     except Exception as exc:  # noqa: BLE001
         # Partial-failure contract: capture per-format errors into the JSON `errors` map.
@@ -150,11 +158,13 @@ async def _force_render_shared_dom(
         SelectorTimeoutError,
         BrowserActionError,
         URLValidationError,
+        RobotsDisallowedError,
+        CrawlDelayExceededError,
         BrowserCapacityError,
         ContentTooLargeError,
     ):
         raise
-    except (PDFGeneratorError, RuntimeError, OSError, TimeoutError) as exc:
+    except (PDFGeneratorError, BrowserPoolError, RuntimeError, OSError, TimeoutError) as exc:
         logger.error(f"Multi-format Playwright rendering failed for {multi_req.url}: {exc}")
         record_html_rendering_failure()
         if (content is None or metadata is None) and deps.http_fetcher is not None:
@@ -167,7 +177,7 @@ async def _auto_render_shared_dom_if_needed(
     deps: ConversionDeps,
     content: bytes | None,
     metadata: ResponseMetadata | None,
-) -> tuple[bytes | None, ResponseMetadata | None]:
+) -> tuple[bytes | None, ResponseMetadata | None, bool]:
     html_format_count = sum(1 for fmt in multi_req.formats if fmt in _HTML_DERIVED_FORMATS)
     if (
         multi_req.force_ocr
@@ -175,9 +185,12 @@ async def _auto_render_shared_dom_if_needed(
         or content is None
         or metadata is None
         or "html" not in metadata["content_type"].lower()
-        or not should_use_playwright_for_html(multi_req.url, content, metadata["content_type"])
     ):
-        return None, None
+        return None, None, False
+    if not await run_in_html_executor(
+        should_use_playwright_for_html, multi_req.url, content, metadata["content_type"]
+    ):
+        return None, None, True
     try:
         rendered_dom = await render_html_with_metrics(
             deps.renderer,
@@ -186,13 +199,26 @@ async def _auto_render_shared_dom_if_needed(
             raw_size_hint=len(content),
             fail_fast=False,
         )
-        return rendered_dom, metadata if rendered_dom is not None else None
-    except (SelectorTimeoutError, URLValidationError, ContentTooLargeError):
+        return rendered_dom, (metadata if rendered_dom is not None else None), True
+    except (
+        SelectorTimeoutError,
+        URLValidationError,
+        RobotsDisallowedError,
+        CrawlDelayExceededError,
+        ContentTooLargeError,
+    ):
         raise
-    except (PDFGeneratorError, RuntimeError, OSError, TimeoutError) as exc:
+    except (
+        PDFGeneratorError,
+        BrowserCapacityError,
+        BrowserPoolError,
+        RuntimeError,
+        OSError,
+        TimeoutError,
+    ) as exc:
         logger.warning(f"Auto-detected multi-format HTML render failed for {multi_req.url}: {exc}")
         record_html_rendering_failure()
-        return None, None
+        return None, None, True
 
 
 async def _prepare_shared_dom(
@@ -227,9 +253,13 @@ async def _prepare_shared_dom(
         content, metadata = await deps.http_fetcher()
 
     if not multi_req.force_render and rendered_dom is None:
-        rendered_dom, rendered_meta = await _auto_render_shared_dom_if_needed(
-            multi_req, deps, content, metadata
-        )
+        (
+            rendered_dom,
+            rendered_meta,
+            skip_per_format_render,
+        ) = await _auto_render_shared_dom_if_needed(multi_req, deps, content, metadata)
+        if rendered_dom is None and skip_per_format_render:
+            degraded_force_render = True
 
     return _PreparedPayload(
         content=content,
@@ -240,11 +270,11 @@ async def _prepare_shared_dom(
     )
 
 
-async def process_multiple_formats(
+async def _run_multiple_formats(
     multi_req: MultiFormatRequest,
     deps: ConversionDeps,
-) -> dict[str, Any]:
-    """Convert a single URL into multiple requested formats in parallel, rendering DOM at most once."""
+) -> tuple[dict[str, Any], bool | None]:
+    """Convert a single URL into multiple requested formats, returning `(payload, rendered_with_js)`."""
     prepared = await _prepare_shared_dom(multi_req, deps)
     tasks = [
         asyncio.create_task(_convert_one_format(fmt, multi_req, deps, prepared))
@@ -266,6 +296,19 @@ async def process_multiple_formats(
 
     if errors:
         response_dict["errors"] = errors
+    has_html_formats = any(fmt in _HTML_DERIVED_FORMATS for fmt in multi_req.formats)
+    rendered_with_js: bool | None = (
+        (prepared.rendered_dom is not None) if has_html_formats else None
+    )
+    return response_dict, rendered_with_js
+
+
+async def process_multiple_formats(
+    multi_req: MultiFormatRequest,
+    deps: ConversionDeps,
+) -> dict[str, Any]:
+    """Convert a single URL into multiple requested formats in parallel, rendering DOM at most once."""
+    response_dict, _ = await _run_multiple_formats(multi_req, deps)
     return response_dict
 
 
@@ -274,7 +317,7 @@ async def convert_multiple_formats(
     deps: ConversionDeps,
 ) -> ConversionResult:
     """Return a serialized `application/json` `ConversionResult` for multi-format `Accept` requests."""
-    results_dict = await process_multiple_formats(multi_req, deps)
+    results_dict, rendered_with_js = await _run_multiple_formats(multi_req, deps)
     orig_url = multi_req.metadata["url"] if multi_req.metadata is not None else multi_req.url
     body = json.dumps(results_dict).encode("utf-8")
     return ConversionResult(
@@ -286,4 +329,5 @@ async def convert_multiple_formats(
             "X-Requested-Formats": ",".join(multi_req.formats),
         },
         original_content_type="application/json",
+        rendered_with_js=rendered_with_js,
     )

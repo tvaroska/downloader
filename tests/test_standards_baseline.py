@@ -68,7 +68,23 @@ SKIP_DIRS = {
 TEST_FILE_RE = re.compile(r"^(test_.*\.py|conftest\.py|.*_test\.go|.*\.(test|spec)\.\w+)$")
 GENERATED_FILE_RE = re.compile(r"\.(min\.js|d\.ts)$")
 NARRATION_RE = re.compile(r"^\s*(?:#|//)\s*(?:[=\-─#*]{8,}|\d+[.)]\s|Step \d)", re.MULTILINE)
+NOQA_RE = re.compile(r"#\s*noqa\b")
+TYPE_IGNORE_RE = re.compile(r"#\s*type:\s*ignore\b")
 REQUIRES_PYTHON_RE = re.compile(r">=\s*(\d+)\.(\d+)")
+
+
+def _python_files_under(rel_dir: str) -> list[Path]:
+    base = REPO_ROOT / rel_dir
+    if not base.is_dir():
+        return []
+    found: list[Path] = []
+    for root, dirnames, filenames in os.walk(base):
+        dirnames[:] = sorted(d for d in dirnames if d not in SKIP_DIRS and not d.startswith("."))
+        for name in sorted(filenames):
+            path = Path(root) / name
+            if path.suffix == ".py" and not path.is_symlink():
+                found.append(path)
+    return found
 
 
 def _source_files() -> list[Path]:
@@ -130,17 +146,36 @@ def measure() -> dict[str, Any]:
     """Current state in the same shape as `standards_debt.json`."""
     oversized: dict[str, int] = {}
     narration = 0
+    noqa = 0
     for path in _source_files():
         text = path.read_text(encoding="utf-8", errors="ignore")
         lines = sum(1 for line in text.splitlines() if line.strip())
         if lines > MAX_SOURCE_LINES:
             oversized[path.relative_to(REPO_ROOT).as_posix()] = lines
         narration += len(NARRATION_RE.findall(text))
+        if path.suffix == ".py":
+            noqa += len(NOQA_RE.findall(text))
+
+    type_ignores = 0
+    for rel_dir in ("src", "tests"):
+        for path in _python_files_under(rel_dir):
+            if path.name == Path(__file__).name:
+                continue
+            text = path.read_text(encoding="utf-8", errors="ignore")
+            type_ignores += len(TYPE_IGNORE_RE.findall(text))
+    if not (REPO_ROOT / "src").is_dir() and not (REPO_ROOT / "tests").is_dir():
+        for path in _source_files():
+            if path.suffix == ".py":
+                text = path.read_text(encoding="utf-8", errors="ignore")
+                type_ignores += len(TYPE_IGNORE_RE.findall(text))
+
     gaps = _config_gaps()
     return {
         "config": None if gaps is None else sorted(gaps),
         "oversized_files": oversized,
         "narration_comments": narration,
+        "noqa_comments": noqa,
+        "type_ignore_comments": type_ignores,
     }
 
 
@@ -198,8 +233,22 @@ class StandardsBaselineTest(unittest.TestCase):
             "New numbered-step or banner comments; comments explain why, not what",
         )
 
+    def test_noqa_comments_do_not_grow(self) -> None:
+        self.assertLessEqual(
+            self.state["noqa_comments"],
+            self.debt["noqa_comments"],
+            "Inline `# noqa` suppressions grew past baseline (`R107`)",
+        )
+
+    def test_type_ignore_comments_do_not_grow(self) -> None:
+        self.assertLessEqual(
+            self.state["type_ignore_comments"],
+            self.debt["type_ignore_comments"],
+            "Inline `# type: ignore` suppressions grew past baseline (`R107`)",
+        )
+
     def test_baseline_scanner_positive_control(self) -> None:
-        """Positive control in an isolated tmp_path verifying config, size, and narration detection (`R56`)."""
+        """Positive control in an isolated tmp_path verifying config, size, narration, and suppressions (`R56`, `R107`)."""
         import sys
         import tempfile
         from unittest.mock import patch
@@ -216,7 +265,8 @@ class StandardsBaselineTest(unittest.TestCase):
             banner = "# " + ("=" * 16)
             step_one = "# " + "1. Initialize client"
             step_two = "# " + "Step 2: Run query"
-            oversized_lines = [banner, step_one, step_two] + [
+            suppression_line = "val = 1  # " + "noqa: BLE001  # " + "type: ignore[assignment]"
+            oversized_lines = [banner, step_one, step_two, suppression_line] + [
                 f"x_{idx} = {idx}" for idx in range(MAX_SOURCE_LINES + 2)
             ]
             (pkg_dir / "big.py").write_text("\n".join(oversized_lines) + "\n", encoding="utf-8")
@@ -238,6 +288,8 @@ class StandardsBaselineTest(unittest.TestCase):
             self.assertIn("pkg/big.py", measured["oversized_files"])
             self.assertGreater(measured["oversized_files"]["pkg/big.py"], MAX_SOURCE_LINES)
             self.assertEqual(measured["narration_comments"], 3)
+            self.assertEqual(measured["noqa_comments"], 1)
+            self.assertEqual(measured["type_ignore_comments"], 1)
 
 
 if __name__ == "__main__":

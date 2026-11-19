@@ -1,0 +1,52 @@
+groups:
+  - name: downloader_alerts
+    interval: 30s
+    rules:
+      - alert: DownloaderHighServerErrorRate
+        expr: |
+          (
+            sum(rate(downloader_errors_total[5m]))
+            / clamp_min(sum(rate(downloader_requests_total[5m])), 1e-6)
+          ) > 0.05
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "REST API Downloader 5xx error rate above 5%"
+          description: "Server 5xx error ratio exceeded 5% over the last 5 minutes."
+
+      - alert: DownloaderHealthScoreDegraded
+        expr: downloader_health_score < 80
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "REST API Downloader health score degraded"
+          description: "downloader_health_score is {{ $value }} (< 80) for 5 minutes."
+
+      - alert: DownloaderPDFPoolExhausted
+        expr: downloader_gauge{name="pdf_pool_available"} == 0
+        for: 3m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Playwright browser pool exhausted"
+          description: "Zero available browser instances in the PDF/render pool for 3 minutes."
+
+      - alert: DownloaderRedisDown
+        expr: downloader_gauge{name="redis_status"} == 0
+        for: 2m
+        labels:
+          severity: critical
+        annotations:
+          summary: "REST API Downloader Redis backend unavailable"
+          description: "Redis connection health gauge has reported 0 for 2 minutes."
+
+      - alert: DownloaderWorkerDeadLetterJobs
+        expr: increase(worker_batch_jobs_dead_letter_total[15m]) > 0
+        for: 1m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Split worker dead-lettered batch job(s)"
+          description: "One or more batch jobs exceeded WORKER_MAX_ATTEMPTS in the last 15 minutes."

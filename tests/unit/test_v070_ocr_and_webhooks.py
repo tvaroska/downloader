@@ -26,7 +26,12 @@ from downloader.main import app
 from downloader.models.responses import BatchRequest, BatchURLRequest
 from downloader.scheduler.executor import ScheduledJobExecutor
 from downloader.services.batch_processor import process_single_url_in_batch
-from downloader.services.webhooks import deliver_webhook, sign_webhook_payload
+from downloader.services.webhooks import (
+    deliver_webhook,
+    open_webhook_secret,
+    seal_webhook_secret,
+    sign_webhook_payload,
+)
 from downloader.transformers.ocr import (
     OCRProcessingError,
     OCRUnavailableError,
@@ -384,18 +389,22 @@ class TestWebhookDeliveryAndIntegration:
         assert res_400.attempts == 1
         assert calls_400 == 1
 
-    async def test_batch_job_manager_fires_webhook_after_results_persisted(self) -> None:
+    async def test_batch_job_manager_fires_webhook_after_results_persisted(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
         events: list[str] = []
         jm = JobManager("redis://localhost:6379")
 
-        async def _update_status(job_id: str, status, **kwargs) -> None:
+        async def _update_status(job_id: str, status, **kwargs) -> bool:
             events.append(f"status:{status.value}")
+            return True
 
-        async def _store_results(job_id: str, results, summary, **kwargs) -> None:
-            events.append("store_results")
+        async def _complete_job(job_id: str, results, summary, **kwargs) -> bool:
+            events.append("complete_job")
+            return True
 
-        jm.update_job_status = _update_status  # type: ignore[method-assign,assignment]
-        jm.store_job_results = _store_results  # type: ignore[method-assign,assignment]
+        monkeypatch.setattr(jm, "update_job_status", _update_status)
+        monkeypatch.setattr(jm, "complete_job", _complete_job)
 
         async def _fake_processor(job_id: str, req: BatchRequest):
             events.append("process")
@@ -416,10 +425,25 @@ class TestWebhookDeliveryAndIntegration:
         assert events == [
             "status:running",
             "process",
-            "store_results",
-            "status:completed",
+            "complete_job",
             "webhook:batch.completed",
         ]
+
+    def test_webhook_secret_seal_open_roundtrip_and_tamper_rejection(self) -> None:
+        """Webhook secrets encrypt to `enc:v1:...` blobs and reject tampering (`R113`)."""
+        cfg = Settings()
+        cfg.webhook.secret_key = "unit-test-webhook-master-key"  # pragma: allowlist secret
+        sealed = seal_webhook_secret("hook-secret-value", cfg)
+        assert sealed is not None
+        assert sealed.startswith("enc:v1:")
+        assert "hook-secret-value" not in sealed
+        assert open_webhook_secret(sealed, cfg) == "hook-secret-value"
+        # Legacy cleartext value passes through cleanly for backward compatibility
+        assert open_webhook_secret("legacy-plain", cfg) == "legacy-plain"
+        # Tampered ciphertext fails MAC verification
+        tampered = sealed[:-2] + ("AA" if not sealed.endswith("AA") else "BB")
+        with pytest.raises(ValueError, match="integrity|MAC|decrypt|invalid|corrupt"):
+            open_webhook_secret(tampered, cfg)
 
     async def test_scheduled_executor_screenshot_and_webhook(self) -> None:
         mock_http = MagicMock()
@@ -513,6 +537,11 @@ class TestWebhookDeliveryAndIntegration:
                 assert body["webhook_url"] == "https://hooks.example.com/ok"
                 assert "webhook_secret" not in body
                 assert "never-leak-this" not in json.dumps(body)
+                # Stored scheduler kwargs never contain cleartext webhook_secret (`R113`).
+                add_kwargs = mock_scheduler.scheduler.add_job.call_args.kwargs["kwargs"]
+                assert "webhook_secret" not in add_kwargs
+                assert add_kwargs["webhook_secret_enc"].startswith("enc:v1:")
+                assert "never-leak-this" not in json.dumps(add_kwargs)
 
                 listed = client.get("/schedules")
                 assert listed.status_code == 200

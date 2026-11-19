@@ -1,4 +1,4 @@
-"""Unit tests for R30: browser semaphore capacity matches browser pool size."""
+"""Unit tests for R30 and R97: browser semaphore capacity matches and never exceeds browser pool size."""
 
 from __future__ import annotations
 
@@ -6,10 +6,12 @@ import asyncio
 from unittest.mock import AsyncMock, patch
 
 import pytest
+from pydantic import ValidationError
 
+from downloader.browser.renderer import LocalBrowserRenderer
 from downloader.config import PDFConfig, Settings
 from downloader.errors import classify_domain_error
-from downloader.ports import BrowserCapacityError, LocalBrowserRenderer
+from downloader.ports import BrowserCapacityError
 
 
 @pytest.mark.unit
@@ -21,8 +23,21 @@ def test_default_pdf_concurrency_matches_pool_size() -> None:
     sized_cfg = PDFConfig(_env_file=None, pool_size=5)
     assert sized_cfg.concurrency == 5
 
-    explicit_cfg = PDFConfig(_env_file=None, pool_size=3, concurrency=7)
-    assert explicit_cfg.concurrency == 7
+    explicit_cfg = PDFConfig(_env_file=None, pool_size=5, concurrency=4)
+    assert explicit_cfg.concurrency == 4
+
+
+@pytest.mark.unit
+def test_explicit_concurrency_above_pool_size_is_rejected() -> None:
+    """R97: Explicit PDF_CONCURRENCY above PDF_POOL_SIZE must fail validation immediately."""
+    with pytest.raises(ValidationError, match="PDF_CONCURRENCY"):
+        PDFConfig(_env_file=None, pool_size=3, concurrency=7)
+
+    with pytest.raises(ValidationError, match="PDF_CONCURRENCY"):
+        PDFConfig(_env_file=None, concurrency=12)
+
+    valid_cfg = PDFConfig(_env_file=None, pool_size=8, concurrency=8)
+    assert valid_cfg.concurrency == 8
 
 
 @pytest.mark.unit

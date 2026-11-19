@@ -119,10 +119,75 @@ def _restore_sigterm_handler(expected: Any, prev_handler: Any) -> None:
         pass
 
 
-def install_sigterm_drain_handler(coordinator: DrainCoordinator) -> Callable[[], None]:
+def _get_running_loop_or_none() -> asyncio.AbstractEventLoop | None:
+    try:
+        return asyncio.get_running_loop()
+    except RuntimeError:
+        return None
+
+
+def _dispatch_prev_sigterm(prev_handler: Any, signum: int, frame: FrameType | None) -> None:
+    if callable(prev_handler):
+        prev_handler(signum, frame)
+    elif prev_handler == signal.SIG_DFL:
+        signal.signal(signal.SIGTERM, signal.SIG_DFL)
+        os.kill(os.getpid(), signum)
+
+
+class _SigtermDrainChain:
+    """Holds drain-mode pre-stop timer state and chains to the prior SIGTERM handler."""
+
+    def __init__(
+        self,
+        coordinator: DrainCoordinator,
+        prev_handler: Any,
+        pre_stop_delay: float,
+        loop: asyncio.AbstractEventLoop | None,
+    ) -> None:
+        self._coordinator = coordinator
+        self._prev_handler = prev_handler
+        self._pre_stop_delay = pre_stop_delay
+        self._loop = loop
+        self._handle: asyncio.TimerHandle | None = None
+        self._chained = False
+
+    def _invoke_prev(self, signum: int, frame: FrameType | None) -> None:
+        if self._chained:
+            return
+        self._chained = True
+        self._handle = None
+        _dispatch_prev_sigterm(self._prev_handler, signum, frame)
+
+    def handle_signal(self, signum: int, frame: FrameType | None) -> None:
+        self._coordinator.start_drain()
+        if self._pre_stop_delay > 0 and self._loop is not None and self._loop.is_running():
+            if self._handle is None and not self._chained:
+                logger.info(
+                    f"Holding /health at 503 for {self._pre_stop_delay:.2f}s pre-stop delay "
+                    "before closing listener"
+                )
+                self._handle = self._loop.call_later(
+                    self._pre_stop_delay, self._invoke_prev, signum, None
+                )
+            return
+        self._invoke_prev(signum, frame)
+
+    def restore(self, registered_handler: Any) -> None:
+        if self._handle is not None:
+            self._handle.cancel()
+        _restore_sigterm_handler(registered_handler, self._prev_handler)
+
+
+def install_sigterm_drain_handler(
+    coordinator: DrainCoordinator,
+    *,
+    pre_stop_delay: float = 0.0,
+) -> Callable[[], None]:
     """Install a SIGTERM handler that enters drain mode before chaining to the prior handler.
 
-    Returns a zero-argument callback that restores the previous SIGTERM handler.
+    When `pre_stop_delay > 0` and an event loop is running, holds the server open in drain mode
+    so readiness probes observe `/health` returning `503` before forwarding SIGTERM to the server.
+    Returns a zero-argument callback that cancels any pending delay and restores the prior handler.
     No-ops safely when called off the main thread (e.g., TestClient portal threads).
     """
     if threading.current_thread() is not threading.main_thread():
@@ -133,17 +198,15 @@ def install_sigterm_drain_handler(coordinator: DrainCoordinator) -> Callable[[],
     except (ValueError, OSError):
         return lambda: None
 
-    def _on_sigterm(signum: int, frame: FrameType | None) -> None:
-        coordinator.start_drain()
-        if callable(prev_handler):
-            prev_handler(signum, frame)
-        elif prev_handler == signal.SIG_DFL:
-            signal.signal(signal.SIGTERM, signal.SIG_DFL)
-            os.kill(os.getpid(), signum)
-
+    chain = _SigtermDrainChain(
+        coordinator,
+        prev_handler,
+        pre_stop_delay,
+        _get_running_loop_or_none(),
+    )
+    handler = chain.handle_signal
     try:
-        signal.signal(signal.SIGTERM, _on_sigterm)
+        signal.signal(signal.SIGTERM, handler)
     except (ValueError, OSError):
         return lambda: None
-
-    return lambda: _restore_sigterm_handler(_on_sigterm, prev_handler)
+    return lambda: chain.restore(handler)

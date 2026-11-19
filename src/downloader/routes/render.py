@@ -17,9 +17,10 @@ from ..dependencies import (
 )
 from ..errors import classify_domain_error, log_classified_error
 from ..models.responses import ErrorResponse, HTTPErrorResponse, RenderRequest
+from ..ports import HTTPTimeoutError, WorkerTimeoutError
 from ..services.content_negotiation import sanitize_original_url_header
 from ..services.content_processor import ConversionDeps, ConversionRequest, convert
-from ..validation import canonical_host, validate_url_async
+from ..validation import canonical_host, redact_url_for_log, validate_url_async
 
 logger = logging.getLogger(__name__)
 
@@ -53,7 +54,7 @@ async def render_url(  # noqa: PLR0913
     try:
         validated_url = await validate_url_async(render_request.url, active_settings)
         logger.info(
-            f"Processing POST /render for {validated_url} "
+            f"Processing POST /render for {redact_url_for_log(validated_url)} "
             f"(output={render_request.output}, actions={len(render_request.actions)})"
         )
 
@@ -74,8 +75,15 @@ async def render_url(  # noqa: PLR0913
             screenshot_format=render_request.screenshot_format,
         )
         if render_request.timeout_ms is not None:
-            async with asyncio.timeout(render_request.timeout_ms / 1000.0):
-                result = await convert(conv_req, ConversionDeps(renderer=renderer))
+            try:
+                async with asyncio.timeout(render_request.timeout_ms / 1000.0):
+                    result = await convert(conv_req, ConversionDeps(renderer=renderer))
+            except TimeoutError as exc:
+                if isinstance(exc, WorkerTimeoutError):
+                    raise
+                raise HTTPTimeoutError(
+                    f"Render request timed out after {render_request.timeout_ms}ms"
+                ) from exc
         else:
             result = await convert(conv_req, ConversionDeps(renderer=renderer))
         headers = dict(result.headers)

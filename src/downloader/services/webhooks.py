@@ -1,12 +1,14 @@
-"""SSRF-safe outbound webhook delivery with HMAC-SHA256 signing and bounded retries."""
+"""SSRF-safe outbound webhook delivery with HMAC-SHA256 signing, secret sealing, and retries."""
 
 from __future__ import annotations
 
 import asyncio
+import base64
 import hashlib
 import hmac
 import json
 import logging
+import secrets
 import uuid
 from dataclasses import dataclass
 from typing import Any
@@ -27,6 +29,87 @@ from ..validation import (
 )
 
 logger = logging.getLogger(__name__)
+
+WEBHOOK_SECRET_PREFIX = "enc:v1:"
+_NONCE_BYTES = 16
+_MAC_BYTES = 32
+_PROCESS_FALLBACK_KEY = secrets.token_bytes(32)
+
+
+def _derive_secret_keys(cfg: Settings) -> tuple[bytes, bytes]:
+    """Derive Encrypt-then-MAC keys from `WEBHOOK_SECRET_KEY` / `DOWNLOADER_KEY`."""
+    raw_key = (cfg.webhook.secret_key or cfg.auth.api_key or "").strip()
+    if raw_key:
+        material = raw_key.encode("utf-8")
+    elif cfg.worker.deployment_mode in {"api", "worker"}:
+        raise ValueError(
+            "WEBHOOK_SECRET_KEY or DOWNLOADER_KEY is required to encrypt webhook secrets "
+            "in split-worker mode"
+        )
+    else:
+        material = _PROCESS_FALLBACK_KEY
+    enc_key = hmac.new(material, b"downloader:webhook-secret:enc:v1", hashlib.sha256).digest()
+    mac_key = hmac.new(material, b"downloader:webhook-secret:mac:v1", hashlib.sha256).digest()
+    return enc_key, mac_key
+
+
+def _hmac_keystream(enc_key: bytes, nonce: bytes, length: int) -> bytes:
+    blocks: list[bytes] = []
+    counter = 0
+    produced = 0
+    while produced < length:
+        block = hmac.new(enc_key, nonce + counter.to_bytes(4, "big"), hashlib.sha256).digest()
+        blocks.append(block)
+        produced += len(block)
+        counter += 1
+    return b"".join(blocks)[:length]
+
+
+def seal_webhook_secret(secret: str | None, settings: Settings | None = None) -> str | None:
+    """Encrypt a webhook signing secret before persisting it to Redis (Encrypt-then-MAC)."""
+    if not secret:
+        return None
+    if secret.startswith(WEBHOOK_SECRET_PREFIX):
+        return secret
+    cfg = settings or get_settings()
+    enc_key, mac_key = _derive_secret_keys(cfg)
+    plaintext = secret.encode("utf-8")
+    nonce = secrets.token_bytes(_NONCE_BYTES)
+    stream = _hmac_keystream(enc_key, nonce, len(plaintext))
+    ciphertext = bytes(a ^ b for a, b in zip(plaintext, stream, strict=True))
+    mac = hmac.new(
+        mac_key,
+        WEBHOOK_SECRET_PREFIX.encode("ascii") + nonce + ciphertext,
+        hashlib.sha256,
+    ).digest()
+    token = base64.urlsafe_b64encode(nonce + mac + ciphertext).decode("ascii")
+    return f"{WEBHOOK_SECRET_PREFIX}{token}"
+
+
+def open_webhook_secret(sealed: str | None, settings: Settings | None = None) -> str | None:
+    """Decrypt a sealed webhook signing secret; legacy unprefixed secrets pass through unchanged."""
+    if not sealed:
+        return None
+    if not sealed.startswith(WEBHOOK_SECRET_PREFIX):
+        return sealed
+    cfg = settings or get_settings()
+    enc_key, mac_key = _derive_secret_keys(cfg)
+    raw = base64.urlsafe_b64decode(sealed.removeprefix(WEBHOOK_SECRET_PREFIX).encode("ascii"))
+    if len(raw) < _NONCE_BYTES + _MAC_BYTES:
+        raise ValueError("Corrupted encrypted webhook secret")
+    nonce = raw[:_NONCE_BYTES]
+    mac = raw[_NONCE_BYTES : _NONCE_BYTES + _MAC_BYTES]
+    ciphertext = raw[_NONCE_BYTES + _MAC_BYTES :]
+    expected_mac = hmac.new(
+        mac_key,
+        WEBHOOK_SECRET_PREFIX.encode("ascii") + nonce + ciphertext,
+        hashlib.sha256,
+    ).digest()
+    if not hmac.compare_digest(mac, expected_mac):
+        raise ValueError("Webhook secret integrity check failed")
+    stream = _hmac_keystream(enc_key, nonce, len(ciphertext))
+    plaintext = bytes(a ^ b for a, b in zip(ciphertext, stream, strict=True))
+    return plaintext.decode("utf-8")
 
 
 def _format_webhook_log_target(url: str) -> str:
@@ -198,10 +281,7 @@ async def deliver_webhook(  # noqa: PLR0913
         if secret:
             headers["X-Downloader-Signature-256"] = sign_webhook_payload(body, secret)
 
-        active_transport = transport or SSRFSafeHTTPTransport(
-            trust_env=False,
-            egress_policy=EgressPolicy(cfg),
-        )
+        active_transport = transport or SSRFSafeHTTPTransport(egress_policy=EgressPolicy(cfg))
         owns_transport = transport is None
         try:
             async with httpx.AsyncClient(

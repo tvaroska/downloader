@@ -1,6 +1,6 @@
-"""Integration tests for PDF generation with Playwright."""
+"""Unit tests for `PlaywrightPDFGenerator` lifecycle and options using mocked Playwright."""
 
-from unittest.mock import AsyncMock, patch
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
@@ -12,15 +12,28 @@ from downloader.pdf_generator import (
 )
 
 
-@pytest.mark.integration
-@pytest.mark.requires_playwright
+def _mock_page_and_response(
+    status: int = 200, status_text: str = "OK"
+) -> tuple[AsyncMock, MagicMock]:
+    page = AsyncMock()
+    page.url = "https://example.com"
+    response = MagicMock()
+    response.status = status
+    response.status_text = status_text
+    response.url = "https://example.com"
+    response.request = None
+    page.goto = AsyncMock(return_value=response)
+    return page, response
+
+
+@pytest.mark.unit
 class TestPlaywrightPDFGenerator:
     """Test PlaywrightPDFGenerator class core functionality."""
 
     @pytest.mark.asyncio
     async def test_init_and_start(self, mock_playwright):
         """Test initialization and starting of PDF generator."""
-        mock, playwright_instance, browser = mock_playwright
+        mock, playwright_instance, _ = mock_playwright
 
         generator = PlaywrightPDFGenerator(pool_size=2)
         assert generator.pool is None
@@ -36,7 +49,7 @@ class TestPlaywrightPDFGenerator:
     async def test_start_failure(self, mock_playwright):
         """Test failure during start."""
         mock, _, _ = mock_playwright
-        mock.return_value.start.side_effect = Exception("Browser start failed")
+        mock.return_value.start.side_effect = RuntimeError("Browser start failed")
 
         generator = PlaywrightPDFGenerator()
 
@@ -46,14 +59,13 @@ class TestPlaywrightPDFGenerator:
     @pytest.mark.asyncio
     async def test_close(self, mock_playwright):
         """Test closing of PDF generator."""
-        mock, playwright_instance, browser = mock_playwright
+        _, playwright_instance, _ = mock_playwright
 
         generator = PlaywrightPDFGenerator()
         await generator.start()
 
         await generator.close()
 
-        # Verify all browsers were launched
         assert playwright_instance.chromium.launch.call_count == generator.pool_size
         playwright_instance.stop.assert_called_once()
         assert generator.pool is None
@@ -61,12 +73,11 @@ class TestPlaywrightPDFGenerator:
     @pytest.mark.asyncio
     async def test_context_manager(self, mock_playwright):
         """Test using as context manager."""
-        mock, playwright_instance, browser = mock_playwright
+        _, playwright_instance, _ = mock_playwright
 
         async with PlaywrightPDFGenerator() as generator:
             assert generator.pool is not None
 
-        # Verify all browsers were launched
         assert playwright_instance.chromium.launch.call_count == generator.pool_size
         playwright_instance.stop.assert_called_once()
 
@@ -76,11 +87,9 @@ class TestPlaywrightPDFGenerator:
         pool_instance, browser = mock_browser_pool
 
         context = AsyncMock()
-        page = AsyncMock()
+        page, _ = _mock_page_and_response()
         browser.new_context = AsyncMock(return_value=context)
         context.new_page = AsyncMock(return_value=page)
-        response = AsyncMock(status=200, status_text="OK")
-        page.goto = AsyncMock(return_value=response)
         page.pdf = AsyncMock(return_value=b"%PDF-1.4 lazy")
 
         generator = PlaywrightPDFGenerator()
@@ -89,13 +98,11 @@ class TestPlaywrightPDFGenerator:
         result = await generator.generate_pdf("https://example.com")
 
         assert result == b"%PDF-1.4 lazy"
-        assert generator.pool is pool_instance
-        assert pool_instance is not None
         pool_instance.start.assert_called_once()
+        assert generator.pool is pool_instance
 
 
-@pytest.mark.integration
-@pytest.mark.requires_playwright
+@pytest.mark.unit
 class TestPDFGeneratorBrowserPool:
     """Test browser pool management in PDF generator."""
 
@@ -105,14 +112,9 @@ class TestPDFGeneratorBrowserPool:
         pool_instance, browser = mock_browser_pool
 
         context = AsyncMock()
-        page = AsyncMock()
+        page, _ = _mock_page_and_response()
         browser.new_context = AsyncMock(return_value=context)
         context.new_page = AsyncMock(return_value=page)
-
-        response = AsyncMock()
-        response.status = 200
-        response.status_text = "OK"
-        page.goto = AsyncMock(return_value=response)
 
         pdf_content = b"PDF content"
         page.pdf = AsyncMock(return_value=pdf_content)
@@ -127,7 +129,7 @@ class TestPDFGeneratorBrowserPool:
         browser.new_context.assert_called_once()
         context.new_page.assert_called_once()
         page.goto.assert_called_once()
-        page.wait_for_load_state.assert_called_once()
+        assert page.goto.call_args.kwargs.get("wait_until") == "networkidle"
         page.pdf.assert_called_once()
         context.close.assert_called_once()
         pool_instance.release_browser.assert_called_once_with(browser)
@@ -138,14 +140,9 @@ class TestPDFGeneratorBrowserPool:
         pool_instance, browser = mock_browser_pool
 
         context = AsyncMock()
-        page = AsyncMock()
+        page, _ = _mock_page_and_response(status=404, status_text="Not Found")
         browser.new_context = AsyncMock(return_value=context)
         context.new_page = AsyncMock(return_value=page)
-
-        response = AsyncMock()
-        response.status = 404
-        response.status_text = "Not Found"
-        page.goto = AsyncMock(return_value=response)
 
         generator = PlaywrightPDFGenerator()
         await generator.start()
@@ -163,6 +160,7 @@ class TestPDFGeneratorBrowserPool:
 
         context = AsyncMock()
         page = AsyncMock()
+        page.url = "https://example.com"
         browser.new_context = AsyncMock(return_value=context)
         context.new_page = AsyncMock(return_value=page)
         page.goto = AsyncMock(return_value=None)
@@ -182,13 +180,9 @@ class TestPDFGeneratorBrowserPool:
         pool_instance, browser = mock_browser_pool
 
         context = AsyncMock()
-        page = AsyncMock()
+        page, _ = _mock_page_and_response()
         browser.new_context = AsyncMock(return_value=context)
         context.new_page = AsyncMock(return_value=page)
-
-        response = AsyncMock()
-        response.status = 200
-        page.goto = AsyncMock(return_value=response)
 
         pdf_content = b"PDF content"
         page.pdf = AsyncMock(return_value=pdf_content)
@@ -219,8 +213,7 @@ class TestPDFGeneratorBrowserPool:
         pool_instance.release_browser.assert_called_once_with(browser)
 
 
-@pytest.mark.integration
-@pytest.mark.requires_playwright
+@pytest.mark.unit
 class TestGlobalPDFFunctions:
     """Test global PDF generation functions."""
 
@@ -239,7 +232,13 @@ class TestGlobalPDFFunctions:
             result = await generate_pdf_from_url("https://example.com")
 
             assert result == b"PDF content"
-            mock_generator.generate_pdf.assert_called_once_with("https://example.com", None)
+            mock_generator.generate_pdf.assert_called_once_with(
+                "https://example.com",
+                None,
+                actions=None,
+                wait_for_selector=None,
+                max_output_bytes=None,
+            )
 
     @pytest.mark.asyncio
     async def test_get_pdf_generator_creates_new(self):

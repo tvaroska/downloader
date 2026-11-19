@@ -426,9 +426,9 @@ class TestConfigurableThresholds:
         assert not result, "175 chars should not trigger with threshold=150"
 
     def test_playwright_fallback_uses_unified_needs_js_render(self, monkeypatch):
-        """Test that should_use_playwright_fallback uses unified needs_js_render logic."""
+        """Test that should_use_playwright_for_html uses unified needs_js_render logic."""
         from downloader import config, content_converter
-        from downloader.content_converter import needs_js_render, should_use_playwright_fallback
+        from downloader.content_converter import needs_js_render, should_use_playwright_for_html
 
         monkeypatch.setenv("CONTENT_MIN_JS_FRAMEWORK_CONTENT_THRESHOLD", "150")
         config._settings = None
@@ -450,7 +450,7 @@ class TestConfigurableThresholds:
 
         try:
             assert not needs_js_render(url, html, content_type)
-            assert not should_use_playwright_fallback(url, html, content_type)
+            assert not should_use_playwright_for_html(url, html, content_type)
         finally:
             config._settings = None
 
@@ -462,7 +462,6 @@ class TestConfigurableThresholds:
         from downloader import content_converter
         from downloader.content_converter import (
             needs_js_render,
-            should_use_playwright_fallback,
             should_use_playwright_for_html,
         )
         from downloader.models.responses import ResponseMetadata
@@ -480,7 +479,6 @@ class TestConfigurableThresholds:
 
         assert needs_js_render(url, spa_shell, content_type) is True
         assert should_use_playwright_for_html(url, spa_shell, content_type) is True
-        assert should_use_playwright_fallback(url, spa_shell, content_type) is True
 
         rendered_html = (
             b"<html><body><main><h1>Rendered SPA</h1><p>Loaded content</p></main></body></html>"

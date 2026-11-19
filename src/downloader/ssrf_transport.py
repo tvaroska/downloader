@@ -81,7 +81,6 @@ class SSRFSafeHTTPTransport(httpx.AsyncHTTPTransport):
         *,
         verify: ssl.SSLContext | str | bool = True,
         cert: Any = None,
-        trust_env: bool = False,
         http1: bool = True,
         http2: bool = False,
         limits: httpx.Limits = httpx.Limits(max_connections=100, max_keepalive_connections=20),
@@ -90,7 +89,6 @@ class SSRFSafeHTTPTransport(httpx.AsyncHTTPTransport):
         backend: httpcore.AsyncNetworkBackend | None = None,
         egress_policy: EgressPolicy | None = None,
     ) -> None:
-        _ = trust_env
         ssl_context = httpx.create_ssl_context(verify=verify, cert=cert, trust_env=False)
         self._pool = httpcore.AsyncConnectionPool(
             ssl_context=ssl_context,

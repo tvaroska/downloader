@@ -14,9 +14,23 @@ import pytesseract
 from PIL import Image, UnidentifiedImageError
 
 from ..config import Settings, get_settings
+from ..ports import (
+    OCRError as OCRError,
+)
+from ..ports import (
+    OCRProcessingError as OCRProcessingError,
+)
+from ..ports import (
+    OCRUnavailableError as OCRUnavailableError,
+)
 from ..telemetry import get_tracer
 
 logger = logging.getLogger(__name__)
+
+# Raise Pillow's process-wide ceiling once at import to match OCRConfig.max_image_pixels
+# upper bound (200M); exact per-request caps are enforced deterministically on img.size before load().
+if Image.MAX_IMAGE_PIXELS is not None and Image.MAX_IMAGE_PIXELS < 200_000_000:
+    Image.MAX_IMAGE_PIXELS = 200_000_000
 
 _LANG_PATTERN = re.compile(r"^[a-zA-Z0-9_+]{1,64}$")
 SUPPORTED_IMAGE_MIME_TYPES = frozenset(
@@ -33,18 +47,6 @@ SUPPORTED_IMAGE_MIME_TYPES = frozenset(
 
 _ocr_executor: ThreadPoolExecutor | None = None
 _ocr_executor_lock = threading.Lock()
-
-
-class OCRError(Exception):
-    """Base error for image OCR extraction failures."""
-
-
-class OCRUnavailableError(OCRError):
-    """Raised when OCR is disabled or the system tesseract binary is missing."""
-
-
-class OCRProcessingError(OCRError):
-    """Raised when an image payload cannot be decoded or OCR fails/times out."""
 
 
 def _get_ocr_executor() -> ThreadPoolExecutor:
@@ -94,10 +96,7 @@ def _run_tesseract_sync(
     timeout: float,
     max_image_pixels: int,
 ) -> str:
-    # Pillow raises DecompressionBombError only above 2x MAX_IMAGE_PIXELS, so enforce
-    # the configured pixel cap explicitly on img.size before decoding pixel buffers.
-    prev_limit = Image.MAX_IMAGE_PIXELS
-    Image.MAX_IMAGE_PIXELS = max_image_pixels
+    # Enforce the per-request pixel cap explicitly on lazy img.size before decoding pixels.
     try:
         with Image.open(io.BytesIO(image_bytes)) as img:
             width, height = img.size
@@ -126,8 +125,6 @@ def _run_tesseract_sync(
         raise OCRProcessingError(f"OCR processing timed out or failed: {exc}") from exc
     except pytesseract.TesseractError as exc:
         raise OCRProcessingError(f"Tesseract OCR failed: {exc}") from exc
-    finally:
-        Image.MAX_IMAGE_PIXELS = prev_limit
 
 
 def _normalize_ocr_text(raw: str) -> str:

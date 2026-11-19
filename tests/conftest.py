@@ -7,9 +7,11 @@ making them available to all tests throughout the test suite.
 import asyncio
 import errno
 import ipaddress
+import os
 import re
 import socket
 from typing import Any
+from urllib.parse import urlparse
 
 import anyio
 import pytest
@@ -68,11 +70,23 @@ _LOOPBACK_HOSTS = frozenset({"localhost", "localhost.localdomain", "ip6-localhos
 _NUMBERED_EXAMPLE_RE = re.compile(r"example\d+\.com")
 
 
-def _is_loopback_target(host: object) -> bool:
+def _extract_redis_uri_host(redis_uri: str | None) -> str | None:
+    if not redis_uri:
+        return None
+    try:
+        parsed = urlparse(redis_uri)
+    except ValueError:
+        return None
+    host = parsed.hostname
+    return host.lower() if host else None
+
+
+def _is_allowed_target(host: object, allowed_hosts: set[str]) -> bool:
     host_str = (
         host.decode("ascii", errors="ignore") if isinstance(host, bytes) else str(host or "")
     ).strip("[]")
-    if host_str.lower() in _LOOPBACK_HOSTS:
+    host_lower = host_str.lower()
+    if host_lower in _LOOPBACK_HOSTS or host_lower in allowed_hosts:
         return True
     try:
         return ipaddress.ip_address(host_str).is_loopback
@@ -85,6 +99,8 @@ def _resolve_offline_host(
     host: Any,
     port: Any,
     *args: Any,
+    allowed_redis_hosts: set[str],
+    allow_configured_redis: bool,
     **kwargs: Any,
 ) -> Any:
     if host is None:
@@ -97,6 +113,17 @@ def _resolve_offline_host(
         pass
 
     host_lower = host_str.lower()
+    if allow_configured_redis:
+        configured_host = _extract_redis_uri_host(os.getenv("REDIS_URI"))
+        if configured_host and host_lower == configured_host:
+            allowed_redis_hosts.add(configured_host)
+            results = orig_getaddrinfo(host, port, *args, **kwargs)
+            for item in results:
+                sockaddr = item[4]
+                if isinstance(sockaddr, tuple) and sockaddr:
+                    allowed_redis_hosts.add(str(sockaddr[0]).lower())
+            return results
+
     if host_lower in _LOOPBACK_HOSTS:
         return [(socket.AF_INET, socket.SOCK_STREAM, 6, "", ("127.0.0.1", port or 0))]
     if host_lower in _OFFLINE_FIXTURE_HOSTS or _NUMBERED_EXAMPLE_RE.fullmatch(host_lower):
@@ -104,16 +131,39 @@ def _resolve_offline_host(
     raise socket.gaierror(socket.EAI_NONAME, f"Name or service not known: {host_str}")
 
 
+def _assert_allowed_target(host: object, allowed_hosts: set[str], label: object) -> None:
+    if not _is_allowed_target(host, allowed_hosts):
+        raise OSError(
+            errno.ENETUNREACH,
+            f"Network is unreachable (offline fixture guard blocked {label})",
+        )
+
+
 @pytest.fixture(autouse=True)
 def _offline_fixture_dns(request: pytest.FixtureRequest, monkeypatch: pytest.MonkeyPatch) -> None:
     """Resolve allowlisted fixture domains deterministically without live network DNS.
 
     Skipped when a test carries `@pytest.mark.network` or `@pytest.mark.e2e`.
-    Unknown domains raise `socket.gaierror` and `localhost` resolves to `127.0.0.1`
-    so SSRF loopback and DNS-failure tests remain 100% real.
+    For `@pytest.mark.requires_redis` tests, allows DNS resolution and TCP connections
+    to the configured `REDIS_URI` host (e.g., `downloader-ci-redis` in Cloud Build)
+    while keeping all other external hosts blocked.
     """
     if request.node.get_closest_marker("network") or request.node.get_closest_marker("e2e"):
         return
+
+    # Refresh settings at test start so prior tests patching env never leak into global `_settings`.
+    reload_settings()
+
+    allow_configured_redis = bool(request.node.get_closest_marker("requires_redis"))
+    allowed_redis_hosts: set[str] = set()
+
+    def _current_allowed_hosts() -> set[str]:
+        if allow_configured_redis:
+            configured = _extract_redis_uri_host(os.getenv("REDIS_URI"))
+            if configured:
+                allowed_redis_hosts.add(configured)
+            return allowed_redis_hosts
+        return set()
 
     orig_getaddrinfo = socket.getaddrinfo
     orig_anyio_connect_tcp = anyio.connect_tcp
@@ -124,25 +174,25 @@ def _offline_fixture_dns(request: pytest.FixtureRequest, monkeypatch: pytest.Mon
         socket,
         "getaddrinfo",
         lambda host, port, *args, **kwargs: _resolve_offline_host(
-            orig_getaddrinfo, host, port, *args, **kwargs
+            orig_getaddrinfo,
+            host,
+            port,
+            *args,
+            allowed_redis_hosts=allowed_redis_hosts,
+            allow_configured_redis=allow_configured_redis,
+            **kwargs,
         ),
     )
 
     async def _guarded_connect_tcp(remote_host: Any, remote_port: Any, *args: Any, **kwargs: Any):
-        if not _is_loopback_target(remote_host):
-            raise OSError(
-                errno.ENETUNREACH,
-                f"Network is unreachable (offline fixture guard blocked {remote_host}:{remote_port})",
-            )
+        _assert_allowed_target(
+            remote_host, _current_allowed_hosts(), f"{remote_host}:{remote_port}"
+        )
         return await orig_anyio_connect_tcp(remote_host, remote_port, *args, **kwargs)
 
     def _guarded_create_connection(address: Any, *args: Any, **kwargs: Any):
         host = address[0] if isinstance(address, tuple) and address else ""
-        if not _is_loopback_target(host):
-            raise OSError(
-                errno.ENETUNREACH,
-                f"Network is unreachable (offline fixture guard blocked {address})",
-            )
+        _assert_allowed_target(host, _current_allowed_hosts(), address)
         return orig_create_connection(address, *args, **kwargs)
 
     async def _guarded_loop_create_connection(
@@ -153,11 +203,8 @@ def _offline_fixture_dns(request: pytest.FixtureRequest, monkeypatch: pytest.Mon
         *args: Any,
         **kwargs: Any,
     ):
-        if host is not None and not _is_loopback_target(host):
-            raise OSError(
-                errno.ENETUNREACH,
-                f"Network is unreachable (offline fixture guard blocked {host}:{port})",
-            )
+        if host is not None:
+            _assert_allowed_target(host, _current_allowed_hosts(), f"{host}:{port}")
         return await orig_loop_create_connection(
             self, protocol_factory, host, port, *args, **kwargs
         )

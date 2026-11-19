@@ -10,7 +10,6 @@ from urllib.parse import unquote
 from fastapi import APIRouter, Depends, Header, HTTPException, Path, Query, Request, Response
 
 from ..auth import get_api_key
-from ..browser.actions import BrowserAction, parse_actions_param
 from ..config import Settings
 from ..dependencies import (
     BrowserRendererDep,
@@ -21,6 +20,7 @@ from ..dependencies import (
 )
 from ..errors import classify_domain_error, log_classified_error
 from ..http_client import HTTPClient
+from ..models.browser_actions import BrowserAction, parse_actions_param
 from ..models.responses import ErrorResponse, HTTPErrorResponse, ResponseMetadata
 from ..services.content_negotiation import sanitize_original_url_header
 from ..services.content_processor import (
@@ -35,7 +35,12 @@ from ..services.content_processor import (
 )
 from ..services.multi_format import MultiFormatRequest, convert_multiple_formats
 from ..transformers.ocr import validate_ocr_language
-from ..validation import URLValidationError, canonical_host, validate_url_async
+from ..validation import (
+    URLValidationError,
+    canonical_host,
+    redact_url_for_log,
+    validate_url_async,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -149,7 +154,7 @@ def _build_http_fetcher(
     async def _fetch() -> tuple[bytes, ResponseMetadata]:
         nonlocal cached
         if cached is None:
-            if require_text and isinstance(http_client, HTTPClient):
+            if require_text:
                 cached = await http_client.download(
                     validated_url,
                     require_text_convertible=True,
@@ -263,7 +268,7 @@ async def download_url(  # noqa: PLR0913
         parsed_actions, validated_ocr_lang = _parse_query_options(
             actions, ocr_lang, active_settings.ocr.default_language
         )
-        logger.info(f"Processing download request for: {validated_url}")
+        logger.info(f"Processing download request for: {redact_url_for_log(validated_url)}")
 
         if active_settings.crawling.respect_robots_txt:
             crawl_delay = await robots_checker.check_allowed(

@@ -23,7 +23,7 @@ var formatToAccept = map[string]string{
 	"raw":             "*/*",
 }
 
-// Client is a typed stdlib HTTP client for the REST API Downloader v0.7.0+ service.
+// Client is a typed stdlib HTTP client for the REST API Downloader service.
 type Client struct {
 	BaseURL    string
 	APIKey     string
@@ -110,6 +110,13 @@ func encodeTargetURLPath(targetURL string) string {
 	trimmed := strings.TrimLeft(targetURL, "/")
 	r := strings.NewReplacer("%", "%25", "?", "%3F", "#", "%23")
 	return r.Replace(trimmed)
+}
+
+func escapePathSegment(value string, field string) (string, error) {
+	if value == "" || value == "." || value == ".." {
+		return "", fmt.Errorf("%s must be a non-empty path segment and not '.' or '..'", field)
+	}
+	return url.PathEscape(value), nil
 }
 
 func (c *Client) buildDownloadEndpoint(targetURL string, opts *DownloadOptions) (string, error) {
@@ -369,7 +376,11 @@ func (c *Client) SubmitBatch(ctx context.Context, payload BatchRequest) (*BatchJ
 
 // GetJobStatus calls GET /jobs/{job_id}/status.
 func (c *Client) GetJobStatus(ctx context.Context, jobID string) (*BatchJobStatus, error) {
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, c.BaseURL+"/jobs/"+url.PathEscape(jobID)+"/status", nil)
+	encoded, err := escapePathSegment(jobID, "jobID")
+	if err != nil {
+		return nil, err
+	}
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, c.BaseURL+"/jobs/"+encoded+"/status", nil)
 	if err != nil {
 		return nil, err
 	}
@@ -395,7 +406,11 @@ func (c *Client) GetJobStatus(ctx context.Context, jobID string) (*BatchJobStatu
 
 // GetJobResults calls GET /jobs/{job_id}/results.
 func (c *Client) GetJobResults(ctx context.Context, jobID string) (*BatchJobResults, error) {
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, c.BaseURL+"/jobs/"+url.PathEscape(jobID)+"/results", nil)
+	encoded, err := escapePathSegment(jobID, "jobID")
+	if err != nil {
+		return nil, err
+	}
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, c.BaseURL+"/jobs/"+encoded+"/results", nil)
 	if err != nil {
 		return nil, err
 	}
@@ -421,12 +436,51 @@ func (c *Client) GetJobResults(ctx context.Context, jobID string) (*BatchJobResu
 
 // CancelJob calls DELETE /jobs/{job_id}.
 func (c *Client) CancelJob(ctx context.Context, jobID string) (*JobCancelResult, error) {
+	encoded, err := escapePathSegment(jobID, "jobID")
+	if err != nil {
+		return nil, err
+	}
 	var out JobCancelResult
-	endpoint := c.BaseURL + "/jobs/" + url.PathEscape(jobID)
+	endpoint := c.BaseURL + "/jobs/" + encoded
 	if err := c.doJSON(ctx, http.MethodDelete, endpoint, nil, &out); err != nil {
 		return nil, err
 	}
 	return &out, nil
+}
+
+// WaitForBatch polls GET /jobs/{job_id}/status until completion, failure, cancellation, or context expiry.
+func (c *Client) WaitForBatch(ctx context.Context, jobID string, pollInterval time.Duration) (*BatchJobResults, error) {
+	if pollInterval <= 0 {
+		pollInterval = time.Second
+	}
+	for {
+		status, err := c.GetJobStatus(ctx, jobID)
+		if err != nil {
+			return nil, err
+		}
+		if status.Status == "completed" {
+			return c.GetJobResults(ctx, jobID)
+		}
+		if status.Status == "failed" || status.Status == "cancelled" {
+			msg := fmt.Sprintf("Batch job %s ended with status %s", jobID, status.Status)
+			if status.ErrorMessage != nil && *status.ErrorMessage != "" {
+				msg = *status.ErrorMessage
+			}
+			return nil, &BatchJobError{
+				JobID:     jobID,
+				JobStatus: status.Status,
+				ErrorType: "batch_" + status.Status,
+				Message:   msg,
+			}
+		}
+		timer := time.NewTimer(pollInterval)
+		select {
+		case <-ctx.Done():
+			timer.Stop()
+			return nil, ctx.Err()
+		case <-timer.C:
+		}
+	}
 }
 
 // CreateSchedule calls POST /schedules.
@@ -455,8 +509,12 @@ func (c *Client) ListSchedules(ctx context.Context) ([]ScheduleInfo, error) {
 
 // GetSchedule calls GET /schedules/{id}.
 func (c *Client) GetSchedule(ctx context.Context, scheduleID string) (*ScheduleInfo, error) {
+	encoded, err := escapePathSegment(scheduleID, "scheduleID")
+	if err != nil {
+		return nil, err
+	}
 	var out ScheduleInfo
-	endpoint := c.BaseURL + "/schedules/" + url.PathEscape(scheduleID)
+	endpoint := c.BaseURL + "/schedules/" + encoded
 	if err := c.doJSON(ctx, http.MethodGet, endpoint, nil, &out); err != nil {
 		return nil, err
 	}
@@ -465,6 +523,10 @@ func (c *Client) GetSchedule(ctx context.Context, scheduleID string) (*ScheduleI
 
 // GetScheduleHistory calls GET /schedules/{id}/history.
 func (c *Client) GetScheduleHistory(ctx context.Context, scheduleID string, limit int, offset int) (*ScheduleHistory, error) {
+	encoded, err := escapePathSegment(scheduleID, "scheduleID")
+	if err != nil {
+		return nil, err
+	}
 	if limit <= 0 {
 		limit = 20
 	}
@@ -474,7 +536,7 @@ func (c *Client) GetScheduleHistory(ctx context.Context, scheduleID string, limi
 	q := url.Values{}
 	q.Set("limit", fmt.Sprintf("%d", limit))
 	q.Set("offset", fmt.Sprintf("%d", offset))
-	endpoint := c.BaseURL + "/schedules/" + url.PathEscape(scheduleID) + "/history?" + q.Encode()
+	endpoint := c.BaseURL + "/schedules/" + encoded + "/history?" + q.Encode()
 	var out ScheduleHistory
 	if err := c.doJSON(ctx, http.MethodGet, endpoint, nil, &out); err != nil {
 		return nil, err
@@ -484,8 +546,12 @@ func (c *Client) GetScheduleHistory(ctx context.Context, scheduleID string, limi
 
 // DeleteSchedule calls DELETE /schedules/{id}.
 func (c *Client) DeleteSchedule(ctx context.Context, scheduleID string) (*ScheduleDeleteResult, error) {
+	encoded, err := escapePathSegment(scheduleID, "scheduleID")
+	if err != nil {
+		return nil, err
+	}
 	var out ScheduleDeleteResult
-	endpoint := c.BaseURL + "/schedules/" + url.PathEscape(scheduleID)
+	endpoint := c.BaseURL + "/schedules/" + encoded
 	if err := c.doJSON(ctx, http.MethodDelete, endpoint, nil, &out); err != nil {
 		return nil, err
 	}

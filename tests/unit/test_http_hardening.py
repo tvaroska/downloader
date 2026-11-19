@@ -12,8 +12,6 @@ import httpx
 import pytest
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
-from slowapi import Limiter
-from slowapi.util import get_remote_address
 
 from downloader.config import reload_settings
 from downloader.dependencies import get_http_client, get_robots_checker
@@ -56,22 +54,16 @@ class TestHTTPStreamingAndRedirectSSRF:
                 request=request,
             )
 
-        client = HTTPClient(max_download_size=1024)
-        await client.close()
-        client._client = httpx.AsyncClient(
+        async with HTTPClient(
+            max_download_size=1024,
             transport=httpx.MockTransport(handler),
-            follow_redirects=True,
-            event_hooks={"response": [client._on_response_hook]},
-        )
-        try:
+        ) as client:
             with pytest.raises(ContentTooLargeError) as exc_info:
                 await client.download("https://example.com/oversized-header")
 
             assert exc_info.value.max_size == 1024
             assert exc_info.value.actual_size == 5000
             assert body_stream.chunks_yielded == 0
-        finally:
-            await client.close()
 
     async def test_chunked_stream_exceeding_max_download_size_aborts_mid_stream(self) -> None:
         # 5 chunks of 300 bytes = 1500 bytes > 1000 max; should abort on chunk #4 (1200 bytes)
@@ -85,14 +77,10 @@ class TestHTTPStreamingAndRedirectSSRF:
                 request=request,
             )
 
-        client = HTTPClient(max_download_size=1000)
-        await client.close()
-        client._client = httpx.AsyncClient(
+        async with HTTPClient(
+            max_download_size=1000,
             transport=httpx.MockTransport(handler),
-            follow_redirects=True,
-            event_hooks={"response": [client._on_response_hook]},
-        )
-        try:
+        ) as client:
             with pytest.raises(ContentTooLargeError) as exc_info:
                 await client.download("https://example.com/chunked-oversized")
 
@@ -100,8 +88,6 @@ class TestHTTPStreamingAndRedirectSSRF:
             assert exc_info.value.actual_size == 1200
             # Trailing 5th chunk is never read into memory
             assert body_stream.chunks_yielded == 4
-        finally:
-            await client.close()
 
     async def test_body_exactly_at_limit_is_accepted(self) -> None:
         limit = 1024
@@ -124,19 +110,13 @@ class TestHTTPStreamingAndRedirectSSRF:
             )
 
         for handler in (stream_handler, content_length_handler):
-            client = HTTPClient(max_download_size=limit)
-            await client.close()
-            client._client = httpx.AsyncClient(
+            async with HTTPClient(
+                max_download_size=limit,
                 transport=httpx.MockTransport(handler),
-                follow_redirects=True,
-                event_hooks={"response": [client._on_response_hook]},
-            )
-            try:
+            ) as client:
                 content, metadata = await client.download("https://example.com/exact-limit")
                 assert content == exact_payload
                 assert metadata["size"] == limit
-            finally:
-                await client.close()
 
     def test_content_too_large_maps_to_http_413_on_get_url(self, api_client: TestClient) -> None:
         mock_http = AsyncMock()
@@ -195,23 +175,14 @@ class TestHTTPStreamingAndRedirectSSRF:
                     headers={"Location": redirect_target},
                     request=request,
                 )
-            return httpx.Response(200, content=b"secret", request=request)
+            return httpx.Response(200, stream=httpx.ByteStream(b"secret"), request=request)
 
-        client = HTTPClient()
-        await client.close()
-        client._client = httpx.AsyncClient(
-            transport=httpx.MockTransport(handler),
-            follow_redirects=True,
-            event_hooks={"response": [client._on_response_hook]},
-        )
-        try:
+        async with HTTPClient(transport=httpx.MockTransport(handler)) as client:
             with pytest.raises(SSRFProtectionError):
                 await client.download("https://example.com/start")
 
             # Private/metadata redirect target was never fetched!
             assert hop_targets_reached == ["https://example.com/start"]
-        finally:
-            await client.close()
 
     async def test_safe_public_redirect_succeeds(self) -> None:
         def handler(request: httpx.Request) -> httpx.Response:
@@ -224,23 +195,14 @@ class TestHTTPStreamingAndRedirectSSRF:
             return httpx.Response(
                 200,
                 headers={"Content-Type": "text/html"},
-                content=b"<html>Redirected safely</html>",
+                stream=httpx.ByteStream(b"<html>Redirected safely</html>"),
                 request=request,
             )
 
-        client = HTTPClient()
-        await client.close()
-        client._client = httpx.AsyncClient(
-            transport=httpx.MockTransport(handler),
-            follow_redirects=True,
-            event_hooks={"response": [client._on_response_hook]},
-        )
-        try:
+        async with HTTPClient(transport=httpx.MockTransport(handler)) as client:
             content, meta = await client.download("https://example.com/old")
             assert content == b"<html>Redirected safely</html>"
             assert meta["url"] == "https://example.com/new-destination"
-        finally:
-            await client.close()
 
 
 @pytest.mark.unit
@@ -249,22 +211,22 @@ class TestRateLimitMiddlewareEnforcement:
 
     def test_download_path_matches_download_limit(self) -> None:
         mini_app = FastAPI()
-        limiter = Limiter(key_func=get_remote_address, storage_uri="memory://")
-        mw = RateLimitMiddleware(mini_app, limiter)
+        mw = RateLimitMiddleware(mini_app)
 
         settings = mw._active_settings()
-        assert (
-            mw._get_rate_limit_for_path("/https://example.com") == settings.ratelimit.download_limit
+        assert mw._classify_path("/https://example.com") == (
+            "download",
+            settings.ratelimit.download_limit,
         )
-        assert (
-            mw._get_rate_limit_for_path("/https://example.com/path/to/article")
-            == settings.ratelimit.download_limit
+        assert mw._classify_path("/https://example.com/path/to/article") == (
+            "download",
+            settings.ratelimit.download_limit,
         )
-        assert mw._get_rate_limit_for_path("/health") == settings.ratelimit.status_limit
-        assert mw._get_rate_limit_for_path("/metrics/live") == settings.ratelimit.status_limit
-        assert mw._get_rate_limit_for_path("/batch") == settings.ratelimit.batch_limit
-        assert mw._get_rate_limit_for_path("/jobs/abc/status") == settings.ratelimit.status_limit
-        assert mw._get_rate_limit_for_path("/schedules") == settings.ratelimit.default_limit
+        assert mw._classify_path("/health") == ("status", settings.ratelimit.status_limit)
+        assert mw._classify_path("/metrics/live") == ("status", settings.ratelimit.status_limit)
+        assert mw._classify_path("/batch") == ("batch", settings.ratelimit.batch_limit)
+        assert mw._classify_path("/jobs/abc/status") == ("status", settings.ratelimit.status_limit)
+        assert mw._classify_path("/schedules") == ("default", settings.ratelimit.default_limit)
 
     def test_enforces_http_429_retry_after_and_ratelimit_headers(
         self, monkeypatch: pytest.MonkeyPatch

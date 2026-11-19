@@ -4,8 +4,9 @@ from __future__ import annotations
 
 import logging
 from datetime import UTC, datetime, timedelta
-from typing import Any
+from typing import Any, NoReturn
 
+import redis.exceptions as redis_exc
 from fastapi import APIRouter, Depends, HTTPException, Path, Request, Response
 
 from ..auth import get_api_key
@@ -20,7 +21,6 @@ from ..dependencies import (
     RobotsCheckerDep,
     WorkQueueDep,
 )
-from ..job_manager import JobInfo, JobStatus
 from ..models.responses import (
     BatchRequest,
     ErrorResponse,
@@ -28,8 +28,9 @@ from ..models.responses import (
     JobStatusResponse,
     JobSubmissionResponse,
 )
-from ..ports import JobStore
+from ..ports import JobInfo, JobStatus, JobStore
 from ..services.batch_processor import process_background_batch_job
+from ..services.webhooks import seal_webhook_secret
 from ..validation import URLValidationError, sanitize_custom_headers, validate_url_async
 
 logger = logging.getLogger(__name__)
@@ -61,6 +62,59 @@ def _unavailable_results_message(job_id: str, job_info: JobInfo) -> str:
     if job_info.status == JobStatus.CANCELLED:
         return f"Job {job_id} was cancelled"
     return f"Results not available for job {job_id}"
+
+
+def _raise_batch_store_error(exc: Exception, message: str, error_type: str) -> NoReturn:
+    if isinstance(exc, (redis_exc.RedisError, OSError, TimeoutError)):
+        logger.warning(f"{message} (storage unavailable): {exc}")
+        raise HTTPException(
+            status_code=503,
+            detail=ErrorResponse(
+                error="Batch storage backend temporarily unavailable",
+                error_type="service_unavailable",
+            ).model_dump(),
+        ) from exc
+    logger.exception(f"{message}: {exc}")
+    raise HTTPException(
+        status_code=500,
+        detail=ErrorResponse(error=message, error_type=error_type).model_dump(),
+    ) from exc
+
+
+async def _prepare_persisted_batch_payload(
+    batch_request: BatchRequest,
+    active_settings: Settings,
+) -> dict[str, Any]:
+    try:
+        for item in batch_request.urls:
+            item.custom_headers = sanitize_custom_headers(item.custom_headers)
+        if batch_request.webhook_url:
+            batch_request.webhook_url = await validate_url_async(
+                batch_request.webhook_url, active_settings
+            )
+    except URLValidationError as exc:
+        raise HTTPException(
+            status_code=400,
+            detail=ErrorResponse(error=str(exc), error_type="validation_error").model_dump(),
+        ) from exc
+
+    # Never persist cleartext signing secrets in Redis; seal only when split workers need them.
+    persisted_payload = batch_request.model_dump(exclude={"webhook_secret"})
+    if active_settings.worker.deployment_mode == "api" and batch_request.webhook_secret:
+        try:
+            persisted_payload["webhook_secret_enc"] = seal_webhook_secret(
+                batch_request.webhook_secret,
+                active_settings,
+            )
+        except ValueError as exc:
+            raise HTTPException(
+                status_code=500,
+                detail=ErrorResponse(
+                    error=str(exc),
+                    error_type="job_submission_error",
+                ).model_dump(),
+            ) from exc
+    return persisted_payload
 
 
 @router.post(
@@ -98,21 +152,10 @@ async def submit_batch_job(  # noqa: PLR0913
             ).model_dump(),
         )
 
-    try:
-        for item in batch_request.urls:
-            item.custom_headers = sanitize_custom_headers(item.custom_headers)
-        if batch_request.webhook_url:
-            batch_request.webhook_url = await validate_url_async(
-                batch_request.webhook_url, active_settings
-            )
-    except URLValidationError as exc:
-        raise HTTPException(
-            status_code=400,
-            detail=ErrorResponse(error=str(exc), error_type="validation_error").model_dump(),
-        ) from exc
+    persisted_payload = await _prepare_persisted_batch_payload(batch_request, active_settings)
 
     try:
-        job_id = await store.create_job(batch_request.model_dump())
+        job_id = await store.create_job(persisted_payload)
         if active_settings.worker.deployment_mode == "api":
             if worker_queue is None:
                 raise RuntimeError("WorkQueue unavailable in API split-worker mode")
@@ -148,16 +191,15 @@ async def submit_batch_job(  # noqa: PLR0913
         )
     except HTTPException:
         raise
-    except Exception as exc:  # noqa: BLE001
-        # Convert unexpected storage/queue failures into the documented 500 error envelope.
-        logger.exception(f"Failed to submit batch job: {exc}")
-        raise HTTPException(
-            status_code=500,
-            detail=ErrorResponse(
-                error="Failed to submit batch job",
-                error_type="job_submission_error",
-            ).model_dump(),
-        ) from exc
+    except (
+        redis_exc.RedisError,
+        OSError,
+        TimeoutError,
+        RuntimeError,
+        ValueError,
+        TypeError,
+    ) as exc:
+        _raise_batch_store_error(exc, "Failed to submit batch job", "job_submission_error")
 
 
 @router.get(
@@ -202,15 +244,15 @@ async def get_job_status(
         )
     except HTTPException:
         raise
-    except Exception as exc:  # noqa: BLE001
-        logger.exception(f"Failed to get job status for {job_id}: {exc}")
-        raise HTTPException(
-            status_code=500,
-            detail=ErrorResponse(
-                error="Failed to retrieve job status",
-                error_type="job_status_error",
-            ).model_dump(),
-        ) from exc
+    except (
+        redis_exc.RedisError,
+        OSError,
+        TimeoutError,
+        RuntimeError,
+        ValueError,
+        TypeError,
+    ) as exc:
+        _raise_batch_store_error(exc, "Failed to retrieve job status", "job_status_error")
 
 
 @router.get(
@@ -271,15 +313,15 @@ async def get_job_results(
         )
     except HTTPException:
         raise
-    except Exception as exc:  # noqa: BLE001
-        logger.exception(f"Failed to get job results for {job_id}: {exc}")
-        raise HTTPException(
-            status_code=500,
-            detail=ErrorResponse(
-                error="Failed to retrieve job results",
-                error_type="job_results_error",
-            ).model_dump(),
-        ) from exc
+    except (
+        redis_exc.RedisError,
+        OSError,
+        TimeoutError,
+        RuntimeError,
+        ValueError,
+        TypeError,
+    ) as exc:
+        _raise_batch_store_error(exc, "Failed to retrieve job results", "job_results_error")
 
 
 @router.delete(
@@ -317,12 +359,12 @@ async def cancel_job(
         }
     except HTTPException:
         raise
-    except Exception as exc:  # noqa: BLE001
-        logger.exception(f"Failed to cancel job {job_id}: {exc}")
-        raise HTTPException(
-            status_code=500,
-            detail=ErrorResponse(
-                error="Failed to cancel job",
-                error_type="job_cancellation_error",
-            ).model_dump(),
-        ) from exc
+    except (
+        redis_exc.RedisError,
+        OSError,
+        TimeoutError,
+        RuntimeError,
+        ValueError,
+        TypeError,
+    ) as exc:
+        _raise_batch_store_error(exc, "Failed to cancel job", "job_cancellation_error")

@@ -58,6 +58,11 @@ class WebhookConfig(BaseSettings):
         le=30.0,
         description="Base exponential backoff delay in seconds between retries",
     )
+    secret_key: str | None = Field(
+        default=None,
+        validation_alias=AliasChoices("WEBHOOK_SECRET_KEY", "WEBHOOK_ENCRYPTION_KEY"),
+        description="Optional symmetric key encrypting webhook_secret at rest in Redis (falls back to DOWNLOADER_KEY)",
+    )
 
     model_config = SettingsConfigDict(env_prefix="WEBHOOK_", populate_by_name=True, extra="ignore")
 
@@ -70,6 +75,12 @@ class ShutdownConfig(BaseSettings):
         ge=0.0,
         le=300.0,
         description="Maximum seconds to wait for active requests and jobs during shutdown",
+    )
+    pre_stop_delay: float = Field(
+        default=2.0,
+        ge=0.0,
+        le=60.0,
+        description="Seconds after SIGTERM to hold /health at 503 before closing listening sockets",
     )
 
     model_config = SettingsConfigDict(env_prefix="SHUTDOWN_", extra="ignore")
@@ -96,9 +107,9 @@ class WorkerConfig(BaseSettings):
         description="Seconds between worker Redis heartbeat refreshes",
     )
     heartbeat_ttl: int = Field(
-        default=30,
+        default=60,
         ge=5,
-        le=300,
+        le=600,
         description="TTL in seconds for worker heartbeat keys in Redis",
     )
     max_concurrent_jobs: int = Field(
@@ -106,6 +117,12 @@ class WorkerConfig(BaseSettings):
         ge=1,
         le=64,
         description="Maximum concurrent batch jobs processed by a single worker process",
+    )
+    max_attempts: int = Field(
+        default=3,
+        ge=1,
+        le=20,
+        description="Maximum worker delivery attempts for a batch job before marking it failed",
     )
     remote_browser_enabled: bool = Field(
         default=False,
@@ -119,6 +136,21 @@ class WorkerConfig(BaseSettings):
             "WORKER_REMOTE_BROWSER_TIMEOUT", "WORKER_BROWSER_TASK_TIMEOUT"
         ),
         description="Timeout in seconds awaiting a remote worker browser response",
+    )
+    max_remote_browser_calls: int = Field(
+        default=8,
+        ge=1,
+        le=256,
+        validation_alias=AliasChoices(
+            "WORKER_MAX_REMOTE_BROWSER_CALLS", "WORKER_REMOTE_BROWSER_CONCURRENCY"
+        ),
+        description="Maximum concurrent in-flight remote browser RPC calls per API process",
+    )
+    metrics_port: int | None = Field(
+        default=None,
+        ge=0,
+        le=65535,
+        description="Optional TCP port exposing Prometheus /metrics for the standalone worker process",
     )
 
     model_config = SettingsConfigDict(env_prefix="WORKER_", populate_by_name=True, extra="ignore")
@@ -146,7 +178,7 @@ class TelemetryConfig(BaseSettings):
     )
     exporter_otlp_endpoint: str | None = Field(
         default=None,
-        description="OTLP HTTP trace endpoint (e.g., http://otel-collector:4318/v1/traces)",
+        description="OTLP HTTP collector base URL or /v1/traces endpoint (e.g., http://otel-collector:4318)",
     )
     traces_sample_rate: float = Field(
         default=1.0,

@@ -5,10 +5,10 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import logging
+import time
 from datetime import datetime
 from typing import Any
 
-import redis.exceptions as redis_exc
 from apscheduler.executors.asyncio import AsyncIOExecutor
 from apscheduler.jobstores.memory import MemoryJobStore
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
@@ -17,9 +17,11 @@ from ..config import SchedulerConfig
 
 logger = logging.getLogger(__name__)
 
+_REDIS_JOB_STORE_SOCKET_TIMEOUT = 5.0
+
 
 def _get_redis_job_store(redis_uri: str) -> Any:
-    """Build APScheduler's RedisJobStore from a Redis URI.
+    """Build APScheduler's RedisJobStore from a Redis URI with bounded socket timeouts.
 
     APScheduler 3.x forwards **connect_args directly to redis.Redis.__init__, which rejects
     a raw `url=` kwarg, so build a ConnectionPool via from_url and pass `connection_pool=`.
@@ -27,7 +29,11 @@ def _get_redis_job_store(redis_uri: str) -> Any:
     from apscheduler.jobstores.redis import RedisJobStore
     from redis import ConnectionPool
 
-    pool = ConnectionPool.from_url(redis_uri)
+    pool = ConnectionPool.from_url(
+        redis_uri,
+        socket_timeout=_REDIS_JOB_STORE_SOCKET_TIMEOUT,
+        socket_connect_timeout=_REDIS_JOB_STORE_SOCKET_TIMEOUT,
+    )
     return RedisJobStore(
         jobs_key="scheduler:jobs",
         run_times_key="scheduler:run_times",
@@ -55,17 +61,14 @@ class SchedulerService:
             else min(30.0, max(1.0, settings.misfire_grace_time / 2))
         )
         self._wakeup_task: asyncio.Task[None] | None = None
+        self._status_cache: tuple[float, dict[str, Any]] | None = None
 
         jobstores: dict[str, Any] = {}
-        if redis_uri and settings.job_store_type == "redis":
-            try:
-                jobstores["default"] = _get_redis_job_store(redis_uri)
-                logger.info("Scheduler configured with Redis job store")
-            except (ImportError, redis_exc.RedisError, OSError, ValueError) as exc:
-                logger.warning(
-                    f"Failed to configure Redis job store: {exc}. Falling back to memory."
-                )
-                jobstores["default"] = MemoryJobStore()
+        if settings.job_store_type == "redis":
+            if not redis_uri:
+                raise RuntimeError("REDIS_URI is required when scheduler job_store_type is 'redis'")
+            jobstores["default"] = _get_redis_job_store(redis_uri)
+            logger.info("Scheduler configured with Redis job store")
         else:
             jobstores["default"] = MemoryJobStore()
             logger.info("Scheduler configured with in-memory job store")
@@ -91,6 +94,9 @@ class SchedulerService:
             raise RuntimeError("Scheduler not initialized")
         return self._scheduler
 
+    def invalidate_status_cache(self) -> None:
+        self._status_cache = None
+
     async def _periodic_wakeup_loop(self) -> None:
         """Wake APScheduler periodically so jobs added by paused API pods are discovered."""
         try:
@@ -110,9 +116,10 @@ class SchedulerService:
             raise RuntimeError("Scheduler not initialized")
         self._scheduler.start(paused=paused)
         self._started = True
+        self._status_cache = None
         if not paused and self._wakeup_interval > 0:
             self._wakeup_task = asyncio.create_task(self._periodic_wakeup_loop())
-        jobs = self._scheduler.get_jobs()
+        jobs = await asyncio.to_thread(self._scheduler.get_jobs)
         mode_label = "paused (CRUD-only)" if paused else "active"
         logger.info(f"Scheduler started in {mode_label} mode with {len(jobs)} existing jobs")
 
@@ -121,12 +128,13 @@ class SchedulerService:
         if not self._started or self._scheduler is None:
             return
         self._started = False
+        self._status_cache = None
         if self._wakeup_task is not None:
             self._wakeup_task.cancel()
             with contextlib.suppress(asyncio.CancelledError):
                 await self._wakeup_task
             self._wakeup_task = None
-        self._scheduler.shutdown(wait=wait)
+        await asyncio.to_thread(self._scheduler.shutdown, wait=wait)
         logger.info("Scheduler shutdown complete")
 
     def is_running(self) -> bool:
@@ -138,20 +146,32 @@ class SchedulerService:
         if not self._started:
             return {"status": "stopped"}
 
-        jobs = self._scheduler.get_jobs()
+        jobs = await asyncio.to_thread(self._scheduler.get_jobs)
         pending_jobs = [job for job in jobs if job.next_run_time is not None]
         next_run: datetime | None = (
             min(job.next_run_time for job in pending_jobs if job.next_run_time)
             if pending_jobs
             else None
         )
-        return {
+        status = {
             "status": "running" if self._scheduler.running else "paused",
             "job_store_type": self.settings.job_store_type,
             "total_jobs": len(jobs),
             "pending_jobs": len(pending_jobs),
             "next_run_time": next_run.isoformat() if next_run else None,
         }
+        self._status_cache = (time.monotonic(), dict(status))
+        return status
+
+    async def get_cached_status(self, max_age: float = 15.0) -> dict[str, Any]:
+        """Return a bounded-TTL cached status snapshot so unauthenticated probes avoid Redis load."""
+        if not self._scheduler:
+            return {"status": "not_initialized"}
+        if not self._started:
+            return {"status": "stopped"}
+        if self._status_cache is not None and (time.monotonic() - self._status_cache[0]) < max_age:
+            return dict(self._status_cache[1])
+        return await self.get_status()
 
     def get_jobs(self) -> list[Any]:
         return self._scheduler.get_jobs() if self._scheduler else []
@@ -162,4 +182,5 @@ class SchedulerService:
     def remove_job(self, job_id: str) -> None:
         if self._scheduler:
             self._scheduler.remove_job(job_id)
+            self._status_cache = None
             logger.info(f"Removed scheduled job: {job_id}")

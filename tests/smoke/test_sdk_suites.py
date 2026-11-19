@@ -56,9 +56,13 @@ def test_javascript_sdk_suite_passes_without_untracked_build() -> None:
     assert proc.returncode == 0, f"JS SDK tests failed:\n{proc.stdout}\n{proc.stderr}"
 
     tsc = shutil.which("tsc")
-    if tsc is not None:
+    local_tsc = js_dir / "node_modules" / ".bin" / "tsc"
+    tsc_cmd: list[str] | None = (
+        [tsc] if tsc is not None else ([str(local_tsc)] if local_tsc.is_file() else None)
+    )
+    if tsc_cmd is not None:
         tc_proc = subprocess.run(
-            [tsc, "--noEmit", "-p", "tsconfig.json"],
+            [*tsc_cmd, "--noEmit", "-p", "tsconfig.json"],
             cwd=js_dir,
             capture_output=True,
             text=True,

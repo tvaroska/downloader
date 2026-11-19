@@ -4,7 +4,7 @@ from typing import Literal, TypedDict
 
 from pydantic import BaseModel, ConfigDict, Field
 
-from ..browser.actions import BrowserAction
+from .browser_actions import BrowserAction
 
 BatchFormat = Literal["text", "html", "markdown", "pdf", "screenshot", "json", "raw"]
 
@@ -62,6 +62,7 @@ class BatchURLRequest(BaseModel):
     ocr_language: str | None = Field(
         default=None,
         max_length=64,
+        pattern=r"^[a-zA-Z0-9_+]{1,64}$",
         description="Optional Tesseract language override when downloading images as text/markdown",
     )
 

@@ -227,13 +227,9 @@ class TestRobotsChecker:
                     request=request,
                 )
 
-            checker._http_client = httpx.AsyncClient(
-                transport=httpx.MockTransport(handler),
-                follow_redirects=True,
-                event_hooks={"response": [checker._on_redirect_hook]},
-            )
-            with pytest.raises(SSRFProtectionError):
-                await checker.check_allowed("https://example.com/public")
+            async with RobotsChecker(transport=httpx.MockTransport(handler)) as redirect_checker:
+                with pytest.raises(SSRFProtectionError):
+                    await redirect_checker.check_allowed("https://example.com/public")
         finally:
             await checker.close()
 
@@ -412,6 +408,90 @@ async def test_failure_sentinel_uses_short_ttl(monkeypatch: pytest.MonkeyPatch) 
 
     dns_checker = RobotsChecker(egress_policy=_DNSFailPolicy(Settings()))
     assert await dns_checker.check_allowed("https://unresolvable.invalid/path") is None
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize("failure_kind", ["timeout", "dns", "malformed_html", "malformed_garbage"])
+async def test_failure_sentinel_uses_short_ttl_for_timeout_dns_and_malformed(
+    monkeypatch: pytest.MonkeyPatch,
+    failure_kind: str,
+) -> None:
+    """Timeout, DNS, and malformed robots.txt responses cache fail-open for ~60s, not 3600s (`R91`)."""
+    from downloader.validation import DNSResolutionError
+
+    now = 9_000.0
+    monkeypatch.setattr("downloader.crawling.robots.time.monotonic", lambda: now)
+
+    calls = 0
+
+    async def fetcher(_url: str) -> tuple[int, str]:
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            if failure_kind == "timeout":
+                raise httpx.ReadTimeout("robots fetch timed out")
+            if failure_kind == "dns":
+                raise DNSResolutionError("example.com")
+            if failure_kind == "malformed_html":
+                return 200, "<!DOCTYPE html><html><body>Error page</body></html>"
+            return 200, "garbage without directives or colons"
+        return 200, "User-agent: *\nDisallow: /private/\n"
+
+    # 1. Redis backend stores short 60s TTL (not 3600s)
+    fake_redis = FakeRedis()
+    redis_checker = RobotsChecker(
+        robots_cache_ttl=3600,
+        negative_cache_ttl=60,
+        redis_client=fake_redis,
+        fetcher=fetcher,
+    )
+    assert await redis_checker.check_allowed("https://example.com/private/doc") is None
+    assert calls == 1
+    _, redis_ttl = fake_redis.store["robots:v2:https:example.com"]
+    assert redis_ttl == pytest.approx(60.0)
+
+    # 2. In-memory cache expires after 60s negative TTL and re-fetches rules
+    calls = 0
+    mem_checker = RobotsChecker(
+        robots_cache_ttl=3600,
+        negative_cache_ttl=60,
+        redis_client=None,
+        fetcher=fetcher,
+    )
+    assert await mem_checker.check_allowed("https://example.com/private/doc") is None
+    assert calls == 1
+
+    now += 30.0
+    assert await mem_checker.check_allowed("https://example.com/private/doc") is None
+    assert calls == 1
+
+    now += 31.0
+    with pytest.raises(RobotsDisallowedError):
+        await mem_checker.check_allowed("https://example.com/private/doc")
+    assert calls == 2
+
+
+@pytest.mark.unit
+async def test_injected_fetcher_strips_utf8_bom_and_redis_cache_avoids_reparse() -> None:
+    """UTF-8 BOM is stripped on injected fetcher (`R112`) and Redis cache reuses parsed rules (`R114`)."""
+    bom_robots = "\ufeffUser-agent: *\nDisallow: /secret/\n"
+
+    async def fetcher(_url: str) -> tuple[int, str]:
+        return 200, bom_robots
+
+    fake_redis = FakeRedis()
+    writer = RobotsChecker(fetcher=fetcher, redis_client=fake_redis)
+    with pytest.raises(RobotsDisallowedError):
+        await writer.check_allowed("https://example.com/secret/item")
+
+    reader = RobotsChecker(fetcher=fetcher, redis_client=fake_redis)
+    with pytest.raises(RobotsDisallowedError):
+        await reader.check_allowed("https://example.com/secret/first")
+
+    # Second read on the same pod hits in-memory parsed entry without calling Redis again.
+    fake_redis.fail_get = True
+    with pytest.raises(RobotsDisallowedError):
+        await reader.check_allowed("https://example.com/secret/second")
 
 
 @pytest.mark.unit

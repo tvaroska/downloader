@@ -17,7 +17,7 @@ from downloader.auth import (
     is_auth_enabled,
     verify_api_key,
 )
-from downloader.config import Settings
+from downloader.config import AuthConfig, Settings, reload_settings
 
 
 @pytest.mark.smoke
@@ -30,9 +30,8 @@ class TestAuthFunctions:
     )
     def test_is_auth_enabled(self, key, expected):
         """Test is_auth_enabled with different keys."""
-        env = {"DOWNLOADER_KEY": key} if key is not None else {}
-        with patch.dict(os.environ, env, clear=True):
-            assert is_auth_enabled() is expected
+        settings = Settings(auth=AuthConfig(api_key=key))
+        assert is_auth_enabled(settings) is expected
 
     @pytest.mark.parametrize(
         "env_key, provided_key, expected",
@@ -44,24 +43,23 @@ class TestAuthFunctions:
     )
     def test_verify_api_key(self, env_key, provided_key, expected):
         """Test API key verification."""
-        env = {"DOWNLOADER_KEY": env_key} if env_key is not None else {}
-        with patch.dict(os.environ, env, clear=True):
-            assert verify_api_key(provided_key) is expected
+        settings = Settings(auth=AuthConfig(api_key=env_key))
+        assert verify_api_key(provided_key, settings) is expected
 
     def test_get_auth_status_disabled(self):
         """Test auth status when authentication is disabled."""
-        with patch.dict(os.environ, {}, clear=True):
-            status = get_auth_status()
-            assert status["auth_enabled"] is False
-            assert status["auth_methods"] is None
+        settings = Settings(auth=AuthConfig(api_key=None))
+        status = get_auth_status(settings)
+        assert status["auth_enabled"] is False
+        assert status["auth_methods"] is None
 
     def test_get_auth_status_enabled(self):
         """Test auth status when authentication is enabled."""
-        with patch.dict(os.environ, {"DOWNLOADER_KEY": "test-key"}, clear=True):
-            status = get_auth_status()
-            assert status["auth_enabled"] is True
-            assert isinstance(status["auth_methods"], list)
-            assert len(status["auth_methods"]) == 2
+        settings = Settings(auth=AuthConfig(api_key="test-key"))
+        status = get_auth_status(settings)
+        assert status["auth_enabled"] is True
+        assert isinstance(status["auth_methods"], list)
+        assert len(status["auth_methods"]) == 2
 
     def test_verify_api_key_uses_compare_digest(self, monkeypatch: pytest.MonkeyPatch) -> None:
         """Pin constant-time `secrets.compare_digest` usage in `verify_api_key` (`R54`)."""
@@ -73,9 +71,9 @@ class TestAuthFunctions:
             return real_compare(a, b)
 
         monkeypatch.setattr(secrets, "compare_digest", _spy_compare_digest)
-        with patch.dict(os.environ, {"DOWNLOADER_KEY": "const-time-secret"}, clear=True):
-            assert verify_api_key("const-time-secret") is True
-            assert verify_api_key("wrong-candidate") is False
+        settings = Settings(auth=AuthConfig(api_key="const-time-secret"))
+        assert verify_api_key("const-time-secret", settings) is True
+        assert verify_api_key("wrong-candidate", settings) is False
 
         assert observed_pairs == [
             (b"const-time-secret", b"const-time-secret"),
@@ -101,14 +99,19 @@ class TestGetApiKey:
         request = AsyncMock(spec=Request)
         request.headers = {}
         request.query_params = {}
+        request.app = None
         return request
 
     @pytest.mark.asyncio
     async def test_no_auth_required(self, mock_request):
         """Test when no authentication is required."""
         with patch.dict(os.environ, {}, clear=True):
-            result = await get_api_key(mock_request, None)
-            assert result is None
+            reload_settings()
+            try:
+                result = await get_api_key(mock_request, None)
+                assert result is None
+            finally:
+                reload_settings()
 
     @pytest.mark.asyncio
     @pytest.mark.parametrize(
@@ -120,15 +123,19 @@ class TestGetApiKey:
     )
     async def test_get_api_key_valid(self, mock_request, auth_header, expected_result):
         """Test valid API key from different sources."""
-        with patch.dict(os.environ, {"DOWNLOADER_KEY": "test-key"}, clear=True):
-            mock_request.headers = auth_header
-            credentials = (
-                HTTPAuthorizationCredentials(scheme="Bearer", credentials="test-key")
-                if "Authorization" in auth_header
-                else None
-            )
-            result = await get_api_key(mock_request, credentials)
-            assert result == expected_result
+        try:
+            with patch.dict(os.environ, {"DOWNLOADER_KEY": "test-key"}, clear=True):
+                reload_settings()
+                mock_request.headers = auth_header
+                credentials = (
+                    HTTPAuthorizationCredentials(scheme="Bearer", credentials="test-key")
+                    if "Authorization" in auth_header
+                    else None
+                )
+                result = await get_api_key(mock_request, credentials)
+                assert result == expected_result
+        finally:
+            reload_settings()
 
     @pytest.mark.asyncio
     @pytest.mark.parametrize(
@@ -153,23 +160,31 @@ class TestGetApiKey:
     )
     async def test_get_api_key_invalid(self, mock_request, auth_header, credentials, error_detail):
         """Test invalid or missing API key scenarios."""
-        with patch.dict(os.environ, {"DOWNLOADER_KEY": "test-key"}, clear=True):
-            mock_request.headers = auth_header
-            with pytest.raises(HTTPException) as exc_info:
-                await get_api_key(mock_request, credentials)
+        try:
+            with patch.dict(os.environ, {"DOWNLOADER_KEY": "test-key"}, clear=True):
+                reload_settings()
+                mock_request.headers = auth_header
+                with pytest.raises(HTTPException) as exc_info:
+                    await get_api_key(mock_request, credentials)
 
-            assert exc_info.value.status_code == 401
-            assert error_detail in str(exc_info.value.detail)
+                assert exc_info.value.status_code == 401
+                assert error_detail in str(exc_info.value.detail)
+        finally:
+            reload_settings()
 
     @pytest.mark.asyncio
     async def test_bearer_token_priority(self, mock_request):
         """Test Bearer token takes priority over other methods."""
-        with patch.dict(os.environ, {"DOWNLOADER_KEY": "test-key"}, clear=True):
-            credentials = HTTPAuthorizationCredentials(scheme="Bearer", credentials="test-key")
-            mock_request.headers = {"x-api-key": "wrong-key"}
+        try:
+            with patch.dict(os.environ, {"DOWNLOADER_KEY": "test-key"}, clear=True):
+                reload_settings()
+                credentials = HTTPAuthorizationCredentials(scheme="Bearer", credentials="test-key")
+                mock_request.headers = {"x-api-key": "wrong-key"}
 
-            result = await get_api_key(mock_request, credentials)
-            assert result == "test-key"
+                result = await get_api_key(mock_request, credentials)
+                assert result == "test-key"
+        finally:
+            reload_settings()
 
 
 @pytest.mark.smoke

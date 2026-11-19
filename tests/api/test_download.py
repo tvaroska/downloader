@@ -342,7 +342,7 @@ class TestRenderParameter:
         app.dependency_overrides[get_http_client] = mock_get_http_client
         try:
             with patch(
-                "downloader.content_converter.render_html_with_playwright",
+                "downloader.browser.renderer.render_html_with_playwright",
                 return_value=rendered_content,
             ) as mock_render:
                 response = api_client.get(
@@ -447,7 +447,7 @@ class TestRenderParameter:
         app.dependency_overrides[get_http_client] = mock_get_http_client
         try:
             with patch(
-                "downloader.content_converter.render_html_with_playwright",
+                "downloader.browser.renderer.render_html_with_playwright",
                 side_effect=RuntimeError("Browser crash"),
             ):
                 response = api_client.get(
@@ -488,7 +488,7 @@ class TestWaitForParameter:
         app.dependency_overrides[get_http_client] = mock_get_http_client
         try:
             with patch(
-                "downloader.content_converter.render_html_with_playwright",
+                "downloader.browser.renderer.render_html_with_playwright",
                 return_value=rendered_content,
             ) as mock_render:
                 response = api_client.get(
@@ -525,7 +525,7 @@ class TestWaitForParameter:
         app.dependency_overrides[get_http_client] = mock_get_http_client
         try:
             with patch(
-                "downloader.content_converter.render_html_with_playwright",
+                "downloader.browser.renderer.render_html_with_playwright",
                 side_effect=SelectorTimeoutError(".nonexistent", 10000),
             ):
                 response = api_client.get(
@@ -562,7 +562,7 @@ class TestWaitForParameter:
         app.dependency_overrides[get_http_client] = mock_get_http_client
         try:
             with patch(
-                "downloader.content_converter.render_html_with_playwright",
+                "downloader.browser.renderer.render_html_with_playwright",
                 return_value=rendered_content,
             ) as mock_render:
                 response = api_client.get(

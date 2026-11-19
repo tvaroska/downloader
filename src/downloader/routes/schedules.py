@@ -2,12 +2,16 @@
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import uuid
+from collections.abc import AsyncIterator
+from contextlib import asynccontextmanager
 from datetime import UTC, datetime
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, NoReturn
 
 import redis.exceptions as redis_exc
+from apscheduler.jobstores.base import JobLookupError
 from fastapi import APIRouter, Depends, HTTPException, Path, Query, Request
 
 from ..auth import get_api_key
@@ -22,7 +26,13 @@ from ..models.schedule import (
     cron_trigger_from_unix_crontab,
 )
 from ..scheduler import SchedulerService
-from ..validation import URLValidationError, sanitize_custom_headers, validate_url_async
+from ..services.webhooks import open_webhook_secret, seal_webhook_secret
+from ..validation import (
+    URLValidationError,
+    redact_url_for_log,
+    sanitize_custom_headers,
+    validate_url_async,
+)
 
 if TYPE_CHECKING:
     from ..scheduler import ScheduledJobExecutor
@@ -30,6 +40,15 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 _executor: ScheduledJobExecutor | None = None
+
+_RELEASE_RUN_LOCK_LUA = """
+if redis.call('get', KEYS[1]) == ARGV[1] then
+    return redis.call('del', KEYS[1])
+end
+return 0
+"""
+
+_CRON_FIELD_ORDER = ("minute", "hour", "day", "month", "day_of_week")
 
 router = APIRouter()
 
@@ -54,21 +73,65 @@ def _require_scheduler(scheduler: SchedulerDep) -> SchedulerService:
     return scheduler
 
 
-async def _acquire_schedule_run_lock(schedule_id: str) -> bool:
-    """Acquire a short-lived per-run Redis lock so two active schedulers do not duplicate a run."""
+def _raise_schedule_store_error(
+    exc: Exception,
+    message: str,
+    error_type: str,
+    *,
+    schedule_id: str | None = None,
+) -> NoReturn:
+    if isinstance(exc, JobLookupError):
+        detail_msg = f"Schedule {schedule_id} not found" if schedule_id else "Schedule not found"
+        raise HTTPException(
+            status_code=404,
+            detail=ErrorResponse(error=detail_msg, error_type="schedule_not_found").model_dump(),
+        ) from exc
+    if isinstance(exc, (redis_exc.RedisError, OSError, TimeoutError)):
+        logger.warning(f"{message} (storage unavailable): {exc}")
+        raise HTTPException(
+            status_code=503,
+            detail=ErrorResponse(
+                error="Schedule storage backend temporarily unavailable",
+                error_type="service_unavailable",
+            ).model_dump(),
+        ) from exc
+    logger.exception(f"{message}: {exc}")
+    raise HTTPException(
+        status_code=500,
+        detail=ErrorResponse(error=message, error_type=error_type).model_dump(),
+    ) from exc
+
+
+@asynccontextmanager
+async def _schedule_run_lock(schedule_id: str, ttl_seconds: int = 50) -> AsyncIterator[bool]:
+    """Acquire a token-owned per-run Redis lock and release it cleanly on completion."""
     if _executor is None:
-        return True
+        yield True
+        return
     storage = getattr(_executor, "storage", None)
     redis_client = getattr(storage, "redis", None)
     if redis_client is None:
-        return True
+        yield True
+        return
+
     lock_key = f"schedule:run_lock:{schedule_id}"
+    token = uuid.uuid4().hex
+    acquired = False
     try:
-        acquired = await redis_client.set(lock_key, "1", nx=True, ex=50)
-    except redis_exc.RedisError as exc:
+        acquired = bool(await redis_client.set(lock_key, token, nx=True, ex=ttl_seconds))
+    except (redis_exc.RedisError, OSError, RuntimeError) as exc:
         logger.warning(f"[SCHEDULE-{schedule_id}] Failed to acquire run lock: {exc}")
-        return True
-    return bool(acquired)
+        yield True
+        return
+
+    try:
+        yield acquired
+    finally:
+        if acquired:
+            try:
+                await redis_client.eval(_RELEASE_RUN_LOCK_LUA, 1, lock_key, token)
+            except (redis_exc.RedisError, OSError, RuntimeError, AttributeError) as exc:
+                logger.debug(f"[SCHEDULE-{schedule_id}] Run lock release skipped: {exc}")
 
 
 async def scheduled_download_job(  # noqa: PLR0913
@@ -77,6 +140,7 @@ async def scheduled_download_job(  # noqa: PLR0913
     format: str,
     headers: dict[str, str] | None,
     webhook_url: str | None = None,
+    webhook_secret_enc: str | None = None,
     webhook_secret: str | None = None,
     **_extra: Any,
 ) -> None:
@@ -85,35 +149,73 @@ async def scheduled_download_job(  # noqa: PLR0913
         logger.error(f"[SCHEDULE-{schedule_id}] Executor not initialized, cannot execute job")
         return
 
-    if not await _acquire_schedule_run_lock(schedule_id):
-        logger.info(
-            f"[SCHEDULE-{schedule_id}] Skipping duplicate run (lock held by another worker)"
-        )
-        return
-
-    logger.info(f"[SCHEDULE-{schedule_id}] Starting execution: {url} (format={format})")
-    try:
-        execution = await _executor.execute(
-            schedule_id,
-            url,
-            format,
-            headers,
-            webhook_url=webhook_url,
-            webhook_secret=webhook_secret,
-        )
-        if execution.success:
+    async with _schedule_run_lock(schedule_id) as acquired:
+        if not acquired:
             logger.info(
-                f"[SCHEDULE-{schedule_id}] Completed in {execution.duration:.2f}s "
-                f"({execution.content_size or 0} bytes)"
+                f"[SCHEDULE-{schedule_id}] Skipping duplicate run (lock held by another worker)"
             )
-        else:
-            logger.error(
-                f"[SCHEDULE-{schedule_id}] Failed after {execution.attempt} attempts: "
-                f"{execution.error_message}"
+            return
+
+        logger.info(
+            f"[SCHEDULE-{schedule_id}] Starting execution: {redact_url_for_log(url)} (format={format})"
+        )
+        try:
+            resolved_secret = open_webhook_secret(
+                webhook_secret_enc or webhook_secret,
+                getattr(_executor, "_settings", None) or get_settings(),
             )
-    except Exception as exc:  # noqa: BLE001
-        # Prevent unhandled callback exceptions from crashing APScheduler's event-loop runner.
-        logger.exception(f"[SCHEDULE-{schedule_id}] Unexpected error during execution: {exc}")
+            execution = await _executor.execute(
+                schedule_id,
+                url,
+                format,
+                headers,
+                webhook_url=webhook_url,
+                webhook_secret=resolved_secret,
+            )
+            if execution.success:
+                logger.info(
+                    f"[SCHEDULE-{schedule_id}] Completed in {execution.duration:.2f}s "
+                    f"({execution.content_size or 0} bytes)"
+                )
+            else:
+                logger.error(
+                    f"[SCHEDULE-{schedule_id}] Failed after {execution.attempt} attempts: "
+                    f"{execution.error_message}"
+                )
+        except (redis_exc.RedisError, OSError, RuntimeError, ValueError, TypeError) as exc:
+            logger.exception(f"[SCHEDULE-{schedule_id}] Unexpected error during execution: {exc}")
+
+
+def _extract_cron_fields(trigger: Any) -> dict[str, str] | None:
+    fields = getattr(trigger, "fields", None)
+    if not fields:
+        return None
+    by_name = {getattr(field, "name", ""): str(field) for field in fields}
+    if all(name in by_name for name in _CRON_FIELD_ORDER):
+        return by_name
+    return None
+
+
+def _reconstruct_legacy_cron_expr(trigger: Any) -> str:
+    """Reconstruct a 5-field cron string from a pre-`c68ee45` APScheduler `CronTrigger` or `OrTrigger`."""
+    direct = _extract_cron_fields(trigger)
+    if direct is not None:
+        return " ".join(direct[name] for name in _CRON_FIELD_ORDER)
+
+    sub_triggers = getattr(trigger, "triggers", None)
+    if isinstance(sub_triggers, (list, tuple)) and len(sub_triggers) == 2:
+        first = _extract_cron_fields(sub_triggers[0])
+        second = _extract_cron_fields(sub_triggers[1])
+        if (
+            first is not None
+            and second is not None
+            and all(first[k] == second[k] for k in ("minute", "hour", "month"))
+        ):
+            day = first["day"] if first["day"] != "*" else second["day"]
+            dow = first["day_of_week"] if first["day_of_week"] != "*" else second["day_of_week"]
+            return f"{first['minute']} {first['hour']} {day} {first['month']} {dow}"
+
+    return str(trigger)
 
 
 def _job_to_schedule_response(job: Any) -> ScheduleResponse:
@@ -121,7 +223,9 @@ def _job_to_schedule_response(job: Any) -> ScheduleResponse:
     created_at_str = kwargs.get("created_at")
     created_at = datetime.fromisoformat(created_at_str) if created_at_str else datetime.now(UTC)
     stored_expr = kwargs.get("cron_expression")
-    cron_expr = stored_expr if isinstance(stored_expr, str) else str(job.trigger)
+    cron_expr = (
+        stored_expr if isinstance(stored_expr, str) else _reconstruct_legacy_cron_expr(job.trigger)
+    )
     return ScheduleResponse(
         id=job.id,
         name=job.name or "",
@@ -134,6 +238,28 @@ def _job_to_schedule_response(job: Any) -> ScheduleResponse:
         next_run_time=job.next_run_time,
         webhook_url=kwargs.get("webhook_url"),
     )
+
+
+def _add_schedule_job_sync(
+    svc: SchedulerService,
+    *,
+    trigger: Any,
+    schedule_id: str,
+    schedule_data: ScheduleCreate,
+    job_kwargs: dict[str, Any],
+) -> Any:
+    job = svc.scheduler.add_job(
+        func=scheduled_download_job,
+        trigger=trigger,
+        id=schedule_id,
+        name=schedule_data.name,
+        kwargs=job_kwargs,
+        replace_existing=False,
+    )
+    if not schedule_data.enabled:
+        job.pause()
+    svc.invalidate_status_cache()
+    return job
 
 
 @router.post("/schedules", response_model=ScheduleResponse)
@@ -163,9 +289,10 @@ async def create_schedule(
         ) from exc
 
     try:
+        sealed_secret = seal_webhook_secret(schedule_data.webhook_secret, active_settings)
         schedule_id = str(uuid.uuid4())
         created_at = datetime.now(UTC)
-        job_kwargs = {
+        job_kwargs: dict[str, Any] = {
             "schedule_id": schedule_id,
             "url": validated_url,
             "format": schedule_data.format,
@@ -173,18 +300,16 @@ async def create_schedule(
             "created_at": created_at.isoformat(),
             "cron_expression": schedule_data.cron_expression,
             "webhook_url": validated_webhook_url,
-            "webhook_secret": schedule_data.webhook_secret,
+            "webhook_secret_enc": sealed_secret,
         }
-        job = svc.scheduler.add_job(
-            func=scheduled_download_job,
+        job = await asyncio.to_thread(
+            _add_schedule_job_sync,
+            svc,
             trigger=trigger,
-            id=schedule_id,
-            name=schedule_data.name,
-            kwargs=job_kwargs,
-            replace_existing=False,
+            schedule_id=schedule_id,
+            schedule_data=schedule_data,
+            job_kwargs=job_kwargs,
         )
-        if not schedule_data.enabled:
-            job.pause()
 
         logger.info(f"Created schedule {schedule_id}: {schedule_data.name}")
         return ScheduleResponse(
@@ -201,15 +326,16 @@ async def create_schedule(
         )
     except HTTPException:
         raise
-    except Exception as exc:  # noqa: BLE001
-        logger.exception(f"Failed to create schedule: {exc}")
-        raise HTTPException(
-            status_code=500,
-            detail=ErrorResponse(
-                error="Failed to create schedule",
-                error_type="schedule_creation_error",
-            ).model_dump(),
-        ) from exc
+    except (
+        JobLookupError,
+        redis_exc.RedisError,
+        OSError,
+        TimeoutError,
+        RuntimeError,
+        ValueError,
+        TypeError,
+    ) as exc:
+        _raise_schedule_store_error(exc, "Failed to create schedule", "schedule_creation_error")
 
 
 @router.get("/schedules", response_model=ScheduleListResponse)
@@ -220,19 +346,20 @@ async def list_schedules(
     """List all scheduled download jobs."""
     svc = _require_scheduler(scheduler)
     try:
-        schedules = [_job_to_schedule_response(job) for job in svc.get_jobs()]
+        jobs = await asyncio.to_thread(svc.get_jobs)
+        schedules = [_job_to_schedule_response(job) for job in jobs]
         return ScheduleListResponse(schedules=schedules, total=len(schedules))
     except HTTPException:
         raise
-    except Exception as exc:  # noqa: BLE001
-        logger.exception(f"Failed to list schedules: {exc}")
-        raise HTTPException(
-            status_code=500,
-            detail=ErrorResponse(
-                error="Failed to list schedules",
-                error_type="schedule_list_error",
-            ).model_dump(),
-        ) from exc
+    except (
+        redis_exc.RedisError,
+        OSError,
+        TimeoutError,
+        RuntimeError,
+        ValueError,
+        TypeError,
+    ) as exc:
+        _raise_schedule_store_error(exc, "Failed to list schedules", "schedule_list_error")
 
 
 @router.get("/schedules/{schedule_id}", response_model=ScheduleResponse)
@@ -244,7 +371,7 @@ async def get_schedule(
     """Get details of a specific scheduled job."""
     svc = _require_scheduler(scheduler)
     try:
-        job = svc.get_job(schedule_id)
+        job = await asyncio.to_thread(svc.get_job, schedule_id)
         if job is None:
             raise HTTPException(
                 status_code=404,
@@ -256,15 +383,21 @@ async def get_schedule(
         return _job_to_schedule_response(job)
     except HTTPException:
         raise
-    except Exception as exc:  # noqa: BLE001
-        logger.exception(f"Failed to get schedule {schedule_id}: {exc}")
-        raise HTTPException(
-            status_code=500,
-            detail=ErrorResponse(
-                error="Failed to get schedule",
-                error_type="schedule_get_error",
-            ).model_dump(),
-        ) from exc
+    except (
+        JobLookupError,
+        redis_exc.RedisError,
+        OSError,
+        TimeoutError,
+        RuntimeError,
+        ValueError,
+        TypeError,
+    ) as exc:
+        _raise_schedule_store_error(
+            exc,
+            "Failed to get schedule",
+            "schedule_get_error",
+            schedule_id=schedule_id,
+        )
 
 
 @router.get("/schedules/{schedule_id}/history", response_model=ScheduleExecutionListResponse)
@@ -279,7 +412,7 @@ async def get_schedule_history(  # noqa: PLR0913
     """Get paginated execution history for a scheduled job."""
     svc = _require_scheduler(scheduler)
     try:
-        job = svc.get_job(schedule_id)
+        job = await asyncio.to_thread(svc.get_job, schedule_id)
         if job is None:
             raise HTTPException(
                 status_code=404,
@@ -307,15 +440,21 @@ async def get_schedule_history(  # noqa: PLR0913
         )
     except HTTPException:
         raise
-    except Exception as exc:  # noqa: BLE001
-        logger.exception(f"Failed to get history for schedule {schedule_id}: {exc}")
-        raise HTTPException(
-            status_code=500,
-            detail=ErrorResponse(
-                error="Failed to get schedule history",
-                error_type="schedule_history_error",
-            ).model_dump(),
-        ) from exc
+    except (
+        JobLookupError,
+        redis_exc.RedisError,
+        OSError,
+        TimeoutError,
+        RuntimeError,
+        ValueError,
+        TypeError,
+    ) as exc:
+        _raise_schedule_store_error(
+            exc,
+            "Failed to get schedule history",
+            "schedule_history_error",
+            schedule_id=schedule_id,
+        )
 
 
 @router.delete("/schedules/{schedule_id}")
@@ -328,7 +467,7 @@ async def delete_schedule(
     """Remove a scheduled job and its execution history."""
     svc = _require_scheduler(scheduler)
     try:
-        job = svc.get_job(schedule_id)
+        job = await asyncio.to_thread(svc.get_job, schedule_id)
         if job is None:
             raise HTTPException(
                 status_code=404,
@@ -337,19 +476,25 @@ async def delete_schedule(
                     error_type="schedule_not_found",
                 ).model_dump(),
             )
-        svc.remove_job(schedule_id)
+        await asyncio.to_thread(svc.remove_job, schedule_id)
         if execution_storage is not None:
             await execution_storage.delete_executions(schedule_id)
         logger.info(f"Deleted schedule {schedule_id}")
         return {"success": True, "message": f"Schedule {schedule_id} deleted successfully"}
     except HTTPException:
         raise
-    except Exception as exc:  # noqa: BLE001
-        logger.exception(f"Failed to delete schedule {schedule_id}: {exc}")
-        raise HTTPException(
-            status_code=500,
-            detail=ErrorResponse(
-                error="Failed to delete schedule",
-                error_type="schedule_deletion_error",
-            ).model_dump(),
-        ) from exc
+    except (
+        JobLookupError,
+        redis_exc.RedisError,
+        OSError,
+        TimeoutError,
+        RuntimeError,
+        ValueError,
+        TypeError,
+    ) as exc:
+        _raise_schedule_store_error(
+            exc,
+            "Failed to delete schedule",
+            "schedule_deletion_error",
+            schedule_id=schedule_id,
+        )

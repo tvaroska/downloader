@@ -11,14 +11,15 @@ from __future__ import annotations
 import argparse
 import asyncio
 import base64
+import contextlib
 import logging
 import os
 import signal
 import socket
 import sys
 import tempfile
+import time
 import uuid
-from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
@@ -27,58 +28,169 @@ import redis.exceptions as redis_exc
 from pydantic import ValidationError
 
 from . import __version__
-from .browser.actions import BrowserAction, BrowserActionError
+from .browser.renderer import LocalBrowserRenderer, render_html_with_playwright
 from .config import Settings, get_settings
-from .content_converter import SelectorTimeoutError, render_html_with_playwright
 from .crawling import DomainThrottle, RobotsChecker
-from .http_client import ContentTooLargeError, HTTPClient
-from .job_manager import TERMINAL_JOB_STATUSES, JobManager, JobStatus
-from .logging_config import get_logger, setup_logging
+from .job_manager import JobManager
+from .logging_config import setup_logging
+from .metrics import get_metrics_collector
+from .models.browser_actions import BrowserAction
 from .models.responses import BatchRequest
-from .pdf_generator import (
-    PDFGeneratorError,
-    PlaywrightPDFGenerator,
-    cleanup_pdf_generator,
-    generate_pdf_from_url,
-    generate_screenshot_from_url,
-    set_shared_pdf_generator,
-)
-from .ports import JobStore, LocalBrowserRenderer, WorkQueue
-from .routes.schedules import set_executor as set_schedules_executor
-from .scheduler import ExecutionStorage, ScheduledJobExecutor, SchedulerService
-from .services.batch_processor import notify_batch_webhook, process_background_batch_job
-from .telemetry import (
-    configure_telemetry,
-    extract_trace_context,
-    get_tracer,
-    shutdown_telemetry,
-)
-from .transformers.ocr import shutdown_ocr_executor
-from .validation import EgressPolicy, canonical_host
-from .worker_queue import (
+from .pdf_generator import generate_pdf_from_url, generate_screenshot_from_url
+from .ports import (
+    TERMINAL_JOB_STATUSES,
     BatchQueueEnvelope,
+    BrowserRenderer,
     BrowserTaskRequest,
     BrowserTaskResponse,
-    WorkerQueue,
+    JobStatus,
+    JobStore,
+    WorkQueue,
 )
+from .routes.schedules import set_executor as set_schedules_executor
+from .services.batch_processor import notify_batch_webhook, process_background_batch_job
+from .services.webhooks import open_webhook_secret
+from .telemetry import configure_telemetry, extract_trace_context, get_tracer
+from .validation import EgressPolicy
+from .worker_queue import WorkerQueue
+from .worker_runtime import (
+    _expired_browser_response,
+    _init_worker_runtime,
+    _serialize_browser_task_error,
+    _shutdown_worker_runtime,
+    _start_worker_metrics_server,
+    _WorkerRuntime,
+)
+
+__all__ = [
+    "_WorkerRuntime",
+    "_expired_browser_response",
+    "_serialize_browser_task_error",
+    "_shutdown_worker_runtime",
+    "_start_worker_metrics_server",
+    "main",
+    "process_worker_batch_envelope",
+    "process_worker_browser_task",
+    "run_healthcheck",
+    "run_worker",
+]
 
 logger = logging.getLogger(__name__)
 
 
-@dataclass
-class _WorkerRuntime:
-    worker_id: str
-    settings: Settings
-    http_client: HTTPClient
-    pdf_generator: PlaywrightPDFGenerator
-    pdf_semaphore: asyncio.Semaphore
-    batch_semaphore: asyncio.Semaphore
-    job_slot_semaphore: asyncio.Semaphore
-    job_manager: JobManager
-    worker_queue: WorkerQueue
-    robots_checker: RobotsChecker
-    domain_throttle: DomainThrottle
-    scheduler: SchedulerService
+def _decode_batch_request(request_data: dict[str, Any], cfg: Settings) -> BatchRequest:
+    """Rehydrate a persisted batch request, decrypting `webhook_secret_enc` if present."""
+    payload = {k: v for k, v in request_data.items() if k != "webhook_secret_enc"}
+    sealed = request_data.get("webhook_secret_enc")
+    if isinstance(sealed, str) and sealed:
+        payload["webhook_secret"] = open_webhook_secret(sealed, cfg)
+    elif isinstance(payload.get("webhook_secret"), str) and payload["webhook_secret"]:
+        payload["webhook_secret"] = open_webhook_secret(payload["webhook_secret"], cfg)
+    return BatchRequest.model_validate(payload)
+
+
+async def _fail_dead_letter_batch_job(
+    envelope: BatchQueueEnvelope,
+    *,
+    job_manager: JobStore,
+    settings: Settings,
+) -> None:
+    """Mark an exhausted batch job FAILED and fire its failure webhook."""
+    msg = f"Batch job exceeded maximum worker attempts ({settings.worker.max_attempts})"
+    batch_req: BatchRequest | None = None
+    try:
+        job_info = await job_manager.get_job_info(envelope.job_id)
+        if job_info is not None:
+            batch_req = _decode_batch_request(job_info.request_data, settings)
+    except (redis_exc.RedisError, ValidationError, ValueError, OSError) as exc:
+        logger.warning(f"[WORKER] Could not load dead-letter job {envelope.job_id}: {exc}")
+
+    should_notify = True
+    try:
+        should_notify = await job_manager.update_job_status(
+            envelope.job_id,
+            JobStatus.FAILED,
+            error_message=msg,
+        )
+    except (redis_exc.RedisError, OSError, RuntimeError, ValueError) as exc:
+        logger.error(f"[WORKER] Failed updating dead-letter job {envelope.job_id}: {exc}")
+
+    get_metrics_collector().increment_counter("worker_batch_jobs_dead_letter_total")
+    if should_notify and batch_req is not None:
+        await notify_batch_webhook(envelope.job_id, batch_req, JobStatus.FAILED, error=msg)
+
+
+async def _handle_batch_envelope_failure(
+    envelope: BatchQueueEnvelope,
+    exc: Exception,
+    *,
+    job_manager: JobStore,
+    batch_req: BatchRequest | None,
+) -> None:
+    logger.exception(f"[WORKER] Batch job {envelope.job_id} failed: {exc}")
+    get_metrics_collector().increment_counter("worker_batch_jobs_failed_total")
+    should_notify = True
+    try:
+        should_notify = await job_manager.update_job_status(
+            envelope.job_id, JobStatus.FAILED, error_message=str(exc)
+        )
+    except (redis_exc.RedisError, OSError, RuntimeError, ValueError) as status_exc:
+        logger.error(f"[WORKER] Could not mark batch job {envelope.job_id} FAILED: {status_exc}")
+    if should_notify and batch_req is not None:
+        await notify_batch_webhook(envelope.job_id, batch_req, JobStatus.FAILED, error=str(exc))
+
+
+async def _load_runnable_batch_request(
+    envelope: BatchQueueEnvelope,
+    job_manager: JobStore,
+    cfg: Settings,
+) -> BatchRequest | None:
+    job_info = await job_manager.get_job_info(envelope.job_id)
+    if job_info is None:
+        logger.warning(f"[WORKER] Job {envelope.job_id} expired or missing; skipping")
+        return None
+    if job_info.status in TERMINAL_JOB_STATUSES:
+        logger.info(
+            f"[WORKER] Job {envelope.job_id} already in terminal status "
+            f"{job_info.status.value}; skipping"
+        )
+        return None
+    if envelope.attempt > cfg.worker.max_attempts:
+        await _fail_dead_letter_batch_job(envelope, job_manager=job_manager, settings=cfg)
+        return None
+    batch_req = _decode_batch_request(job_info.request_data, cfg)
+    started = await job_manager.update_job_status(envelope.job_id, JobStatus.RUNNING)
+    if not started:
+        logger.info(f"[WORKER] Job {envelope.job_id} transitioned before start; skipping")
+        return None
+    return batch_req
+
+
+async def _finalize_batch_envelope(
+    envelope: BatchQueueEnvelope,
+    batch_req: BatchRequest,
+    results: list[dict[str, Any]],
+    summary: dict[str, Any],
+    job_manager: JobStore,
+) -> None:
+    metrics = get_metrics_collector()
+    duration = float(summary["total_duration"]) if "total_duration" in summary else None
+    applied = await job_manager.complete_job(
+        envelope.job_id,
+        results,
+        summary,
+        total_duration=duration,
+        completed_at=datetime.now(UTC),
+    )
+    if applied:
+        metrics.increment_counter("worker_batch_jobs_completed_total")
+        await notify_batch_webhook(envelope.job_id, batch_req, JobStatus.COMPLETED, summary=summary)
+        logger.info(f"[WORKER] Completed batch job {envelope.job_id}")
+    else:
+        metrics.increment_counter("worker_batch_jobs_cancelled_total")
+        logger.info(
+            f"[WORKER] Skipped completion blob/webhook for job {envelope.job_id} (already terminal)"
+        )
 
 
 async def process_worker_batch_envelope(  # noqa: PLR0913
@@ -91,10 +203,13 @@ async def process_worker_batch_envelope(  # noqa: PLR0913
     pdf_semaphore: asyncio.Semaphore,
     robots_checker: RobotsChecker | None = None,
     domain_throttle: DomainThrottle | None = None,
+    renderer: BrowserRenderer | None = None,
+    settings: Settings | None = None,
 ) -> None:
     """Execute one dequeued batch job envelope, persist results, fire webhooks, and ack."""
     tracer = get_tracer(__name__)
     parent_ctx = extract_trace_context(envelope.trace_headers)
+    cfg = settings or get_settings()
     batch_req: BatchRequest | None = None
 
     with tracer.start_as_current_span("worker.batch_job", context=parent_ctx) as span:
@@ -102,20 +217,14 @@ async def process_worker_batch_envelope(  # noqa: PLR0913
         span.set_attribute("batch.attempt", envelope.attempt)
         should_ack = True
         try:
-            job_info = await job_manager.get_job_info(envelope.job_id)
-            if job_info is None:
-                logger.warning(f"[WORKER] Job {envelope.job_id} expired or missing; skipping")
+            batch_req = await _load_runnable_batch_request(envelope, job_manager, cfg)
+            if batch_req is None:
                 return
-            if job_info.status in TERMINAL_JOB_STATUSES:
-                logger.info(
-                    f"[WORKER] Job {envelope.job_id} already in terminal status "
-                    f"{job_info.status.value}; skipping"
-                )
-                return
-
-            batch_req = BatchRequest.model_validate(job_info.request_data)
-            await job_manager.update_job_status(envelope.job_id, JobStatus.RUNNING)
-
+            active_renderer = renderer or LocalBrowserRenderer(
+                pdf_semaphore,
+                egress_policy=EgressPolicy(cfg),
+                max_output_bytes=cfg.content.max_download_size,
+            )
             results, summary = await process_background_batch_job(
                 envelope.job_id,
                 batch_req,
@@ -125,141 +234,114 @@ async def process_worker_batch_envelope(  # noqa: PLR0913
                 pdf_semaphore,
                 robots_checker=robots_checker,
                 domain_throttle=domain_throttle,
+                renderer=active_renderer,
+                settings=cfg,
             )
-
-            completed_at = datetime.now(UTC)
-            duration = float(summary["total_duration"]) if "total_duration" in summary else None
-            await job_manager.store_job_results(
-                envelope.job_id,
-                results,
-                summary,
-                status=JobStatus.COMPLETED,
-                total_duration=duration,
-                completed_at=completed_at,
-            )
-            await job_manager.update_job_status(envelope.job_id, JobStatus.COMPLETED)
-            await notify_batch_webhook(
-                envelope.job_id, batch_req, JobStatus.COMPLETED, summary=summary
-            )
-            logger.info(f"[WORKER] Completed batch job {envelope.job_id}")
+            await _finalize_batch_envelope(envelope, batch_req, results, summary, job_manager)
         except asyncio.CancelledError:
             current = await job_manager.get_job_info(envelope.job_id)
             if current is None or current.status != JobStatus.CANCELLED:
-                await worker_queue.requeue_batch_job(envelope)
-                should_ack = False
+                if await worker_queue.requeue_batch_job(envelope):
+                    should_ack = False
             raise
         except Exception as exc:  # noqa: BLE001
             # Isolate dequeued job failures so the worker marks the job FAILED and stays alive.
-            logger.exception(f"[WORKER] Batch job {envelope.job_id} failed: {exc}")
-            await job_manager.update_job_status(
-                envelope.job_id, JobStatus.FAILED, error_message=str(exc)
+            await _handle_batch_envelope_failure(
+                envelope, exc, job_manager=job_manager, batch_req=batch_req
             )
-            if batch_req is not None:
-                await notify_batch_webhook(
-                    envelope.job_id, batch_req, JobStatus.FAILED, error=str(exc)
-                )
         finally:
             if should_ack:
                 await worker_queue.ack_batch_job(envelope.raw_payload)
 
 
-async def process_worker_browser_task(
+async def _execute_browser_task_payload(
+    task: BrowserTaskRequest,
+    actions: list[BrowserAction],
+    *,
+    egress_policy: EgressPolicy | None,
+    redirect_policy: Any,
+    max_output_bytes: int | None,
+) -> bytes:
+    if task.kind == "pdf":
+        pdf_kwargs: dict[str, Any] = {
+            "actions": actions or None,
+            "wait_for_selector": task.wait_for_selector,
+        }
+        if max_output_bytes is not None:
+            pdf_kwargs["max_output_bytes"] = max_output_bytes
+        return await generate_pdf_from_url(task.url, **pdf_kwargs)
+    if task.kind == "screenshot":
+        ss_kwargs: dict[str, Any] = {
+            "actions": actions or None,
+            "wait_for_selector": task.wait_for_selector,
+        }
+        if max_output_bytes is not None:
+            ss_kwargs["max_output_bytes"] = max_output_bytes
+        return await generate_screenshot_from_url(
+            task.url,
+            {"type": task.screenshot_format, "full_page": task.full_page},
+            **ss_kwargs,
+        )
+    html_kwargs: dict[str, Any] = {"actions": actions or None}
+    if egress_policy is not None:
+        html_kwargs["egress_policy"] = egress_policy
+    if redirect_policy is not None:
+        html_kwargs["redirect_policy"] = redirect_policy
+    if max_output_bytes is not None:
+        html_kwargs["max_output_bytes"] = max_output_bytes
+    return await render_html_with_playwright(task.url, task.wait_for_selector, **html_kwargs)
+
+
+async def process_worker_browser_task(  # noqa: PLR0913
     task: BrowserTaskRequest,
     *,
     worker_queue: WorkQueue,
     pdf_semaphore: asyncio.Semaphore,
+    egress_policy: EgressPolicy | None = None,
+    redirect_policy: Any = None,
+    max_output_bytes: int | None = None,
 ) -> BrowserTaskResponse:
     """Execute one remote Playwright task and publish its serialized result to the `WorkQueue`."""
     tracer = get_tracer(__name__)
     parent_ctx = extract_trace_context(task.trace_headers)
-    actions = [BrowserAction.model_validate(item) for item in task.actions]
+    metrics = get_metrics_collector()
 
     with tracer.start_as_current_span("worker.browser_task", context=parent_ctx) as span:
         span.set_attribute("browser.task_id", task.task_id)
         span.set_attribute("browser.task_kind", task.kind)
         if task.is_expired():
-            logger.warning(
-                f"[WORKER] Browser task {task.task_id} expired before execution; skipping"
-            )
-            expired_resp = BrowserTaskResponse(
-                task_id=task.task_id,
-                success=False,
-                error="Browser task deadline expired before execution",
-                error_type="timeout_error",
-                status_code=408,
-            )
-            await worker_queue.publish_browser_result(expired_resp, ttl_seconds=30)
+            metrics.increment_counter("worker_browser_tasks_expired_total")
+            expired_resp = _expired_browser_response(task)
+            await worker_queue.publish_browser_result(expired_resp)
             return expired_resp
-        try:
-            async with pdf_semaphore:
-                if task.kind == "pdf":
-                    payload_bytes = await generate_pdf_from_url(
-                        task.url,
-                        actions=actions or None,
-                        wait_for_selector=task.wait_for_selector,
-                    )
-                elif task.kind == "screenshot":
-                    payload_bytes = await generate_screenshot_from_url(
-                        task.url,
-                        {"type": task.screenshot_format, "full_page": task.full_page},
-                        actions=actions or None,
-                        wait_for_selector=task.wait_for_selector,
-                    )
-                else:
-                    payload_bytes = await render_html_with_playwright(
-                        task.url,
-                        task.wait_for_selector,
-                        actions=actions or None,
-                    )
 
+        try:
+            actions = [BrowserAction.model_validate(item) for item in task.actions]
+            async with pdf_semaphore:
+                if task.is_expired():
+                    metrics.increment_counter("worker_browser_tasks_expired_total")
+                    expired_resp = _expired_browser_response(task)
+                    await worker_queue.publish_browser_result(expired_resp)
+                    return expired_resp
+                payload_bytes = await _execute_browser_task_payload(
+                    task,
+                    actions,
+                    egress_policy=egress_policy,
+                    redirect_policy=redirect_policy,
+                    max_output_bytes=max_output_bytes,
+                )
+
+            metrics.increment_counter("worker_browser_tasks_completed_total")
             response = BrowserTaskResponse(
                 task_id=task.task_id,
                 success=True,
                 content_base64=base64.b64encode(payload_bytes).decode("utf-8"),
                 status_code=200,
             )
-        except SelectorTimeoutError as exc:
-            response = BrowserTaskResponse(
-                task_id=task.task_id,
-                success=False,
-                error=str(exc),
-                error_type="selector_timeout_error",
-                status_code=408,
-            )
-        except BrowserActionError as exc:
-            response = BrowserTaskResponse(
-                task_id=task.task_id,
-                success=False,
-                error=str(exc),
-                error_type="browser_action_error",
-                status_code=400,
-            )
-        except ContentTooLargeError as exc:
-            response = BrowserTaskResponse(
-                task_id=task.task_id,
-                success=False,
-                error=str(exc),
-                error_type="content_too_large",
-                status_code=413,
-            )
-        except PDFGeneratorError as exc:
-            response = BrowserTaskResponse(
-                task_id=task.task_id,
-                success=False,
-                error=str(exc),
-                error_type="pdf_generation_error",
-                status_code=exc.status_code,
-            )
         except Exception as exc:  # noqa: BLE001
-            # Serialize any unexpected Playwright/RPC exception into the reply envelope so callers never hang.
-            logger.exception(f"[WORKER] Browser task {task.task_id} failed: {exc}")
-            response = BrowserTaskResponse(
-                task_id=task.task_id,
-                success=False,
-                error=str(exc),
-                error_type="render_error",
-                status_code=500,
-            )
+            # Serialize any domain or unexpected Playwright exception into the reply envelope.
+            metrics.increment_counter("worker_browser_tasks_failed_total")
+            response = _serialize_browser_task_error(task, exc)
 
         await worker_queue.publish_browser_result(response)
         return response
@@ -305,114 +387,14 @@ async def run_healthcheck() -> int:
         await jm.disconnect()
 
 
-async def _init_worker_runtime(settings: Settings, worker_id: str) -> _WorkerRuntime:
-    assert settings.redis.redis_uri is not None
-    egress_policy = EgressPolicy(settings)
-
-    job_manager = JobManager(
-        settings.redis.redis_uri,
-        max_connections=settings.redis.max_connections,
-    )
-    await job_manager.connect()
-    if job_manager.redis_client is None:
-        raise RuntimeError("JobManager connected without initializing redis_client")
-
-    worker_queue = WorkerQueue(job_manager.redis_client, worker_id=worker_id)
-    await worker_queue.requeue_processing_jobs()
-
-    robots_checker = RobotsChecker(
-        user_agent=settings.crawling.user_agent,
-        robots_cache_ttl=settings.crawling.robots_cache_ttl,
-        robots_cache_max_size=settings.crawling.robots_cache_max_size,
-        robots_fetch_timeout=settings.crawling.robots_fetch_timeout,
-        max_crawl_delay=settings.crawling.max_crawl_delay,
-        redis_client=job_manager.redis_client,
-        egress_policy=egress_policy,
-    )
-    domain_throttle = DomainThrottle(
-        max_crawl_delay=settings.crawling.max_crawl_delay,
-        max_size=settings.crawling.robots_cache_max_size,
-        redis_client=job_manager.redis_client,
-    )
-
-    async def _redirect_policy(_source_url: str, next_url: str) -> None:
-        if not settings.crawling.respect_robots_txt:
-            return
-        delay = await robots_checker.check_allowed(next_url, settings.crawling.user_agent)
-        await domain_throttle.wait_if_needed(canonical_host(next_url), delay)
-
-    http_client = HTTPClient(
-        timeout=settings.http.request_timeout,
-        max_redirects=settings.http.max_redirects,
-        user_agent=settings.crawling.user_agent,
-        max_download_size=settings.content.max_download_size,
-        max_connections=settings.http.max_connections,
-        max_keepalive_connections=settings.http.max_keepalive_connections,
-        keepalive_expiry=settings.http.keepalive_expiry,
-        http2=settings.http.http2_enabled,
-        egress_policy=egress_policy,
-        redirect_policy=_redirect_policy,
-    )
-
-    pdf_generator = PlaywrightPDFGenerator(
-        pool_size=settings.pdf.pool_size,
-        page_load_timeout=settings.pdf.page_load_timeout,
-        wait_until=settings.pdf.wait_until,
-        memory_limit_mb=settings.pdf.browser_memory_limit_mb,
-        max_uses_per_browser=settings.pdf.max_uses_per_browser,
-        idle_timeout=settings.pdf.idle_timeout,
-        user_agent=None,
-        egress_policy=egress_policy,
-    )
-    set_shared_pdf_generator(pdf_generator)
-
-    pdf_semaphore = asyncio.Semaphore(settings.pdf.concurrency)
-    batch_semaphore = asyncio.Semaphore(settings.batch.concurrency)
-    job_slot_semaphore = asyncio.Semaphore(settings.worker.max_concurrent_jobs)
-
-    scheduler = SchedulerService(redis_uri=settings.redis.redis_uri, settings=settings.scheduler)
-    await scheduler.start(paused=False)
-    execution_storage = ExecutionStorage(job_manager.redis_client)
-    executor = ScheduledJobExecutor(
-        http_client=http_client,
-        storage=execution_storage,
-        pdf_generator=pdf_generator,
-        pdf_semaphore=pdf_semaphore,
-        robots_checker=robots_checker,
-        domain_throttle=domain_throttle,
-        max_workers=settings.scheduler.max_workers,
-        renderer=LocalBrowserRenderer(
-            pdf_semaphore,
-            egress_policy=egress_policy,
-            max_output_bytes=settings.content.max_download_size,
-        ),
-        settings=settings,
-    )
-    set_schedules_executor(executor)
-
-    return _WorkerRuntime(
-        worker_id=worker_id,
-        settings=settings,
-        http_client=http_client,
-        pdf_generator=pdf_generator,
-        pdf_semaphore=pdf_semaphore,
-        batch_semaphore=batch_semaphore,
-        job_slot_semaphore=job_slot_semaphore,
-        job_manager=job_manager,
-        worker_queue=worker_queue,
-        robots_checker=robots_checker,
-        domain_throttle=domain_throttle,
-        scheduler=scheduler,
-    )
-
-
 async def _run_heartbeat_loop(
     rt: _WorkerRuntime,
-    stop_event: asyncio.Event,
+    heartbeat_stop: asyncio.Event,
     active_tasks: set[asyncio.Task[Any]],
     log: logging.Logger,
 ) -> None:
-    while not stop_event.is_set():
+    metrics = get_metrics_collector()
+    while not heartbeat_stop.is_set():
         try:
             await rt.worker_queue.publish_heartbeat(
                 rt.worker_id,
@@ -424,12 +406,47 @@ async def _run_heartbeat_loop(
                 },
                 ttl=rt.settings.worker.heartbeat_ttl,
             )
+            metrics.set_gauge("worker_active_tasks", float(len(active_tasks)))
+            metrics.set_gauge("worker_last_heartbeat_timestamp", time.time())
+            available = getattr(rt.pdf_generator, "available_browsers", None)
+            if isinstance(available, int) and not isinstance(available, bool):
+                metrics.set_gauge("pdf_pool_available", float(max(0, available)))
         except (redis_exc.RedisError, OSError, RuntimeError) as exc:
             log.warning(f"Worker heartbeat publish failed: {exc}")
         try:
-            await asyncio.wait_for(stop_event.wait(), timeout=rt.settings.worker.heartbeat_interval)
+            await asyncio.wait_for(
+                heartbeat_stop.wait(), timeout=rt.settings.worker.heartbeat_interval
+            )
         except TimeoutError:
             continue
+
+
+async def _run_reclaim_loop(
+    rt: _WorkerRuntime,
+    stop_event: asyncio.Event,
+    log: logging.Logger,
+) -> None:
+    """Periodically reclaim orphaned batch jobs from dead workers."""
+    interval = max(1.0, float(rt.settings.worker.heartbeat_interval))
+    while not stop_event.is_set():
+        try:
+            await asyncio.wait_for(stop_event.wait(), timeout=interval)
+            break
+        except TimeoutError:
+            pass
+        try:
+            moved = await rt.worker_queue.requeue_processing_jobs(
+                max_attempts=rt.settings.worker.max_attempts,
+                on_dead_letter=lambda env: _fail_dead_letter_batch_job(
+                    env, job_manager=rt.job_manager, settings=rt.settings
+                ),
+            )
+            if moved:
+                get_metrics_collector().increment_counter(
+                    "worker_batch_jobs_reclaimed_total", moved
+                )
+        except (redis_exc.RedisError, OSError, RuntimeError, TypeError) as exc:
+            log.warning(f"Periodic orphaned-job reclaim failed: {exc}")
 
 
 async def _run_batch_consumer_loop(
@@ -468,6 +485,8 @@ async def _run_batch_consumer_loop(
                     pdf_semaphore=rt.pdf_semaphore,
                     robots_checker=rt.robots_checker,
                     domain_throttle=rt.domain_throttle,
+                    renderer=rt.renderer,
+                    settings=rt.settings,
                 )
             finally:
                 rt.job_slot_semaphore.release()
@@ -481,118 +500,142 @@ async def _run_browser_consumer_loop(
     track_fn: Any,
     log: logging.Logger,
 ) -> None:
+    egress_policy = EgressPolicy(rt.settings)
+    redirect_policy = getattr(rt.renderer, "redirect_policy", None)
+    max_output_bytes = rt.settings.content.max_download_size
+
     while not stop_event.is_set():
+        await rt.browser_slot_semaphore.acquire()
+        if stop_event.is_set():
+            rt.browser_slot_semaphore.release()
+            break
         try:
             task = await rt.worker_queue.pop_browser_task(timeout=rt.settings.worker.poll_timeout)
         except (redis_exc.RedisError, ValidationError, ValueError, OSError, RuntimeError) as exc:
+            rt.browser_slot_semaphore.release()
             log.warning(f"Error polling browser queue: {exc}")
             await asyncio.sleep(1.0)
             continue
         if task is None:
+            rt.browser_slot_semaphore.release()
             continue
 
         captured_task: BrowserTaskRequest = task
 
         async def _run_browser(req: BrowserTaskRequest = captured_task) -> None:
-            await process_worker_browser_task(
-                req,
-                worker_queue=rt.worker_queue,
-                pdf_semaphore=rt.pdf_semaphore,
-            )
+            try:
+                await process_worker_browser_task(
+                    req,
+                    worker_queue=rt.worker_queue,
+                    pdf_semaphore=rt.pdf_semaphore,
+                    egress_policy=egress_policy,
+                    redirect_policy=redirect_policy,
+                    max_output_bytes=max_output_bytes,
+                )
+            finally:
+                rt.browser_slot_semaphore.release()
 
         track_fn(asyncio.create_task(_run_browser()))
 
 
-async def _shutdown_worker_runtime(
-    rt: _WorkerRuntime,
-    active_tasks: set[asyncio.Task[Any]],
+def _register_worker_signal_handlers(
+    loop: asyncio.AbstractEventLoop,
+    worker_id: str,
+    stop_event: asyncio.Event,
     log: logging.Logger,
 ) -> None:
-    if active_tasks:
-        log.info(
-            f"Draining {len(active_tasks)} in-flight worker task(s) "
-            f"(timeout={rt.settings.shutdown.drain_timeout:.1f}s)"
-        )
-        done, pending = await asyncio.wait(
-            list(active_tasks), timeout=rt.settings.shutdown.drain_timeout
-        )
-        for pending_task in pending:
-            pending_task.cancel()
-        if pending:
-            await asyncio.gather(*pending, return_exceptions=True)
-        log.info(f"Worker drain finished: {len(done)} completed, {len(pending)} cancelled")
-
-    try:
-        await rt.worker_queue.remove_heartbeat(rt.worker_id)
-    except (redis_exc.RedisError, OSError, RuntimeError) as exc:
-        log.debug(f"Could not remove worker heartbeat during shutdown: {exc}")
-
-    await rt.scheduler.shutdown(wait=True)
-    await rt.robots_checker.close()
-    await rt.http_client.close()
-    await rt.pdf_generator.close()
-    await cleanup_pdf_generator()
-    await rt.worker_queue.close()
-    await rt.job_manager.disconnect()
-    shutdown_ocr_executor()
-    shutdown_telemetry()
-    log.info(f"Downloader worker {rt.worker_id} shut down cleanly")
-
-
-async def run_worker() -> None:
-    """Run the split worker service until SIGTERM/SIGINT and drain cleanly."""
-    settings = get_settings()
-    setup_logging(settings.logging)
-    log = get_logger(__name__)
-
-    if not settings.redis.redis_uri:
-        log.error("REDIS_URI is required to start the split worker process")
-        raise SystemExit(1)
-
-    configure_telemetry(settings.telemetry, service_version=__version__)
-    worker_id = os.getenv("WORKER_ID") or f"{socket.gethostname()}-{uuid.uuid4().hex[:8]}"
-    id_file = _get_worker_id_file()
-    id_file.write_text(worker_id, encoding="utf-8")
-    log.info(f"Starting downloader worker {worker_id} (v{__version__})")
-
-    rt = await _init_worker_runtime(settings, worker_id)
-    stop_event = asyncio.Event()
-    active_tasks: set[asyncio.Task[Any]] = set()
-    loop = asyncio.get_running_loop()
-
     def _signal_handler(sig: signal.Signals) -> None:
         log.info(f"Worker {worker_id} received {sig.name}; entering graceful drain")
         stop_event.set()
 
     for sig in (signal.SIGTERM, signal.SIGINT):
-        try:
+        with contextlib.suppress(NotImplementedError):
             loop.add_signal_handler(sig, _signal_handler, sig)
-        except NotImplementedError:
-            pass
+
+
+def _cleanup_worker_lifecycle(
+    loop: asyncio.AbstractEventLoop, id_file: Path, worker_id: str
+) -> None:
+    for sig in (signal.SIGTERM, signal.SIGINT):
+        with contextlib.suppress(NotImplementedError):
+            loop.remove_signal_handler(sig)
+    with contextlib.suppress(OSError):
+        if id_file.is_file() and id_file.read_text(encoding="utf-8").strip() == worker_id:
+            id_file.unlink()
+
+
+async def run_worker(
+    *,
+    settings: Settings | None = None,
+    runtime: _WorkerRuntime | None = None,
+    stop_event: asyncio.Event | None = None,
+) -> None:
+    """Run the split worker service until SIGTERM/SIGINT and drain cleanly."""
+    active_settings = settings or get_settings()
+    setup_logging(active_settings.logging)
+    log = logging.getLogger(__name__)
+
+    if runtime is None and not active_settings.redis.redis_uri:
+        log.error("REDIS_URI is required to start the split worker process")
+        raise SystemExit(1)
+
+    configure_telemetry(active_settings.telemetry, service_version=__version__)
+    worker_id = (
+        runtime.worker_id
+        if runtime is not None
+        else (os.getenv("WORKER_ID") or f"{socket.gethostname()}-{uuid.uuid4().hex[:8]}")
+    )
+    id_file = _get_worker_id_file()
+    id_file.write_text(worker_id, encoding="utf-8")
+    log.info(f"Starting downloader worker {worker_id} (v{__version__})")
+
+    async def _dead_letter_cb(env: BatchQueueEnvelope, jm: JobStore, cfg: Settings) -> None:
+        await _fail_dead_letter_batch_job(env, job_manager=jm, settings=cfg)
+
+    rt = (
+        runtime
+        if runtime is not None
+        else await _init_worker_runtime(
+            active_settings,
+            worker_id,
+            on_dead_letter=_dead_letter_cb,
+            register_executor=set_schedules_executor,
+        )
+    )
+    active_stop = stop_event or asyncio.Event()
+    heartbeat_stop = asyncio.Event()
+    active_tasks: set[asyncio.Task[Any]] = set()
+    loop = asyncio.get_running_loop()
+    _register_worker_signal_handlers(loop, worker_id, active_stop, log)
 
     def _track(task: asyncio.Task[Any]) -> None:
         active_tasks.add(task)
         task.add_done_callback(active_tasks.discard)
 
-    loops = [
-        asyncio.create_task(_run_heartbeat_loop(rt, stop_event, active_tasks, log)),
-        asyncio.create_task(_run_batch_consumer_loop(rt, stop_event, _track, log)),
+    heartbeat_task = asyncio.create_task(_run_heartbeat_loop(rt, heartbeat_stop, active_tasks, log))
+    consumer_loops = [
+        asyncio.create_task(_run_batch_consumer_loop(rt, active_stop, _track, log)),
+        asyncio.create_task(_run_reclaim_loop(rt, active_stop, log)),
     ]
-    if settings.worker.remote_browser_enabled:
-        loops.append(asyncio.create_task(_run_browser_consumer_loop(rt, stop_event, _track, log)))
+    if active_settings.worker.remote_browser_enabled:
+        consumer_loops.append(
+            asyncio.create_task(_run_browser_consumer_loop(rt, active_stop, _track, log))
+        )
 
     try:
-        await stop_event.wait()
-        for loop_task in loops:
+        await active_stop.wait()
+        for loop_task in consumer_loops:
             loop_task.cancel()
-        await asyncio.gather(*loops, return_exceptions=True)
-        await _shutdown_worker_runtime(rt, active_tasks, log)
+        await asyncio.gather(*consumer_loops, return_exceptions=True)
+        await _shutdown_worker_runtime(
+            rt,
+            active_tasks,
+            log,
+            heartbeat_stop=heartbeat_stop,
+            heartbeat_task=heartbeat_task,
+        )
     finally:
-        try:
-            if id_file.is_file() and id_file.read_text(encoding="utf-8").strip() == worker_id:
-                id_file.unlink()
-        except OSError:
-            pass
+        _cleanup_worker_lifecycle(loop, id_file, worker_id)
 
 
 def main() -> None:

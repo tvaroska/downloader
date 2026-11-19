@@ -31,7 +31,13 @@ class TestGlobalPDFFunctions:
             result = await generate_pdf_from_url("https://example.com")
 
             assert result == b"PDF content"
-            mock_generator.generate_pdf.assert_called_once_with("https://example.com", None)
+            mock_generator.generate_pdf.assert_called_once_with(
+                "https://example.com",
+                None,
+                actions=None,
+                wait_for_selector=None,
+                max_output_bytes=None,
+            )
 
     @pytest.mark.asyncio
     async def test_get_pdf_generator_creates_new(self):

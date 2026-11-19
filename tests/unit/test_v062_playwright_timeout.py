@@ -2,21 +2,25 @@
 
 from __future__ import annotations
 
+from typing import Literal
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 from playwright.async_api import TimeoutError as PlaywrightTimeoutError
 
-from downloader.config import ContentConfig, Settings
-from downloader.content_converter import (
+from downloader.browser.renderer import (
     convert_content_with_playwright_fallback,
     render_html_with_playwright,
 )
+from downloader.config import ContentConfig, Settings
+from downloader.ports import RenderTimeoutError
 
 
 def _make_mock_playwright():
     mock_page = AsyncMock()
-    mock_page.goto = AsyncMock(return_value=AsyncMock(status=200))
+    mock_page.url = "https://example.com"
+    nav_resp = MagicMock(status=200, request=None, url="https://example.com")
+    mock_page.goto = AsyncMock(return_value=nav_resp)
     mock_page.wait_for_load_state = AsyncMock()
     mock_page.wait_for_selector = AsyncMock()
     mock_page.query_selector_all = AsyncMock(return_value=[])
@@ -27,6 +31,7 @@ def _make_mock_playwright():
     mock_context = AsyncMock()
     mock_context.new_page = AsyncMock(return_value=mock_page)
     mock_context.route = AsyncMock()
+    mock_context.on = MagicMock()
     mock_context.close = AsyncMock()
 
     mock_pool = MagicMock()
@@ -38,6 +43,8 @@ def _make_mock_playwright():
     mock_generator.ensure_started = AsyncMock(return_value=mock_pool)
     mock_generator.pool = mock_pool
     mock_generator.user_agent = None
+    mock_generator.egress_policy = None
+    mock_generator.redirect_policy = None
 
     return mock_generator, mock_pool, mock_context, mock_page
 
@@ -54,7 +61,7 @@ class TestPlaywrightNavigationResilience:
         mock_page.wait_for_load_state.side_effect = exc_cls("tracker still open")
 
         with patch(
-            "downloader.content_converter.get_shared_pdf_generator",
+            "downloader.pdf_generator.get_shared_pdf_generator",
             return_value=mock_gen,
         ):
             html = await render_html_with_playwright("https://example.com/ad-heavy")
@@ -71,18 +78,18 @@ class TestPlaywrightNavigationResilience:
 
     @pytest.mark.parametrize("output_format", ["text", "markdown"])
     async def test_fallback_single_pass_survives_networkidle_settle_timeout(
-        self, output_format: str
+        self, output_format: Literal["text", "markdown"]
     ) -> None:
         mock_gen, mock_pool, mock_context, mock_page = _make_mock_playwright()
         mock_page.wait_for_load_state.side_effect = PlaywrightTimeoutError("analytics open")
 
         with patch(
-            "downloader.content_converter.get_shared_pdf_generator",
+            "downloader.pdf_generator.get_shared_pdf_generator",
             return_value=mock_gen,
         ):
             extracted = await convert_content_with_playwright_fallback(
                 "https://example.com/tracker",
-                output_format=output_format,  # type: ignore[arg-type]
+                output_format=output_format,
             )
 
         assert "Article body text." in extracted
@@ -100,9 +107,9 @@ class TestPlaywrightNavigationResilience:
         tight_settings = Settings(content=ContentConfig(html_js_rendering_timeout=1500))
 
         with (
-            patch("downloader.content_converter.get_settings", return_value=tight_settings),
+            patch("downloader.browser.renderer.get_settings", return_value=tight_settings),
             patch(
-                "downloader.content_converter.get_shared_pdf_generator",
+                "downloader.pdf_generator.get_shared_pdf_generator",
                 return_value=mock_gen,
             ),
         ):
@@ -121,10 +128,10 @@ class TestPlaywrightNavigationResilience:
 
         with (
             patch(
-                "downloader.content_converter.get_shared_pdf_generator",
+                "downloader.pdf_generator.get_shared_pdf_generator",
                 return_value=mock_gen,
             ),
-            pytest.raises(PlaywrightTimeoutError),
+            pytest.raises(RenderTimeoutError),
         ):
             await render_html_with_playwright("https://example.com/hung")
 
@@ -133,7 +140,9 @@ class TestPlaywrightNavigationResilience:
         mock_context.close.assert_awaited_once()
         mock_pool.release_browser.assert_awaited_once()
 
-    async def test_pdf_honours_wait_until_without_networkidle_gate(self) -> None:
+    async def test_pdf_honours_wait_until_without_networkidle_gate(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
         """R52: PDF generation with wait_until=domcontentloaded does not fail on networkidle settle."""
         from downloader.pdf_generator import PlaywrightPDFGenerator
 
@@ -143,7 +152,7 @@ class TestPlaywrightNavigationResilience:
 
         gen = PlaywrightPDFGenerator(pool_size=1, wait_until="domcontentloaded", idle_timeout=0.0)
         gen.pool = mock_pool
-        gen.ensure_started = AsyncMock(return_value=mock_pool)  # type: ignore[method-assign]
+        monkeypatch.setattr(gen, "ensure_started", AsyncMock(return_value=mock_pool))
 
         pdf_bytes = await gen.generate_pdf("https://example.com/ad-heavy")
 

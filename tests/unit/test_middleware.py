@@ -37,17 +37,6 @@ class TestMetricsMiddlewareNormalizePath:
         assert middleware._normalize_path("/jobs/123") == "/jobs/{job_id}"
         assert middleware._normalize_path("/jobs/abc-def-456") == "/jobs/{job_id}"
 
-    def test_normalize_path_status(self):
-        """Test /status/* normalizes to /status/{job_id}."""
-        middleware = MetricsMiddleware(app=MagicMock())
-        assert middleware._normalize_path("/status/123") == "/status/{job_id}"
-        assert middleware._normalize_path("/status/uuid-here") == "/status/{job_id}"
-
-    def test_normalize_path_results(self):
-        """Test /results/* normalizes to /results/{job_id}."""
-        middleware = MetricsMiddleware(app=MagicMock())
-        assert middleware._normalize_path("/results/123") == "/results/{job_id}"
-
     def test_normalize_path_root(self):
         """Test / normalizes to /."""
         middleware = MetricsMiddleware(app=MagicMock())

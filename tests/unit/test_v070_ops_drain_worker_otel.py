@@ -154,18 +154,26 @@ class TestGracefulShutdownAndDrain:
             app.dependency_overrides.pop(get_http_client, None)
             app.dependency_overrides.pop(get_robots_checker, None)
 
-    async def test_lifespan_shutdown_drains_before_closing_clients(self) -> None:
+    async def test_lifespan_shutdown_drains_before_closing_clients(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
         from downloader.main import _teardown_services
 
         events: list[str] = []
         coord = DrainCoordinator()
+        orig_start = coord.start_drain
         orig_wait = coord.wait_until_drained
+
+        def _tracked_start() -> None:
+            events.append("start_drain")
+            orig_start()
 
         async def _tracked_wait(timeout: float) -> bool:
             events.append("wait_until_drained")
             return await orig_wait(timeout)
 
-        coord.wait_until_drained = _tracked_wait  # type: ignore[method-assign]
+        monkeypatch.setattr(coord, "start_drain", _tracked_start)
+        monkeypatch.setattr(coord, "wait_until_drained", _tracked_wait)
 
         fake_http = AsyncMock()
         fake_http.close = AsyncMock(side_effect=lambda: events.append("http_client.close"))
@@ -176,20 +184,26 @@ class TestGracefulShutdownAndDrain:
             side_effect=lambda _t: events.append("wait_for_active_jobs")
         )
         fake_jm.disconnect = AsyncMock(side_effect=lambda: events.append("job_manager.disconnect"))
+        fake_wq = AsyncMock()
+        fake_wq.close = AsyncMock(side_effect=lambda: events.append("worker_queue.close"))
         fake_metrics = AsyncMock()
         fake_metrics.stop = AsyncMock(side_effect=lambda: events.append("metrics.stop"))
 
         fake_app = MagicMock()
         fake_app.state.job_manager = fake_jm
+        fake_app.state.worker_queue = fake_wq
         fake_app.state.scheduler = None
         fake_app.state.robots_checker = fake_robots
         fake_app.state.pdf_generator = None
 
         await _teardown_services(fake_app, Settings(), coord, fake_metrics, fake_http)
-        assert events[0] == "wait_until_drained"
-        assert events.index("wait_until_drained") < events.index("http_client.close")
+        assert coord.is_draining is False
+        assert events[:2] == ["start_drain", "wait_until_drained"]
+        assert events.index("wait_until_drained") < events.index("wait_for_active_jobs")
+        assert events.index("wait_for_active_jobs") < events.index("http_client.close")
+        assert events.index("job_manager.disconnect") < events.index("http_client.close")
         assert events.index("wait_until_drained") < events.index("robots_checker.close")
-        assert events.index("wait_until_drained") < events.index("job_manager.disconnect")
+        assert "worker_queue.close" in events
 
     def test_sigterm_handler_triggers_drain_and_chains_previous(self) -> None:
         coord = DrainCoordinator()
@@ -213,7 +227,48 @@ class TestGracefulShutdownAndDrain:
         finally:
             signal.signal(signal.SIGTERM, orig_handler)
 
+    async def test_health_503_is_observable_for_a_probe_period_after_sigterm(self) -> None:
+        """SIGTERM holds `/health` at 503 for `pre_stop_delay` before chaining server stop (`R100`)."""
+        coord = DrainCoordinator()
+        chained_at: list[float] = []
+        orig_handler = signal.getsignal(signal.SIGTERM)
+
+        def _prev(_signum: int, _frame: object) -> None:
+            chained_at.append(time.monotonic())
+
+        signal.signal(signal.SIGTERM, _prev)
+        prev_coord = getattr(app.state, "drain_coordinator", None)
+        app.state.drain_coordinator = coord
+        try:
+            restore = install_sigterm_drain_handler(coord, pre_stop_delay=0.15)
+            try:
+                sent_at = time.monotonic()
+                os.kill(os.getpid(), signal.SIGTERM)
+                # Immediately enters drain mode while server shutdown has NOT been chained yet.
+                assert coord.is_draining is True
+                assert chained_at == []
+
+                transport = httpx.ASGITransport(app=app)
+                async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
+                    probe = await client.get("/health")
+                    assert probe.status_code == 503
+                    assert probe.json()["status"] == "draining"
+                    assert chained_at == []
+
+                await asyncio.sleep(0.2)
+                assert len(chained_at) == 1
+                assert (chained_at[0] - sent_at) >= 0.12
+            finally:
+                restore()
+        finally:
+            app.state.drain_coordinator = prev_coord
+            signal.signal(signal.SIGTERM, orig_handler)
+
+    @pytest.mark.xdist_group("uvicorn_drain")
     def test_uvicorn_subprocess_enters_drain_on_sigterm(self) -> None:
+        from pathlib import Path
+
+        repo_root = Path(__file__).resolve().parents[2]
         with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
             sock.bind(("127.0.0.1", 0))
             port = sock.getsockname()[1]
@@ -223,12 +278,16 @@ class TestGracefulShutdownAndDrain:
             "ENVIRONMENT": "development",
             "REDIS_URI": "",
             "OTEL_ENABLED": "false",
+            "SHUTDOWN_PRE_STOP_DELAY": "0.1",
+            "PYTHONUNBUFFERED": "1",
         }
         proc = subprocess.Popen(
             [
                 sys.executable,
                 "-m",
                 "uvicorn",
+                "--app-dir",
+                str(repo_root / "src"),
                 "downloader.main:app",
                 "--host",
                 "127.0.0.1",
@@ -242,29 +301,36 @@ class TestGracefulShutdownAndDrain:
             stderr=subprocess.STDOUT,
             text=True,
         )
+        captured_lines: list[str] = []
         try:
-            deadline = time.monotonic() + 10.0
-            healthy = False
-            with httpx.Client(trust_env=False, timeout=0.5) as client:
-                while time.monotonic() < deadline:
-                    if proc.poll() is not None:
+            assert proc.stdout is not None
+            ready = False
+            deadline = time.monotonic() + 20.0
+            import select
+
+            while time.monotonic() < deadline:
+                if proc.poll() is not None:
+                    break
+                rlist, _, _ = select.select([proc.stdout], [], [], 0.1)
+                if rlist:
+                    line = proc.stdout.readline()
+                    if not line:
                         break
-                    try:
-                        resp = client.get(f"http://127.0.0.1:{port}/health")
-                        if resp.status_code == 200:
-                            healthy = True
-                            break
-                    except httpx.HTTPError:
-                        time.sleep(0.1)
-            if not healthy:
+                    captured_lines.append(line)
+                    if "Uvicorn running on" in line or "Application startup complete" in line:
+                        ready = True
+                        break
+            if not ready:
                 proc.terminate()
-                out, _ = proc.communicate(timeout=5.0)
+                tail, _ = proc.communicate(timeout=5.0)
                 pytest.fail(
-                    f"Uvicorn subprocess did not become healthy (rc={proc.returncode}):\n{out}"
+                    f"Uvicorn subprocess did not report ready (rc={proc.returncode}):\n"
+                    f"{''.join(captured_lines)}{tail}"
                 )
 
             proc.send_signal(signal.SIGTERM)
-            output, _ = proc.communicate(timeout=10.0)
+            tail, _ = proc.communicate(timeout=15.0)
+            output = "".join(captured_lines) + tail
             assert proc.returncode in (0, -signal.SIGTERM), output
             assert "Entering connection drain mode" in output
             assert "All services shut down successfully" in output
@@ -277,7 +343,7 @@ class TestGracefulShutdownAndDrain:
 class TestSplitWorkerArchitecture:
     async def test_worker_queue_batch_browser_and_heartbeat_operations(self) -> None:
         redis_stub = FakeRedis()
-        queue = WorkerQueue(redis_stub)  # type: ignore[arg-type]
+        queue = WorkerQueue(redis_stub)
 
         await queue.enqueue_batch_job("job-42", trace_headers={"traceparent": "00-abc-def-01"})
         depths = await queue.get_queue_depths()
@@ -294,16 +360,15 @@ class TestSplitWorkerArchitecture:
         assert requeued == 1
         env2 = await queue.pop_batch_job(timeout=1.0)
         assert env2 is not None
+        assert env2.attempt == 2
         await queue.ack_batch_job(env2.raw_payload)
         assert (await queue.get_queue_depths())["batch_processing"] == 0
 
-        # Heartbeat publish -> list -> remove
+        # Heartbeat publish -> has_heartbeat -> remove
         await queue.publish_heartbeat("worker-1", {"active_tasks": 2}, ttl=30)
-        workers = await queue.list_active_workers()
-        assert len(workers) == 1
-        assert workers[0]["worker_id"] == "worker-1"
+        assert await queue.has_heartbeat("worker-1") is True
         await queue.remove_heartbeat("worker-1")
-        assert await queue.list_active_workers() == []
+        assert await queue.has_heartbeat("worker-1") is False
 
         # Remote browser task RPC round-trip
         req = BrowserTaskRequest(kind="screenshot", url="https://example.com", full_page=True)
@@ -332,6 +397,7 @@ class TestSplitWorkerArchitecture:
                 split_settings = Settings()
                 split_settings.worker.deployment_mode = "api"
                 app.state.settings = split_settings
+                app.state.worker_queue = WorkerQueue(redis_stub)
 
                 resp = client.post(
                     "/batch",
@@ -346,7 +412,7 @@ class TestSplitWorkerArchitecture:
 
     async def test_worker_processes_batch_envelope_and_browser_task(self) -> None:
         redis_stub = FakeRedis()
-        queue = WorkerQueue(redis_stub)  # type: ignore[arg-type]
+        queue = WorkerQueue(redis_stub)
         await queue.enqueue_batch_job("job-w1")
         env = await queue.pop_batch_job(timeout=1.0)
         assert env is not None
@@ -361,8 +427,8 @@ class TestSplitWorkerArchitecture:
                 request_data={"urls": [{"url": "https://example.com"}], "default_format": "text"},
             )
         )
-        mock_jm.update_job_status = AsyncMock()
-        mock_jm.store_job_results = AsyncMock()
+        mock_jm.update_job_status = AsyncMock(return_value=True)
+        mock_jm.complete_job = AsyncMock(return_value=True)
 
         with (
             patch(
@@ -379,7 +445,7 @@ class TestSplitWorkerArchitecture:
                 batch_semaphore=asyncio.Semaphore(4),
                 pdf_semaphore=asyncio.Semaphore(2),
             )
-        mock_jm.store_job_results.assert_awaited_once()
+        mock_jm.complete_job.assert_awaited_once()
         mock_hook.assert_awaited_once()
         assert (await queue.get_queue_depths())["batch_processing"] == 0
 
@@ -416,14 +482,14 @@ class TestSplitWorkerArchitecture:
     async def test_second_worker_start_does_not_take_inflight_job(self) -> None:
         """A starting worker must not reclaim processing lists of live workers (R12)."""
         redis_stub = FakeRedis()
-        q1 = WorkerQueue(redis_stub, worker_id="worker-1")  # type: ignore[arg-type]
+        q1 = WorkerQueue(redis_stub, worker_id="worker-1")
         await q1.publish_heartbeat("worker-1", {"active_tasks": 1}, ttl=30)
         await q1.enqueue_batch_job("job-inflight")
         env1 = await q1.pop_batch_job(timeout=1.0)
         assert env1 is not None
 
         # Starting worker-2 sees worker-1's live heartbeat and leaves job-inflight untouched
-        q2 = WorkerQueue(redis_stub, worker_id="worker-2")  # type: ignore[arg-type]
+        q2 = WorkerQueue(redis_stub, worker_id="worker-2")
         assert await q2.requeue_processing_jobs() == 0
         assert await q2.pop_batch_job(timeout=0.05) is None
         assert (await q2.get_queue_depths())["batch_processing"] == 1
@@ -438,7 +504,7 @@ class TestSplitWorkerArchitecture:
     async def test_shutdown_cancel_requeues_instead_of_acking(self) -> None:
         """Worker shutdown cancellation requeues the job with attempt+1 instead of acking (R12)."""
         redis_stub = FakeRedis()
-        queue = WorkerQueue(redis_stub, worker_id="worker-1")  # type: ignore[arg-type]
+        queue = WorkerQueue(redis_stub, worker_id="worker-1")
         await queue.enqueue_batch_job("job-shutdown")
         env = await queue.pop_batch_job(timeout=1.0)
         assert env is not None
@@ -454,8 +520,8 @@ class TestSplitWorkerArchitecture:
                 request_data={"urls": [{"url": "https://example.com"}], "default_format": "text"},
             )
         )
-        mock_jm.update_job_status = AsyncMock()
-        mock_jm.store_job_results = AsyncMock()
+        mock_jm.update_job_status = AsyncMock(return_value=True)
+        mock_jm.complete_job = AsyncMock(return_value=True)
 
         started = asyncio.Event()
         gate = asyncio.Event()
@@ -488,14 +554,18 @@ class TestSplitWorkerArchitecture:
         assert requeued is not None
         assert requeued.job_id == "job-shutdown"
         assert requeued.attempt == 2
+        # Requeueing an entry already removed/reclaimed must return False and not duplicate (`R113`).
+        assert await queue.requeue_batch_job(env) is False
         # Must NOT have marked the job CANCELLED on worker shutdown
         for call in mock_jm.update_job_status.call_args_list:
             assert call.args[1] != JobStatus.CANCELLED
 
     async def test_worker_failure_marks_failed_fires_failed_webhook_and_acks(self) -> None:
-        """Batch processor failure marks job FAILED, fires failed webhook, and acks (R22)."""
+        """Batch processor failure marks job FAILED, fires failed webhook even if status write errors (`R22`, `R113`)."""
+        import redis.exceptions as redis_exc
+
         redis_stub = FakeRedis()
-        queue = WorkerQueue(redis_stub, worker_id="worker-1")  # type: ignore[arg-type]
+        queue = WorkerQueue(redis_stub, worker_id="worker-1")
         await queue.enqueue_batch_job("job-fail")
         env = await queue.pop_batch_job(timeout=1.0)
         assert env is not None
@@ -514,8 +584,10 @@ class TestSplitWorkerArchitecture:
                 },
             )
         )
-        mock_jm.update_job_status = AsyncMock()
-        mock_jm.store_job_results = AsyncMock()
+        mock_jm.update_job_status = AsyncMock(
+            side_effect=[True, redis_exc.ConnectionError("transient redis write error")]
+        )
+        mock_jm.complete_job = AsyncMock(return_value=True)
 
         with (
             patch(
@@ -541,7 +613,7 @@ class TestSplitWorkerArchitecture:
     async def test_worker_skips_missing_and_cancelled_jobs(self) -> None:
         """Worker skips missing or already-terminal jobs and acks their envelopes (R22)."""
         redis_stub = FakeRedis()
-        queue = WorkerQueue(redis_stub, worker_id="worker-1")  # type: ignore[arg-type]
+        queue = WorkerQueue(redis_stub, worker_id="worker-1")
         await queue.enqueue_batch_job("job-missing")
         await queue.enqueue_batch_job("job-cancelled")
 
@@ -588,7 +660,7 @@ class TestSplitWorkerArchitecture:
     async def test_batch_queue_is_fifo(self) -> None:
         """Batch queue dequeues jobs in FIFO order (R22)."""
         redis_stub = FakeRedis()
-        queue = WorkerQueue(redis_stub)  # type: ignore[arg-type]
+        queue = WorkerQueue(redis_stub)
         await queue.enqueue_batch_job("job-1")
         await queue.enqueue_batch_job("job-2")
         await queue.enqueue_batch_job("job-3")
@@ -604,8 +676,218 @@ class TestSplitWorkerArchitecture:
             "job-3",
         ]
 
-    async def test_remote_browser_calls_are_bounded_and_expired_tasks_skipped(self) -> None:
-        """Remote browser calls reject overflow with BrowserCapacityError and skip expired tasks (R38)."""
+    async def test_draining_worker_keeps_heartbeat_until_jobs_finish(
+        self, tmp_path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Draining worker keeps publishing heartbeats until active jobs finish (`R83`, `R113`)."""
+        from pydantic import ValidationError
+
+        from downloader.config import ShutdownConfig, WorkerConfig
+        from downloader.worker import _WorkerRuntime, run_worker
+        from tests.fixtures.in_memory_ports import InMemoryJobStore, InMemoryWorkQueue
+
+        # Config validation rejects heartbeat_ttl < drain_timeout + heartbeat_interval and allows 600s
+        with pytest.raises(ValidationError, match="heartbeat_ttl"):
+            Settings(
+                shutdown=ShutdownConfig(drain_timeout=30.0),
+                worker=WorkerConfig(heartbeat_interval=10.0, heartbeat_ttl=30),
+            )
+        wide_cfg = Settings(
+            shutdown=ShutdownConfig(drain_timeout=300.0),
+            worker=WorkerConfig(heartbeat_interval=10.0, heartbeat_ttl=320),
+        )
+        assert wide_cfg.worker.heartbeat_ttl == 320
+
+        monkeypatch.setenv("WORKER_ID_FILE", str(tmp_path / "drain-worker.id"))
+        store = InMemoryJobStore()
+        queue = InMemoryWorkQueue()
+        job_id = await store.create_job(
+            {"urls": [{"url": "https://example.com"}], "default_format": "text"}
+        )
+        await queue.enqueue_batch_job(job_id)
+
+        job_started = asyncio.Event()
+        release_job = asyncio.Event()
+        heartbeats_during_drain = 0
+        stop_event = asyncio.Event()
+
+        orig_publish = queue.publish_heartbeat
+
+        async def _spy_heartbeat(wid: str, payload: dict[str, object], ttl: int = 30) -> None:
+            nonlocal heartbeats_during_drain
+            if stop_event.is_set() and job_started.is_set() and not release_job.is_set():
+                heartbeats_during_drain += 1
+            await orig_publish(wid, payload, ttl=ttl)
+
+        monkeypatch.setattr(queue, "publish_heartbeat", _spy_heartbeat)
+
+        async def _slow_batch(*_args, **_kwargs):
+            job_started.set()
+            await release_job.wait()
+            return [{"url": "https://example.com", "success": True}], {
+                "total_requests": 1,
+                "successful_requests": 1,
+                "failed_requests": 0,
+                "total_duration": 0.05,
+            }
+
+        cfg = Settings(
+            shutdown=ShutdownConfig(drain_timeout=5.0),
+            worker=WorkerConfig(
+                heartbeat_interval=1.0,
+                heartbeat_ttl=10,
+                poll_timeout=1.0,
+                remote_browser_enabled=False,
+            ),
+        )
+        # Speed up heartbeat ticks for deterministic test runtime
+        object.__setattr__(cfg.worker, "heartbeat_interval", 0.05)
+        rt = _WorkerRuntime(
+            worker_id="draining-w1",
+            settings=cfg,
+            http_client=AsyncMock(close=AsyncMock()),
+            pdf_generator=AsyncMock(close=AsyncMock(), available_browsers=1),
+            pdf_semaphore=asyncio.Semaphore(1),
+            batch_semaphore=asyncio.Semaphore(2),
+            job_slot_semaphore=asyncio.Semaphore(1),
+            browser_slot_semaphore=asyncio.Semaphore(1),
+            job_manager=store,
+            worker_queue=queue,
+            robots_checker=AsyncMock(close=AsyncMock()),
+            domain_throttle=MagicMock(),
+            scheduler=None,
+            renderer=MagicMock(),
+        )
+
+        with patch("downloader.worker.process_background_batch_job", new=_slow_batch):
+            worker_task = asyncio.create_task(
+                run_worker(settings=cfg, runtime=rt, stop_event=stop_event)
+            )
+            await asyncio.wait_for(job_started.wait(), timeout=2.0)
+            # Trigger drain while job is still running; heartbeat must stay alive and keep ticking!
+            stop_event.set()
+            await asyncio.sleep(0.15)
+            assert await queue.has_heartbeat("draining-w1") is True
+            assert heartbeats_during_drain >= 1
+
+            release_job.set()
+            await asyncio.wait_for(worker_task, timeout=3.0)
+
+        # Heartbeat is removed only after drain finishes.
+        assert await queue.has_heartbeat("draining-w1") is False
+
+    async def test_worker_result_blob_reports_completed(self) -> None:
+        """Worker persists result blob with `status == COMPLETED` and skips cancelled jobs (`R84`)."""
+        from tests.fixtures.in_memory_ports import InMemoryJobStore, InMemoryWorkQueue
+
+        store = InMemoryJobStore()
+        queue = InMemoryWorkQueue()
+
+        # 1. Normal completion stores COMPLETED JobResult blob
+        job_id = await store.create_job(
+            {"urls": [{"url": "https://example.com"}], "default_format": "text"}
+        )
+        await queue.enqueue_batch_job(job_id)
+        env = await queue.pop_batch_job(timeout=1.0)
+        assert env is not None
+
+        with (
+            patch(
+                "downloader.worker.process_background_batch_job",
+                new=AsyncMock(
+                    return_value=(
+                        [{"url": "https://example.com", "success": True}],
+                        {
+                            "total_requests": 1,
+                            "successful_requests": 1,
+                            "failed_requests": 0,
+                            "total_duration": 0.25,
+                        },
+                    )
+                ),
+            ),
+            patch("downloader.worker.notify_batch_webhook", new=AsyncMock()),
+        ):
+            await process_worker_batch_envelope(
+                env,
+                job_manager=store,
+                worker_queue=queue,
+                http_client=MagicMock(),
+                batch_semaphore=asyncio.Semaphore(2),
+                pdf_semaphore=asyncio.Semaphore(1),
+            )
+
+        stored_result = await store.get_job_results(job_id)
+        assert stored_result is not None
+        assert stored_result.status == JobStatus.COMPLETED
+        assert stored_result.total_duration == pytest.approx(0.25)
+
+        # 2. Job cancelled mid-flight stores NO result blob and fires NO completed webhook
+        cancel_id = await store.create_job(
+            {
+                "urls": [{"url": "https://example.com"}],
+                "default_format": "text",
+                "webhook_url": "https://hooks.example.com/batch",
+            }
+        )
+        await queue.enqueue_batch_job(cancel_id)
+        env_c = await queue.pop_batch_job(timeout=1.0)
+        assert env_c is not None
+
+        async def _cancel_mid_run(jid: str, *_args, **_kwargs):
+            await store.update_job_status(jid, JobStatus.CANCELLED)
+            return [{"url": "https://example.com", "success": True}], {"total_requests": 1}
+
+        with (
+            patch("downloader.worker.process_background_batch_job", new=_cancel_mid_run),
+            patch("downloader.worker.notify_batch_webhook", new=AsyncMock()) as mock_hook,
+        ):
+            await process_worker_batch_envelope(
+                env_c,
+                job_manager=store,
+                worker_queue=queue,
+                http_client=MagicMock(),
+                batch_semaphore=asyncio.Semaphore(2),
+                pdf_semaphore=asyncio.Semaphore(1),
+            )
+
+        assert await store.get_job_results(cancel_id) is None
+        mock_hook.assert_not_awaited()
+
+    async def test_reclaimed_job_increments_attempt_and_fails_after_max(self) -> None:
+        """Reclaim increments attempt atomically and dead-letters jobs exceeding `max_attempts` (`R86`)."""
+        redis_stub = FakeRedis()
+        q1 = WorkerQueue(redis_stub, worker_id="w-dead", max_attempts=2)
+        q2 = WorkerQueue(redis_stub, worker_id="w-reclaimer", max_attempts=2)
+
+        await q1.enqueue_batch_job("job-poison")
+        # Attempt 1 -> worker dies without heartbeat
+        env1 = await q1.pop_batch_job(timeout=1.0)
+        assert env1 is not None and env1.attempt == 1
+
+        dead_letters: list[str] = []
+
+        async def _on_dlq(env) -> None:
+            dead_letters.append(env.job_id)
+
+        # Reclaim #1: attempt 1 -> 2 (<= max_attempts=2), requeued to pending
+        moved1 = await q2.requeue_processing_jobs(max_attempts=2, on_dead_letter=_on_dlq)
+        assert moved1 == 1
+        assert dead_letters == []
+        env2 = await q1.pop_batch_job(timeout=1.0)
+        assert env2 is not None and env2.attempt == 2
+
+        # Reclaim #2: attempt 2 -> 3 (> max_attempts=2), routed to dead-letter callback & NOT requeued
+        moved2 = await q2.requeue_processing_jobs(max_attempts=2, on_dead_letter=_on_dlq)
+        assert moved2 == 0
+        assert dead_letters == ["job-poison"]
+        assert await q2.pop_batch_job(timeout=0.05) is None
+        assert (await q2.get_queue_depths())["batch_processing"] == 0
+
+    async def test_remote_browser_calls_are_bounded_and_expired_tasks_skipped(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Remote browser calls reject overflow, skip tasks expiring behind a held semaphore, and validate actions safely (`R38`, `R87`)."""
         redis_stub = FakeRedis()
         blpop_started = asyncio.Event()
         release_blpop = asyncio.Event()
@@ -616,8 +898,8 @@ class TestSplitWorkerArchitecture:
             await release_blpop.wait()
             return await original_blpop(keys, timeout=timeout)
 
-        redis_stub.blpop = _blocking_blpop  # type: ignore[method-assign]
-        queue = WorkerQueue(redis_stub, max_remote_browser_calls=1)  # type: ignore[arg-type]
+        monkeypatch.setattr(redis_stub, "blpop", _blocking_blpop)
+        queue = WorkerQueue(redis_stub, max_remote_browser_calls=1)
 
         req1 = BrowserTaskRequest(kind="render_html", url="https://example.com/1")
         await queue.publish_browser_result(
@@ -636,7 +918,7 @@ class TestSplitWorkerArchitecture:
         resp1 = await t1
         assert resp1.success is True
 
-        # Expired task must be skipped by worker without invoking Playwright
+        # 1. Already-expired task is skipped before touching semaphore or Playwright
         expired_req = BrowserTaskRequest(
             kind="pdf",
             url="https://example.com/expired",
@@ -652,6 +934,403 @@ class TestSplitWorkerArchitecture:
         assert expired_resp.success is False
         assert expired_resp.status_code == 408
         assert expired_resp.error_type == "timeout_error"
+
+        # 2. Task that expires WHILE waiting for a held pdf_semaphore must also be skipped (`R87`)
+        held_sem = asyncio.Semaphore(1)
+        await held_sem.acquire()
+        short_req = BrowserTaskRequest(
+            kind="pdf",
+            url="https://example.com/expires-in-queue",
+            deadline=time.time() + 0.05,
+        )
+        with patch("downloader.worker.generate_pdf_from_url", new=AsyncMock()) as mock_pdf2:
+            waiting = asyncio.create_task(
+                process_worker_browser_task(
+                    short_req,
+                    worker_queue=queue,
+                    pdf_semaphore=held_sem,
+                )
+            )
+            await asyncio.sleep(0.08)
+            held_sem.release()
+            queued_expired = await waiting
+            mock_pdf2.assert_not_awaited()
+        assert queued_expired.success is False
+        assert queued_expired.status_code == 408
+        assert queued_expired.error_type == "timeout_error"
+
+        # 3. Malformed actions inside BrowserTaskRequest are serialized as 400 browser_action_error
+        bad_action_req = BrowserTaskRequest(
+            kind="render_html",
+            url="https://example.com/bad-actions",
+            actions=[{"type": "evaluate", "script": "alert(1)"}],
+        )
+        bad_resp = await process_worker_browser_task(
+            bad_action_req,
+            worker_queue=queue,
+            pdf_semaphore=asyncio.Semaphore(1),
+        )
+        assert bad_resp.success is False
+        assert bad_resp.status_code == 400
+        assert bad_resp.error_type == "browser_action_error"
+
+    async def test_run_worker_end_to_end_with_in_memory_ports_and_metrics(
+        self, tmp_path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Full `run_worker()` drives batch + browser loops, updates metrics, and serves `/metrics` (`R80`, `R104`)."""
+        from downloader.config import ShutdownConfig, WorkerConfig
+        from downloader.metrics import get_metrics_collector
+        from downloader.worker import _start_worker_metrics_server, _WorkerRuntime, run_worker
+        from tests.fixtures.in_memory_ports import InMemoryJobStore, InMemoryWorkQueue
+
+        monkeypatch.setenv("WORKER_ID_FILE", str(tmp_path / "e2e-worker.id"))
+        store = InMemoryJobStore()
+        queue = InMemoryWorkQueue()
+        job_id = await store.create_job(
+            {"urls": [{"url": "https://example.com"}], "default_format": "text"}
+        )
+        await queue.enqueue_batch_job(job_id)
+
+        browser_req = BrowserTaskRequest(kind="pdf", url="https://example.com/doc")
+        metrics_server = await _start_worker_metrics_server(0)
+        port = metrics_server.sockets[0].getsockname()[1]
+
+        cfg = Settings(
+            shutdown=ShutdownConfig(drain_timeout=5.0),
+            worker=WorkerConfig(
+                heartbeat_interval=1.0,
+                heartbeat_ttl=10,
+                poll_timeout=1.0,
+                remote_browser_enabled=True,
+            ),
+        )
+        stop_event = asyncio.Event()
+        rt = _WorkerRuntime(
+            worker_id="e2e-w1",
+            settings=cfg,
+            http_client=AsyncMock(close=AsyncMock()),
+            pdf_generator=AsyncMock(close=AsyncMock(), available_browsers=2),
+            pdf_semaphore=asyncio.Semaphore(2),
+            batch_semaphore=asyncio.Semaphore(2),
+            job_slot_semaphore=asyncio.Semaphore(2),
+            browser_slot_semaphore=asyncio.Semaphore(2),
+            job_manager=store,
+            worker_queue=queue,
+            robots_checker=AsyncMock(close=AsyncMock()),
+            domain_throttle=MagicMock(),
+            scheduler=None,
+            renderer=MagicMock(),
+            metrics_server=metrics_server,
+        )
+
+        with (
+            patch(
+                "downloader.worker.process_background_batch_job",
+                new=AsyncMock(
+                    return_value=(
+                        [{"url": "https://example.com", "success": True}],
+                        {
+                            "total_requests": 1,
+                            "successful_requests": 1,
+                            "failed_requests": 0,
+                            "total_duration": 0.1,
+                        },
+                    )
+                ),
+            ),
+            patch(
+                "downloader.worker.generate_pdf_from_url",
+                new=AsyncMock(return_value=b"%PDF-1.7 live"),
+            ),
+        ):
+            worker_task = asyncio.create_task(
+                run_worker(settings=cfg, runtime=rt, stop_event=stop_event)
+            )
+            rpc_resp = await queue.enqueue_browser_task(browser_req, timeout=2.0)
+            assert rpc_resp.success is True
+            assert rpc_resp.decode_bytes() == b"%PDF-1.7 live"
+
+            # Wait briefly for batch job completion
+            for _ in range(40):
+                info = await store.get_job_info(job_id)
+                if info is not None and info.status == JobStatus.COMPLETED:
+                    break
+                await asyncio.sleep(0.02)
+            final_info = await store.get_job_info(job_id)
+            assert final_info is not None and final_info.status == JobStatus.COMPLETED
+
+            # Scrape the worker's Prometheus metrics HTTP server
+            reader, writer = await asyncio.open_connection("127.0.0.1", port)
+            writer.write(b"GET /metrics HTTP/1.1\r\nHost: localhost\r\n\r\n")
+            await writer.drain()
+            raw_metrics = (await reader.read()).decode("utf-8")
+            writer.close()
+            await writer.wait_closed()
+            assert "HTTP/1.1 200 OK" in raw_metrics
+            assert "worker_active_tasks" in raw_metrics
+            assert get_metrics_collector()._gauges.get("pdf_pool_available") == 2.0
+
+            stop_event.set()
+            await asyncio.wait_for(worker_task, timeout=3.0)
+
+    async def test_worker_dead_letter_reclaim_error_serialization_and_cli_paths(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Cover dead-letter handling, reclaim loop, browser error serialization, metrics 404, and CLI exit (`R80`)."""
+        from typing import Any
+
+        from downloader.config import WorkerConfig
+        from downloader.models.browser_actions import BrowserActionError
+        from downloader.ports import (
+            BatchQueueEnvelope,
+            BrowserCapacityError,
+            ContentConversionError,
+            ContentTooLargeError,
+            CrawlDelayExceededError,
+            PDFGeneratorError,
+            RenderTimeoutError,
+            RobotsDisallowedError,
+            ScreenshotGeneratorError,
+            SelectorTimeoutError,
+        )
+        from downloader.services.webhooks import seal_webhook_secret
+        from downloader.validation import SSRFProtectionError, URLValidationError
+        from downloader.worker import (
+            _decode_batch_request,
+            _fail_dead_letter_batch_job,
+            _run_reclaim_loop,
+            _serialize_browser_task_error,
+            _start_worker_metrics_server,
+            _WorkerRuntime,
+            run_worker,
+        )
+        from downloader.worker import main as worker_main
+
+        # 1. _decode_batch_request decrypts sealed webhook secret and handles legacy cleartext
+        cfg = Settings()
+        cfg.webhook.secret_key = "worker-test-secret-key"  # pragma: allowlist secret
+        sealed = seal_webhook_secret("hook-secret-123", cfg)
+        decoded_sealed = _decode_batch_request(
+            {
+                "urls": [{"url": "https://example.com"}],
+                "webhook_url": "https://example.com/hook",
+                "webhook_secret_enc": sealed,
+            },
+            cfg,
+        )
+        assert decoded_sealed.webhook_secret == "hook-secret-123"
+        decoded_legacy = _decode_batch_request(
+            {
+                "urls": [{"url": "https://example.com"}],
+                "webhook_url": "https://example.com/hook",
+                "webhook_secret": "plain-legacy",
+            },
+            cfg,
+        )
+        assert decoded_legacy.webhook_secret == "plain-legacy"
+
+        # 2. _fail_dead_letter_batch_job marks job FAILED and delivers webhook
+        mock_jm = MagicMock()
+        mock_jm.get_job_info = AsyncMock(
+            return_value=JobInfo(
+                job_id="dl-1",
+                status=JobStatus.RUNNING,
+                created_at=datetime.now(UTC),
+                total_urls=1,
+                request_data={
+                    "urls": [{"url": "https://example.com"}],
+                    "webhook_url": "https://example.com/hook",
+                    "webhook_secret_enc": sealed,
+                },
+            )
+        )
+        mock_jm.update_job_status = AsyncMock(return_value=True)
+        env = BatchQueueEnvelope(job_id="dl-1", attempt=4, trace_headers={}, raw_payload="{}")
+        with patch("downloader.worker.notify_batch_webhook", new=AsyncMock()) as mock_hook:
+            await _fail_dead_letter_batch_job(env, job_manager=mock_jm, settings=cfg)
+        mock_jm.update_job_status.assert_awaited_once()
+        mock_hook.assert_awaited_once()
+
+        # 3. _serialize_browser_task_error maps every domain exception cleanly
+        task = BrowserTaskRequest(kind="render_html", url="https://example.com")
+        cases = [
+            (SSRFProtectionError("ssrf"), 400, "ssrf_protection_error"),
+            (URLValidationError("bad"), 400, "validation_error"),
+            (RobotsDisallowedError("https://example.com"), 403, "robots_disallowed"),
+            (CrawlDelayExceededError("https://example.com", 2.0), 429, "crawl_delay_exceeded"),
+            (SelectorTimeoutError("#x", 500), 408, "selector_timeout_error"),
+            (BrowserActionError("bad action"), 400, "browser_action_error"),
+            (ContentTooLargeError(200, 100), 413, "content_too_large"),
+            (ContentConversionError("conv"), 500, "conversion_error"),
+            (BrowserCapacityError("full"), 503, "service_unavailable"),
+            (RenderTimeoutError("slow"), 408, "timeout_error"),
+            (ScreenshotGeneratorError("shot", status_code=502), 502, "screenshot_generation_error"),
+            (PDFGeneratorError("pdf", status_code=404), 404, "http_error"),
+            (PDFGeneratorError("pdf crash"), 500, "pdf_generation_error"),
+            (RuntimeError("unexpected"), 500, "render_error"),
+        ]
+        for exc, expected_code, expected_type in cases:
+            resp = _serialize_browser_task_error(task, exc)
+            assert resp.success is False
+            assert resp.status_code == expected_code
+            assert resp.error_type == expected_type
+
+        # 4. _start_worker_metrics_server serves 404 on unknown paths
+        server = await _start_worker_metrics_server(0)
+        try:
+            assert server.sockets
+            mport = server.sockets[0].getsockname()[1]
+            reader, writer = await asyncio.open_connection("127.0.0.1", mport)
+            writer.write(b"GET /unknown HTTP/1.1\r\nHost: localhost\r\n\r\n")
+            await writer.drain()
+            raw_404 = (await reader.read()).decode("utf-8")
+            writer.close()
+            await writer.wait_closed()
+            assert "404 Not Found" in raw_404
+        finally:
+            server.close()
+            await server.wait_closed()
+
+        # 5. _run_reclaim_loop reclaims orphaned jobs on interval tick
+        reclaim_stop = asyncio.Event()
+        mock_wq = MagicMock()
+        reclaim_calls = 0
+
+        async def _requeue(**_kwargs):
+            nonlocal reclaim_calls
+            reclaim_calls += 1
+            reclaim_stop.set()
+            return 2
+
+        mock_wq.requeue_processing_jobs = AsyncMock(side_effect=_requeue)
+        reclaim_rt = _WorkerRuntime(
+            worker_id="reclaim-w",
+            settings=Settings(worker=WorkerConfig(heartbeat_interval=1.0)),
+            http_client=MagicMock(),
+            pdf_generator=MagicMock(),
+            pdf_semaphore=asyncio.Semaphore(1),
+            batch_semaphore=asyncio.Semaphore(1),
+            job_slot_semaphore=asyncio.Semaphore(1),
+            browser_slot_semaphore=asyncio.Semaphore(1),
+            job_manager=mock_jm,
+            worker_queue=mock_wq,
+            robots_checker=MagicMock(),
+            domain_throttle=MagicMock(),
+            scheduler=None,
+            renderer=MagicMock(),
+        )
+        orig_wait_for = asyncio.wait_for
+
+        async def _fast_wait_for(coro, timeout=None):
+            return await orig_wait_for(coro, timeout=min(timeout or 0.01, 0.01))
+
+        monkeypatch.setattr("downloader.worker.asyncio.wait_for", _fast_wait_for)
+        await _run_reclaim_loop(reclaim_rt, reclaim_stop, logging.getLogger("test"))
+        assert reclaim_calls == 1
+
+        # 6. run_worker without REDIS_URI exits with status 1
+        no_redis_cfg = Settings()
+        no_redis_cfg.redis.redis_uri = None
+        with pytest.raises(SystemExit) as exc_info:
+            await run_worker(settings=no_redis_cfg)
+        assert exc_info.value.code == 1
+
+        # 7. main() --healthcheck dispatches run_healthcheck
+        monkeypatch.setattr(sys, "argv", ["worker", "--healthcheck"])
+
+        def _fake_asyncio_run(coro: Any) -> int:
+            coro.close()
+            return 0
+
+        with (
+            patch("downloader.worker.asyncio.run", side_effect=_fake_asyncio_run) as mock_run,
+            pytest.raises(SystemExit) as hc_exit,
+        ):
+            worker_main()
+        assert hc_exit.value.code == 0
+        mock_run.assert_called_once()
+
+    async def test_init_worker_runtime_and_dependency_providers(self) -> None:
+        """Cover `_init_worker_runtime` assembly and lazy/error paths in `dependencies.py` (`R80`)."""
+        from types import SimpleNamespace
+        from typing import cast
+
+        from fastapi import Request
+
+        from downloader.browser.renderer import RemoteBrowserRenderer
+        from downloader.dependencies import (
+            build_browser_renderer,
+            get_batch_semaphore,
+            get_domain_throttle,
+            get_http_client,
+            get_pdf_semaphore,
+            get_robots_checker,
+            get_worker_queue_dependency,
+        )
+        from downloader.worker_runtime import _init_worker_runtime, _shutdown_worker_runtime
+
+        fake_redis = FakeRedis()
+        fake_jm = MagicMock()
+        fake_jm.redis_client = fake_redis
+        fake_jm.connect = AsyncMock()
+        fake_jm.disconnect = AsyncMock()
+
+        fake_sched = MagicMock()
+        fake_sched.start = AsyncMock()
+        fake_sched.shutdown = AsyncMock()
+
+        registered: list[object] = []
+        cfg = Settings()
+        cfg.redis.redis_uri = "redis://localhost:6379"
+        cfg.worker.metrics_port = 0
+
+        with (
+            patch("downloader.worker_runtime.JobManager", return_value=fake_jm),
+            patch("downloader.worker_runtime.SchedulerService", return_value=fake_sched),
+            patch("downloader.worker_runtime.set_shared_pdf_generator"),
+            patch("downloader.worker_runtime.cleanup_pdf_generator", new=AsyncMock()),
+            patch("downloader.worker_runtime.shutdown_ocr_executor"),
+            patch("downloader.worker_runtime.shutdown_telemetry"),
+        ):
+            rt = await _init_worker_runtime(
+                cfg,
+                "init-test-w1",
+                on_dead_letter=AsyncMock(),
+                register_executor=registered.append,
+            )
+            assert rt.worker_id == "init-test-w1"
+            assert rt.metrics_server is not None
+            assert len(registered) == 1
+            fake_sched.start.assert_awaited_once_with(paused=False)
+            await _shutdown_worker_runtime(rt, set(), logging.getLogger("test"))
+            fake_sched.shutdown.assert_awaited_once_with(wait=True)
+            fake_jm.disconnect.assert_awaited_once()
+
+        # dependencies.py: remote browser selection, uninitialized errors, and lazy singletons
+        api_cfg = Settings()
+        api_cfg.worker.deployment_mode = "api"
+        api_cfg.worker.remote_browser_enabled = True
+        wq = WorkerQueue(fake_redis)
+        remote_renderer = build_browser_renderer(api_cfg, work_queue=wq)
+        assert isinstance(remote_renderer, RemoteBrowserRenderer)
+
+        empty_req = cast(Request, SimpleNamespace(app=SimpleNamespace(state=SimpleNamespace())))
+        with pytest.raises(RuntimeError, match="HTTP client not initialized"):
+            await get_http_client(empty_req)
+        with pytest.raises(RuntimeError, match="PDF semaphore not initialized"):
+            get_pdf_semaphore(empty_req)
+        with pytest.raises(RuntimeError, match="Batch semaphore not initialized"):
+            get_batch_semaphore(empty_req)
+
+        state = SimpleNamespace(settings=Settings(), job_manager=fake_jm)
+        req = cast(Request, SimpleNamespace(app=SimpleNamespace(state=state)))
+        checker = await get_robots_checker(req)
+        throttle = await get_domain_throttle(req)
+        lazy_wq = await get_worker_queue_dependency(req, fake_jm)
+        assert state.robots_checker is checker
+        assert state.domain_throttle is throttle
+        assert state.worker_queue is lazy_wq
+        await checker.close()
 
 
 class TestOpenTelemetryIntegration:
@@ -714,3 +1393,20 @@ class TestOpenTelemetryIntegration:
         finally:
             monkeypatch.undo()
             reload_settings()
+
+    def test_otlp_endpoint_appends_v1_traces_path(self) -> None:
+        """Base OTLP collector URL gets `/v1/traces` appended while full path is preserved (`R111`)."""
+        from downloader.telemetry import _resolve_otlp_traces_endpoint
+
+        assert (
+            _resolve_otlp_traces_endpoint("http://otel-collector:4318")
+            == "http://otel-collector:4318/v1/traces"
+        )
+        assert (
+            _resolve_otlp_traces_endpoint("http://otel-collector:4318/")
+            == "http://otel-collector:4318/v1/traces"
+        )
+        assert (
+            _resolve_otlp_traces_endpoint("http://otel-collector:4318/v1/traces")
+            == "http://otel-collector:4318/v1/traces"
+        )

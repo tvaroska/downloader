@@ -59,6 +59,15 @@ _TEXTUAL_APPLICATION_TYPES = frozenset(
     }
 )
 
+_MARKUP_MEDIA_TYPES = frozenset(
+    {
+        "text/html",
+        "application/xhtml+xml",
+        "text/xml",
+        "application/xml",
+    }
+)
+
 _META_CHARSET_RE = re.compile(
     rb"<meta\b[^>]*?\bcharset\s*=\s*[\"']?\s*([A-Za-z0-9._-]+)",
     re.IGNORECASE,
@@ -97,6 +106,11 @@ def normalize_media_type(content_type: str | None) -> str:
     if not content_type:
         return ""
     return content_type.split(";", 1)[0].strip().lower()
+
+
+def _is_markup_media_type(content_type: str | None) -> bool:
+    media_type = normalize_media_type(content_type)
+    return media_type in _MARKUP_MEDIA_TYPES or media_type.endswith("+xml")
 
 
 def _has_binary_nul_bytes(sample: bytes) -> bool:
@@ -159,7 +173,8 @@ def _detect_meta_charset(head_bytes: bytes) -> str | None:
         if meta_match:
             resolved = _normalize_codec_name(meta_match.group(1).decode("ascii", "ignore"))
             if resolved is not None:
-                return resolved
+                # Per WHATWG prescan, ASCII <meta>/<?xml> tags cannot represent a real UTF-16 stream.
+                return "utf-8" if resolved.startswith("utf-16") else resolved
     return None
 
 
@@ -180,6 +195,8 @@ def extract_declared_charset(
             if resolved is not None:
                 return resolved
 
+    if not _is_markup_media_type(content_type):
+        return None
     return _detect_meta_charset(head_bytes)
 
 
@@ -211,78 +228,41 @@ def resolve_charset_and_decode(
     return content.decode("windows-1252", errors="replace"), "windows-1252"
 
 
-def _iter_header_pairs(headers: Any) -> list[tuple[Any, Any]]:
-    if isinstance(headers, (httpx.Headers, Mapping)):
-        return list(headers.items())
-    try:
-        return list(dict(headers).items())
-    except (TypeError, ValueError):
-        return []
+def extract_header_case_insensitive(headers: Any, name: str) -> str | None:
+    """Read a header value case-insensitively from `httpx.Headers` or any string mapping."""
+    if isinstance(headers, httpx.Headers):
+        val = headers.get(name)
+        return val if isinstance(val, str) else None
+
+    target = name.lower()
+    if isinstance(headers, Mapping):
+        for key, val in headers.items():
+            if isinstance(key, str) and key.lower() == target and isinstance(val, (str, int)):
+                return str(val)
+        return None
+
+    getter = getattr(headers, "get", None)
+    if callable(getter):
+        val = getter(target)
+        if val is None:
+            val = getter(name)
+        if isinstance(val, (str, int)):
+            return str(val)
+    return None
 
 
 def _extract_content_encoding_list(headers: Any) -> list[str]:
     """Parse Content-Encoding header into ordered lowercase codec tokens."""
-    raw: str | None = None
-    for key, val in _iter_header_pairs(headers):
-        if isinstance(key, str) and key.lower() == "content-encoding" and isinstance(val, str):
-            raw = val
-            break
-
-    if raw is None:
-        getter = getattr(headers, "get", None)
-        if callable(getter):
-            candidate = getter("content-encoding") or getter("Content-Encoding")
-            if isinstance(candidate, str):
-                raw = candidate
-
+    raw = extract_header_case_insensitive(headers, "content-encoding")
     if not raw:
         return []
     tokens = (tok.strip().lower() for tok in raw.split(","))
     return [tok for tok in tokens if tok and tok != "identity"]
 
 
-def _unwrap_consumed_bytes(response: httpx.Response) -> bytes | None:
-    inner_stream: Any = response.stream
-    while inner_stream is not None and not isinstance(inner_stream, bytes):
-        inner_stream = getattr(inner_stream, "_stream", None)
-    return inner_stream if isinstance(inner_stream, bytes) else None
-
-
-def _slice_bytes(data: bytes) -> list[bytes]:
-    return [
-        data[offset : offset + _DECOMPRESS_SLICE_BYTES]
-        for offset in range(0, len(data), _DECOMPRESS_SLICE_BYTES)
-        if data[offset : offset + _DECOMPRESS_SLICE_BYTES]
-    ]
-
-
-async def _iter_httpx_wire_chunks(response: httpx.Response) -> AsyncIterator[bytes]:
-    if response.is_stream_consumed:
-        consumed_bytes = _unwrap_consumed_bytes(response)
-        if consumed_bytes is not None:
-            for piece in _slice_bytes(consumed_bytes):
-                yield piece
-            return
-    async for chunk in response.aiter_raw():
-        if chunk:
-            yield chunk
-
-
 async def _iter_wire_chunks(response: Any) -> AsyncIterator[bytes]:
-    """Yield raw wire chunks when available (httpx.Response), or fallback for unit-test mocks."""
-    if isinstance(response, httpx.Response):
-        async for chunk in _iter_httpx_wire_chunks(response):
-            yield chunk
-        return
-
-    aiter_raw = getattr(response, "aiter_raw", None)
-    raw_iter = aiter_raw() if callable(aiter_raw) else None
-    source: Any = (
-        raw_iter
-        if raw_iter is not None and hasattr(raw_iter, "__aiter__")
-        else response.aiter_bytes()
-    )
-    async for chunk in source:
+    """Yield raw wire chunks from an `httpx.Response` stream."""
+    async for chunk in response.aiter_raw():
         if chunk:
             yield chunk
 
@@ -340,8 +320,17 @@ async def _decode_brotli_stream(
                 piece = br_dec.process(b"", output_buffer_limit=buf.step_limit())
                 if buf.append_decoded(piece):
                     return buf.build_bytes()
+        # Drain any remaining buffered output after wire EOF before checking `is_finished()`.
+        while not br_dec.is_finished():
+            piece = br_dec.process(b"", output_buffer_limit=buf.step_limit())
+            if not piece:
+                break
+            if buf.append_decoded(piece):
+                return buf.build_bytes()
     except brotli.error as exc:
         raise on_decode_error(f"Invalid brotli stream: {exc}") from exc
+    if not br_dec.is_finished():
+        raise on_decode_error("Invalid brotli stream: truncated or incomplete input")
     return buf.build_bytes()
 
 
@@ -388,8 +377,9 @@ async def _decode_zlib_stream(
                     break
                 tail = next_tail
 
-        if zlib_dec is not None:
-            buf.append_decoded(zlib_dec.flush())
+        if zlib_dec is None or not zlib_dec.eof:
+            raise on_decode_error(f"Invalid {codec} stream: truncated or incomplete input")
+        buf.append_decoded(zlib_dec.flush())
     except zlib.error as exc:
         raise on_decode_error(f"Invalid {codec} stream: {exc}") from exc
     return buf.build_bytes()

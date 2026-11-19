@@ -36,7 +36,7 @@ class TestHTTPClientIsolation:
                 )
             return httpx.Response(
                 200,
-                content=b"ok",
+                stream=httpx.ByteStream(b"ok"),
                 headers={"content-type": "text/plain"},
                 request=request,
             )
@@ -59,3 +59,70 @@ class TestHTTPClientIsolation:
         else:
             assert "x-custom-token" not in second_req.headers
             assert "x-tenant" not in second_req.headers
+
+    async def test_cookies_do_not_persist_across_downloads(self) -> None:
+        """Cookies set during one download must not leak into subsequent downloads (`R6`, `R90`)."""
+        seen_cookies: list[str | None] = []
+
+        def _handler(request: httpx.Request) -> httpx.Response:
+            seen_cookies.append(request.headers.get("cookie"))
+            return httpx.Response(
+                200,
+                stream=httpx.ByteStream(b"hello"),
+                headers={
+                    "Content-Type": "text/plain",
+                    "Set-Cookie": "session_id=secret-user-a; Path=/",
+                },
+                request=request,
+            )
+
+        async with HTTPClient(transport=httpx.MockTransport(_handler)) as client:
+            body1, _ = await client.download("https://example.com/a")
+            body2, _ = await client.download("https://example.com/b")
+
+        assert body1 == b"hello"
+        assert body2 == b"hello"
+        assert seen_cookies == [None, None]
+
+    async def test_cookie_set_on_redirect_is_sent_within_same_download(self) -> None:
+        """A `Set-Cookie` on a 302 hop is sent on the next hop of that download only (`R90`)."""
+        seen_cookies: list[tuple[str, str | None]] = []
+
+        def _handler(request: httpx.Request) -> httpx.Response:
+            url_str = str(request.url)
+            cookie_hdr = request.headers.get("cookie")
+            seen_cookies.append((url_str, cookie_hdr))
+            if url_str.endswith("/gate"):
+                if cookie_hdr and "gate_token=pass" in cookie_hdr:
+                    return httpx.Response(
+                        200,
+                        stream=httpx.ByteStream(b"unlocked"),
+                        headers={"Content-Type": "text/plain"},
+                        request=request,
+                    )
+                return httpx.Response(
+                    302,
+                    headers={
+                        "Location": "https://example.com/gate",
+                        "Set-Cookie": "gate_token=pass; Path=/",
+                    },
+                    request=request,
+                )
+            return httpx.Response(
+                200,
+                stream=httpx.ByteStream(b"next"),
+                headers={"Content-Type": "text/plain"},
+                request=request,
+            )
+
+        async with HTTPClient(transport=httpx.MockTransport(_handler)) as client:
+            body, _ = await client.download("https://example.com/gate")
+            assert body == b"unlocked"
+            # Subsequent independent download must NOT see `gate_token`.
+            body_after, _ = await client.download("https://example.com/after")
+            assert body_after == b"next"
+
+        assert seen_cookies[0] == ("https://example.com/gate", None)
+        assert seen_cookies[1][0] == "https://example.com/gate"
+        assert seen_cookies[1][1] is not None and "gate_token=pass" in seen_cookies[1][1]
+        assert seen_cookies[2] == ("https://example.com/after", None)

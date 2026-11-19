@@ -1,4 +1,4 @@
-"""Integration tests for PDF download functionality."""
+"""Unit tests for PDF download endpoint using mocked browser renderer."""
 
 import asyncio
 from unittest.mock import AsyncMock, patch
@@ -10,10 +10,9 @@ from downloader.main import app
 from downloader.pdf_generator import PDFGeneratorError
 
 
-@pytest.mark.integration
-@pytest.mark.requires_playwright
+@pytest.mark.unit
 class TestPDFDownload:
-    """Test PDF download integration."""
+    """Test PDF download endpoint behavior."""
 
     def test_download_pdf_format(self, api_client):
         """Test downloading a URL as PDF format."""
@@ -37,8 +36,8 @@ class TestPDFDownload:
         app.dependency_overrides[get_http_client] = mock_get_http_client
         try:
             with patch(
-                "downloader.services.content_processor.generate_pdf_from_url",
-                return_value=pdf_content,
+                "downloader.pdf_generator.generate_pdf_from_url",
+                new=AsyncMock(return_value=pdf_content),
             ) as mock_generate_pdf:
                 response = api_client.get(
                     "/https://example.com", headers={"Accept": "application/pdf"}
@@ -49,7 +48,8 @@ class TestPDFDownload:
                 assert "download.pdf" in response.headers["Content-Disposition"]
 
                 assert response.content == pdf_content
-                mock_generate_pdf.assert_called_once_with("https://example.com")
+                mock_generate_pdf.assert_called_once()
+                assert mock_generate_pdf.call_args.args[0] == "https://example.com"
         finally:
             app.dependency_overrides.pop(get_http_client, None)
 
@@ -73,8 +73,8 @@ class TestPDFDownload:
         app.dependency_overrides[get_http_client] = mock_get_http_client
         try:
             with patch(
-                "downloader.services.content_processor.generate_pdf_from_url",
-                side_effect=PDFGeneratorError("Browser failed to start"),
+                "downloader.pdf_generator.generate_pdf_from_url",
+                new=AsyncMock(side_effect=PDFGeneratorError("Browser failed to start")),
             ):
                 response = api_client.get(
                     "/https://example.com", headers={"Accept": "application/pdf"}
@@ -101,7 +101,6 @@ class TestPDFDownload:
             },
         )
 
-        # Create a locked semaphore (0 permits = immediately locked)
         locked_semaphore = asyncio.Semaphore(0)
 
         async def mock_get_http_client():

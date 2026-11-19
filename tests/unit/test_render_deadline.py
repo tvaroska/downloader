@@ -8,6 +8,7 @@ from unittest.mock import AsyncMock, MagicMock
 import pytest
 
 from downloader.browser.actions import BrowserAction
+from downloader.browser.renderer import render_html_with_playwright
 from downloader.pdf_generator import BrowserSession, PlaywrightPDFGenerator, close_page_modals
 
 
@@ -56,12 +57,15 @@ async def test_modal_closer_is_bounded() -> None:
 
 
 @pytest.mark.unit
-async def test_browser_session_enforces_overall_deadline_and_cleans_up() -> None:
+async def test_browser_session_enforces_overall_deadline_and_cleans_up(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     """R31: BrowserSession enforces an overall asyncio.timeout budget and releases browser."""
     mock_page = AsyncMock()
     mock_context = AsyncMock()
     mock_context.new_page = AsyncMock(return_value=mock_page)
     mock_context.route = AsyncMock()
+    mock_context.on = MagicMock()
     mock_context.close = AsyncMock()
 
     mock_browser = MagicMock()
@@ -72,7 +76,7 @@ async def test_browser_session_enforces_overall_deadline_and_cleans_up() -> None
 
     gen = PlaywrightPDFGenerator(pool_size=1, idle_timeout=0.0)
     gen.pool = mock_pool
-    gen.ensure_started = AsyncMock(return_value=mock_pool)  # type: ignore[method-assign]
+    monkeypatch.setattr(gen, "ensure_started", AsyncMock(return_value=mock_pool))
 
     with pytest.raises(TimeoutError):
         async with BrowserSession(gen, timeout_seconds=0.05):
@@ -84,7 +88,9 @@ async def test_browser_session_enforces_overall_deadline_and_cleans_up() -> None
 
 
 @pytest.mark.unit
-async def test_pre_capture_skips_modal_closer_when_actions_supplied() -> None:
+async def test_pre_capture_skips_modal_closer_when_actions_supplied(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     """R31: close_page_modals is skipped when caller supplies explicit actions."""
     mock_page = AsyncMock()
     mock_page.goto = AsyncMock(return_value=AsyncMock(status=200))
@@ -96,6 +102,7 @@ async def test_pre_capture_skips_modal_closer_when_actions_supplied() -> None:
     mock_context = AsyncMock()
     mock_context.new_page = AsyncMock(return_value=mock_page)
     mock_context.route = AsyncMock()
+    mock_context.on = MagicMock()
     mock_context.close = AsyncMock()
 
     mock_pool = MagicMock()
@@ -105,12 +112,51 @@ async def test_pre_capture_skips_modal_closer_when_actions_supplied() -> None:
 
     gen = PlaywrightPDFGenerator(pool_size=1, idle_timeout=0.0)
     gen.pool = mock_pool
-    gen.ensure_started = AsyncMock(return_value=mock_pool)  # type: ignore[method-assign]
+    monkeypatch.setattr(gen, "ensure_started", AsyncMock(return_value=mock_pool))
 
     await gen.generate_pdf(
         "https://example.com",
         actions=[BrowserAction(type="click", selector="#open-dialog")],
     )
 
+    mock_page.click.assert_awaited_once()
+    mock_page.query_selector_all.assert_not_awaited()
+
+
+@pytest.mark.unit
+async def test_html_render_skips_modal_closer_when_actions_supplied(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """HTML render skips `close_page_modals` when caller supplies explicit `actions` (`R96`)."""
+    mock_page = AsyncMock()
+    mock_page.url = "https://example.com"
+    mock_page.goto = AsyncMock(return_value=AsyncMock(status=200, request=None))
+    mock_page.wait_for_load_state = AsyncMock()
+    mock_page.click = AsyncMock()
+    mock_page.query_selector_all = AsyncMock(return_value=[])
+    mock_page.content = AsyncMock(return_value="<html><body><main>Done</main></body></html>")
+
+    mock_context = AsyncMock()
+    mock_context.new_page = AsyncMock(return_value=mock_page)
+    mock_context.route = AsyncMock()
+    mock_context.on = MagicMock()
+    mock_context.close = AsyncMock()
+
+    mock_pool = MagicMock()
+    mock_pool.get_browser = AsyncMock(return_value=MagicMock())
+    mock_pool.create_context = AsyncMock(return_value=mock_context)
+    mock_pool.release_browser = AsyncMock()
+
+    gen = PlaywrightPDFGenerator(pool_size=1, idle_timeout=0.0)
+    gen.pool = mock_pool
+    monkeypatch.setattr(gen, "ensure_started", AsyncMock(return_value=mock_pool))
+
+    rendered = await render_html_with_playwright(
+        "https://example.com",
+        actions=[BrowserAction(type="click", selector="#open-dialog")],
+        generator=gen,
+    )
+
+    assert b"Done" in rendered
     mock_page.click.assert_awaited_once()
     mock_page.query_selector_all.assert_not_awaited()

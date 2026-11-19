@@ -2,57 +2,109 @@
 
 from __future__ import annotations
 
-from datetime import datetime
+from datetime import UTC, datetime
 from enum import Enum
 from typing import TYPE_CHECKING, Literal
 
-from pydantic import BaseModel, Field, field_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 if TYPE_CHECKING:
-    from apscheduler.triggers.cron import CronTrigger
+    from apscheduler.triggers.base import BaseTrigger
 
-_UNIX_DOW_NAMES: dict[str, str] = {
-    "0": "sun",
-    "1": "mon",
-    "2": "tue",
-    "3": "wed",
-    "4": "thu",
-    "5": "fri",
-    "6": "sat",
-    "7": "sun",
-}
+_UNIX_DOW_NAMES: tuple[str, ...] = ("sun", "mon", "tue", "wed", "thu", "fri", "sat")
+_NAME_TO_DOW_INDEX: dict[str, int] = {name: idx for idx, name in enumerate(_UNIX_DOW_NAMES)}
 
 
-def _translate_unix_dow_item(item: str) -> str:
-    """Translate one comma-separated UNIX day-of-week token (0/7=sun..6=sat) to APScheduler names."""
-    base, sep, step = item.partition("/")
-    result = item
+def _parse_dow_int(token: str) -> int:
+    """Parse a single UNIX day-of-week token (0-7 or sun..sat) to an integer 0..7."""
+    cleaned = token.strip().lower()
+    if cleaned in _NAME_TO_DOW_INDEX:
+        return _NAME_TO_DOW_INDEX[cleaned]
+    if cleaned.isdigit():
+        value = int(cleaned)
+        if 0 <= value <= 7:
+            return value
+    raise ValueError(f"Invalid day-of-week value: {token!r}")
+
+
+def _expand_dow_range(base: str, step: int, raw_item: str) -> list[int]:
+    bounds = base.split("-")
+    if len(bounds) != 2:
+        raise ValueError(f"Invalid day-of-week range: {raw_item!r}")
+    start_raw, end_raw = bounds[0].strip(), bounds[1].strip()
+    start_idx = _parse_dow_int(start_raw)
+    end_idx = _parse_dow_int(end_raw)
+    if start_idx == 7 and end_idx < 7:
+        start_idx = 0
+    if end_idx == 0 and start_idx > 0 and end_raw.lower() == "sun":
+        end_idx = 7
+    if start_idx > end_idx:
+        raise ValueError(f"Invalid day-of-week range: {raw_item!r}")
+    return [day % 7 for day in range(start_idx, end_idx + 1, step)]
+
+
+def _expand_unix_dow_item(item: str) -> list[int]:
+    """Expand one comma-separated UNIX day-of-week token into canonical 0..6 indices (0=Sun)."""
+    token = item.strip()
+    if not token:
+        raise ValueError("Empty day-of-week token")
+    parts = token.split("/")
+    if len(parts) > 2:
+        raise ValueError(f"Invalid day-of-week step expression: {item!r}")
+    base = parts[0].strip()
+    has_step = len(parts) == 2
+    step = 1
+    if has_step:
+        step_str = parts[1].strip()
+        if not step_str.isdigit() or int(step_str) <= 0:
+            raise ValueError(f"Invalid day-of-week step value: {item!r}")
+        step = int(step_str)
+
+    if base == "*":
+        return list(range(0, 7, step))
     if "-" in base:
-        start, _, end = base.partition("-")
-        if start in _UNIX_DOW_NAMES and end in _UNIX_DOW_NAMES:
-            s_idx, e_idx = int(start), int(end)
-            if sep and step.isdigit() and int(step) > 0 and s_idx <= e_idx:
-                days = [_UNIX_DOW_NAMES[str(i)] for i in range(s_idx, e_idx + 1, int(step))]
-                result = ",".join(days)
-            elif start == "0" and end in {"1", "2", "3", "4", "5", "6"}:
-                result = "sun,mon" if end == "1" else f"sun,mon-{_UNIX_DOW_NAMES[end]}"
-            else:
-                result = f"{_UNIX_DOW_NAMES[start]}-{_UNIX_DOW_NAMES[end]}{sep}{step}"
-    elif base in _UNIX_DOW_NAMES:
-        result = f"{_UNIX_DOW_NAMES[base]}{sep}{step}"
-    return result
+        return _expand_dow_range(base, step, item)
+    single = _parse_dow_int(base) % 7
+    return list(range(single, 7, step)) if has_step else [single]
 
 
-def cron_trigger_from_unix_crontab(expr: str) -> CronTrigger:
-    """Build an APScheduler `CronTrigger` from a 5-field UNIX crontab (0=Sunday, 1=Monday..6=Saturday)."""
+def _translate_unix_dow_field(field: str) -> str:
+    """Expand a full UNIX day-of-week cron field to explicit APScheduler day names."""
+    cleaned = field.strip()
+    if cleaned == "*":
+        return "*"
+    indices: list[int] = []
+    for item in cleaned.split(","):
+        indices.extend(_expand_unix_dow_item(item))
+    unique_indices = list(dict.fromkeys(indices))
+    if not unique_indices:
+        raise ValueError(f"Invalid day-of-week field: {field!r}")
+    return ",".join(_UNIX_DOW_NAMES[idx] for idx in unique_indices)
+
+
+def cron_trigger_from_unix_crontab(expr: str) -> BaseTrigger:
+    """Build a UTC APScheduler trigger from a 5-field UNIX crontab (0/7=Sun..6=Sat, DOM|DOW OR)."""
+    from apscheduler.triggers.combining import OrTrigger
     from apscheduler.triggers.cron import CronTrigger
 
     parts = expr.split()
     if len(parts) != 5:
-        return CronTrigger.from_crontab(expr)
-    translated_dow = ",".join(_translate_unix_dow_item(item) for item in parts[4].split(","))
-    translated_expr = f"{parts[0]} {parts[1]} {parts[2]} {parts[3]} {translated_dow}"
-    return CronTrigger.from_crontab(translated_expr)
+        raise ValueError(f"Wrong number of fields; got {len(parts)}, expected 5")
+
+    minute, hour, dom, month, dow = parts
+    translated_dow = _translate_unix_dow_field(dow)
+    if dom != "*" and dow != "*":
+        dom_trigger = CronTrigger.from_crontab(f"{minute} {hour} {dom} {month} *", timezone=UTC)
+        dow_trigger = CronTrigger.from_crontab(
+            f"{minute} {hour} * {month} {translated_dow}",
+            timezone=UTC,
+        )
+        return OrTrigger([dom_trigger, dow_trigger])
+
+    return CronTrigger.from_crontab(
+        f"{minute} {hour} {dom} {month} {translated_dow}",
+        timezone=UTC,
+    )
 
 
 class ExecutionStatus(str, Enum):
@@ -66,6 +118,8 @@ class ExecutionStatus(str, Enum):
 
 class ScheduleCreate(BaseModel):
     """Request model for creating a scheduled download job."""
+
+    model_config = ConfigDict(extra="forbid")
 
     name: str = Field(
         ...,

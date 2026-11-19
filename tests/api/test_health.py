@@ -27,7 +27,10 @@ class TestHealthEndpoint:
         assert "max_concurrent_downloads" not in batch_service
 
         pdf_service = data["services"]["pdf_generation"]
-        assert isinstance(pdf_service["available"], bool)
+        assert pdf_service["available"] is True
+        assert pdf_service["max_concurrent_pdfs"] >= 1
+        assert data["draining"] is False
+        assert data["services"]["job_manager"]["status"] == "disabled"
 
     def test_health_check_with_redis(self, api_client, env_with_redis):
         """Test health check when Redis-backed JobManager is connected."""
@@ -45,7 +48,8 @@ class TestHealthEndpoint:
 
         batch_service = data["services"]["batch_processing"]
         assert batch_service["available"] is True
-        assert "max_concurrent_downloads" in batch_service
+        assert batch_service["max_concurrent_downloads"] >= 1
+        assert data["services"]["job_manager"]["status"] == "connected"
 
     def test_health_endpoint_shows_auth_disabled(self, api_client, env_no_auth):
         """Test health endpoint shows authentication is disabled."""

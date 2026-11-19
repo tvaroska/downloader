@@ -1,7 +1,7 @@
 # Declarative Structural & Security AST Contract (ast-grep)
-# Enforces Ports, Adapters and Contracts boundaries and auth invariants (`R45`, `R46`, `R54`, `R72`):
-# 1. `auth.py` must compare API keys via `secrets.compare_digest`, never `==` / `!=`.
-# 2. `services/` must never import `fastapi` or `starlette`.
+# Enforces Ports, Adapters and Contracts boundaries and auth invariants (`R45`, `R46`, `R54`, `R72`, `R95`):
+# 1. `auth.py` must compare keys/tokens via `secrets.compare_digest`, never `==` / `!=`.
+# 2. Pure core/service/model modules must never import `fastapi`, `starlette`, `redis`, or `playwright`.
 # 3. Core/service modules must never import `main`, `routes`, or `pytest` test hooks.
 # 4. All imports use canonical `downloader.*`, never `src.downloader.*`.
 # 5. `subprocess(..., shell=True)`, `os.system()`, and `eval()` are forbidden in `src/`.
@@ -9,7 +9,7 @@
 id: auth-no-direct-equality-on-keys
 language: Python
 severity: error
-message: "Security violation (R54): API keys/tokens in auth.py must be compared with secrets.compare_digest(), never == or !=."
+message: "Security violation (R54/R95): auth.py must compare values with secrets.compare_digest() or identity/membership checks, never == or !=."
 files:
   - "src/downloader/auth.py"
 metadata:
@@ -17,37 +17,44 @@ metadata:
   invalid_examples:
     - "return api_key == expected"  # pragma: allowlist secret
     - "return expected == api_key"  # pragma: allowlist secret
-    - "if api_key != expected:\n    return False"  # pragma: allowlist secret
-    - "return token == expected"  # pragma: allowlist secret
+    - "if a != b:\n    return False"
+    - "return x == y"
   valid_examples:
     - "return secrets.compare_digest(api_key.encode('utf-8'), expected.encode('utf-8'))"
     - "if expected is None:\n    return True"
-    - "return scheme.lower() == 'bearer'"
+    - "return scheme.lower() in {'bearer'}"
 rule:
   kind: comparison_operator
-  regex: "\\b(api_key|expected|token|secret|credentials)\\b.*(==|!=)|(==|!=).*\\b(api_key|expected|token|secret|credentials)\\b"
+  regex: "(==|!=)"
 ---
 id: services-no-fastapi-imports
 language: Python
 severity: error
-message: "Port violation (R45): src/downloader/services/ must remain transport-agnostic and never import fastapi or starlette."
+message: "Port violation (R45/R95): pure core, model, and service modules must never import fastapi, starlette, redis, or playwright."
 files:
   - "src/downloader/services/**/*.py"
+  - "src/downloader/models/**/*.py"
+  - "src/downloader/ports.py"
+  - "src/downloader/errors.py"
+  - "src/downloader/content_converter.py"
+  - "src/downloader/content_encoding.py"
 metadata:
   test_path: "src/downloader/services/probe.py"
   invalid_examples:
     - "from fastapi import HTTPException, Response"
     - "import fastapi"
     - "from starlette.responses import JSONResponse"
+    - "import redis.asyncio as redis"
+    - "from playwright.async_api import Page"
   valid_examples:
     - "from .content_negotiation import format_to_mime_type"
     - "import json"
 rule:
   any:
     - kind: import_statement
-      regex: "(?s)^import\\s+(.+,\\s*)*(fastapi|starlette)(\\b|\\.)"
+      regex: "(?s)^import\\s+(.+,\\s*)*(fastapi|starlette|redis|playwright)(\\b|\\.)"
     - kind: import_from_statement
-      regex: "(?s)^from\\s+(fastapi|starlette)(\\b|\\.)"
+      regex: "(?s)^from\\s+(fastapi|starlette|redis|playwright)(\\b|\\.)"
 ---
 id: no-main-or-routes-import-in-core
 language: Python

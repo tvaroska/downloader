@@ -19,7 +19,6 @@ class TestBrowserConfig:
         assert config.acquire_timeout == 30.0
         assert config.headless is True
         assert config.close_timeout == 5.0
-        assert config.force_kill_timeout == 2.0
 
     def test_custom_config(self):
         """Test custom configuration values."""
@@ -153,7 +152,7 @@ class TestBrowserPoolProcessManagement:
         mock_browser.is_connected.return_value = True
 
         async def mock_close():
-            raise Exception("Close failed")
+            raise RuntimeError("Close failed")
 
         mock_browser.close = mock_close
 
@@ -200,7 +199,7 @@ class TestBrowserPoolStart:
     async def test_start_handles_launch_failure(self, mock_playwright):
         """Test start() raises BrowserPoolError on launch failure."""
         mock, playwright_instance, mock_browser = mock_playwright
-        playwright_instance.chromium.launch = AsyncMock(side_effect=Exception("Launch failed"))
+        playwright_instance.chromium.launch = AsyncMock(side_effect=RuntimeError("Launch failed"))
 
         pool = BrowserPool()
 
@@ -409,7 +408,7 @@ class TestBrowserPoolHealthCheck:
         pool = BrowserPool()
 
         mock_browser = Mock()
-        mock_browser.is_connected.side_effect = Exception("Connection check failed")
+        mock_browser.is_connected.side_effect = RuntimeError("Connection check failed")
 
         result = await pool._is_browser_healthy(mock_browser)
         assert result is False

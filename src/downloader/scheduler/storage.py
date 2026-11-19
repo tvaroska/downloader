@@ -4,12 +4,9 @@ from __future__ import annotations
 
 import logging
 import time
-from typing import TYPE_CHECKING, Any, cast
+from typing import Any, cast
 
 from ..models.schedule import ScheduleExecution
-
-if TYPE_CHECKING:
-    import redis.asyncio as redis
 
 logger = logging.getLogger(__name__)
 
@@ -19,7 +16,7 @@ DEFAULT_EXECUTION_TTL = 86400
 class ExecutionStorage:
     """Redis storage for scheduled job execution history with TTL expiration."""
 
-    def __init__(self, redis_client: redis.Redis, ttl: int = DEFAULT_EXECUTION_TTL) -> None:
+    def __init__(self, redis_client: Any, ttl: int = DEFAULT_EXECUTION_TTL) -> None:
         self.redis = redis_client
         self.ttl = ttl
 

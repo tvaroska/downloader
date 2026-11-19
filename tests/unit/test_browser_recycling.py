@@ -11,8 +11,8 @@ from downloader.browser.manager import BrowserConfig, BrowserPool
 from downloader.config import reload_settings
 from downloader.pdf_generator import (
     DEFAULT_BROWSER_USER_AGENT,
+    BrowserSession,
     PlaywrightPDFGenerator,
-    _ssrf_route_guard,
     install_ssrf_route_guard,
     resolve_browser_user_agent,
 )
@@ -59,7 +59,7 @@ class TestBrowserPoolMaxUsesRecycling:
 
                 assert pool._recycled_count == 1
                 assert pool.config.max_uses_per_browser == 2
-                assert pool._available_browsers.qsize() == 1
+                assert pool.available_count == 1
                 assert len(launched_browsers) == 2
                 first_browser.close.assert_awaited_once()
 
@@ -76,8 +76,12 @@ class TestBrowserPoolMaxUsesRecycling:
 class TestPlaywrightIdleScaleToZero:
     """Tests for PlaywrightPDFGenerator idle_timeout scale-to-zero and lazy restart."""
 
-    async def test_scales_pool_to_none_after_idle_timeout_and_restarts_lazily(self) -> None:
+    async def test_scales_pool_to_none_after_idle_timeout_and_restarts_lazily(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
         created_pools: list[AsyncMock] = []
+        now = [1000.0]
+        monkeypatch.setattr("downloader.pdf_generator.time.monotonic", lambda: now[0])
 
         def _make_pool(*_args, **_kwargs) -> AsyncMock:
             p = AsyncMock()
@@ -87,40 +91,52 @@ class TestPlaywrightIdleScaleToZero:
             browser.is_connected = MagicMock(return_value=True)
             context = AsyncMock()
             context.route = AsyncMock()
+            context.on = MagicMock()
+            context.new_page = AsyncMock(return_value=AsyncMock())
             context.close = AsyncMock()
-            browser.new_context = AsyncMock(return_value=context)
             p.get_browser = AsyncMock(return_value=browser)
+            p.create_context = AsyncMock(return_value=context)
             p.release_browser = AsyncMock()
             created_pools.append(p)
             return p
 
         with patch("downloader.pdf_generator.BrowserPool", side_effect=_make_pool):
-            gen = PlaywrightPDFGenerator(pool_size=2, max_uses_per_browser=25, idle_timeout=0.1)
+            gen = PlaywrightPDFGenerator(pool_size=2, max_uses_per_browser=25, idle_timeout=10.0)
             try:
                 assert gen.pool is None
 
-                # Lazy start on first use
                 pool_1 = await gen.ensure_started()
                 assert gen.pool is pool_1
                 assert len(created_pools) == 1
                 pool_1.start.assert_awaited_once()
 
-                # Wait past 0.1s idle_timeout (reaper checks every 0.05s)
-                for _ in range(12):
-                    if gen.pool is None:
-                        break
-                    await asyncio.sleep(0.03)
+                # Advance virtual clock past idle_timeout and invoke one reaper tick deterministically.
+                now[0] += 15.0
+                if gen._idle_task is not None:
+                    gen._idle_task.cancel()
+                    with pytest.raises(asyncio.CancelledError):
+                        await gen._idle_task
+                    gen._idle_task = None
+                async with gen._start_lock:
+                    idle_for = now[0] - gen._last_used_at
+                    if (
+                        gen.pool is not None
+                        and gen._active_contexts == 0
+                        and idle_for >= gen.idle_timeout
+                    ):
+                        stale_pool = gen.pool
+                        gen.pool = None
+                        await stale_pool.close()
 
                 assert gen.pool is None
                 pool_1.close.assert_awaited_once()
 
-                # Next call lazily starts a brand-new pool
-                async with gen._get_browser_context() as (_browser, _ctx):
-                    assert gen.pool is not None
+                # Next BrowserSession lazily starts a brand-new pool and holds active_contexts > 0.
+                async with BrowserSession(gen):
                     assert gen.pool is created_pools[1]
                     assert len(created_pools) == 2
-                    # Active context prevents idle reaping even while sleeping > idle_timeout
-                    await asyncio.sleep(0.15)
+                    now[0] += 25.0
+                    assert gen._active_contexts == 1
                     assert gen.pool is created_pools[1]
             finally:
                 await gen.close()
@@ -129,6 +145,13 @@ class TestPlaywrightIdleScaleToZero:
 @pytest.mark.unit
 class TestPlaywrightSSRFRouteGuard:
     """Tests for Playwright context.route('**/*', ...) SSRF and scheme guard."""
+
+    async def _get_registered_handler(self):
+        context = AsyncMock()
+        context.on = MagicMock()
+        await install_ssrf_route_guard(context)
+        assert context.route.await_args is not None
+        return context.route.await_args.args[1]
 
     @pytest.mark.parametrize(
         "blocked_url",
@@ -141,11 +164,12 @@ class TestPlaywrightSSRFRouteGuard:
         ],
     )
     async def test_aborts_ssrf_and_disallowed_scheme_requests(self, blocked_url: str) -> None:
+        handler = await self._get_registered_handler()
         route = AsyncMock()
         route.request = MagicMock()
         route.request.url = blocked_url
 
-        await _ssrf_route_guard(route)
+        await handler(route)
 
         route.abort.assert_awaited_once_with("accessdenied")
         route.continue_.assert_not_awaited()
@@ -161,11 +185,12 @@ class TestPlaywrightSSRFRouteGuard:
         ],
     )
     async def test_continues_public_https_and_inline_schemes(self, allowed_url: str) -> None:
+        handler = await self._get_registered_handler()
         route = AsyncMock()
         route.request = MagicMock()
         route.request.url = allowed_url
 
-        await _ssrf_route_guard(route)
+        await handler(route)
 
         route.continue_.assert_awaited_once()
         route.abort.assert_not_awaited()
@@ -174,16 +199,18 @@ class TestPlaywrightSSRFRouteGuard:
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         context = AsyncMock()
+        context.on = MagicMock()
         await install_ssrf_route_guard(context)
-        context.route.assert_awaited_once_with("**/*", _ssrf_route_guard)
+        context.route.assert_awaited_once()
+        assert context.route.await_args is not None
+        assert context.route.await_args.args[0] == "**/*"
+        assert callable(context.route.await_args.args[1])
 
-        # Default browser UA when USER_AGENT is not explicitly overridden
         monkeypatch.delenv("USER_AGENT", raising=False)
         reload_settings()
         assert resolve_browser_user_agent(None) == DEFAULT_BROWSER_USER_AGENT
         assert resolve_browser_user_agent("ExplicitBot/3.0") == "ExplicitBot/3.0"
 
-        # Explicit USER_AGENT env var propagates to browser contexts
         monkeypatch.setenv("USER_AGENT", "CustomCrawler/0.6")
         reload_settings()
         try:
@@ -194,10 +221,10 @@ class TestPlaywrightSSRFRouteGuard:
 
 
 @pytest.mark.unit
-async def test_cancel_during_context_close_still_releases_browser() -> None:
+async def test_cancel_during_context_close_still_releases_browser(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     """R28: Cancelling during ctx.close() must still release the browser and decrement active count."""
-    from downloader.pdf_generator import BrowserSession
-
     close_started = asyncio.Event()
     close_finish = asyncio.Event()
 
@@ -209,6 +236,7 @@ async def test_cancel_during_context_close_still_releases_browser() -> None:
     mock_context = AsyncMock()
     mock_context.new_page = AsyncMock(return_value=mock_page)
     mock_context.route = AsyncMock()
+    mock_context.on = MagicMock()
     mock_context.close = AsyncMock(side_effect=_slow_close)
 
     mock_browser = MagicMock()
@@ -219,7 +247,7 @@ async def test_cancel_during_context_close_still_releases_browser() -> None:
 
     gen = PlaywrightPDFGenerator(pool_size=1, idle_timeout=0.0)
     gen.pool = mock_pool
-    gen.ensure_started = AsyncMock(return_value=mock_pool)  # type: ignore[method-assign]
+    monkeypatch.setattr(gen, "ensure_started", AsyncMock(return_value=mock_pool))
 
     async def _run_session() -> None:
         async with BrowserSession(gen):

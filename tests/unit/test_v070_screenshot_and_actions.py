@@ -23,68 +23,7 @@ from downloader.dependencies import get_domain_throttle, get_http_client, get_ro
 from downloader.main import app
 from downloader.models.responses import BatchURLRequest
 from downloader.services.batch_processor import process_single_url_in_batch
-
-
-class _FakeLocator:
-    def __init__(self, log: list[tuple[str, object]]) -> None:
-        self._log = log
-
-    @property
-    def first(self) -> _FakeLocator:
-        return self
-
-    async def scroll_into_view_if_needed(self, *, timeout: int = 5000) -> None:
-        self._log.append(("scroll_into_view", timeout))
-
-
-class _FakeKeyboard:
-    def __init__(self, log: list[tuple[str, object]]) -> None:
-        self._log = log
-
-    async def press(self, key: str) -> None:
-        self._log.append(("keyboard.press", key))
-
-
-class _FakeMouse:
-    def __init__(self, log: list[tuple[str, object]]) -> None:
-        self._log = log
-
-    async def wheel(self, x: int, y: int) -> None:
-        self._log.append(("mouse.wheel", (x, y)))
-
-
-class _FakePage:
-    def __init__(self) -> None:
-        self.log: list[tuple[str, object]] = []
-        self.keyboard = _FakeKeyboard(self.log)
-        self.mouse = _FakeMouse(self.log)
-
-    async def click(self, selector: str, *, timeout: int = 5000) -> None:
-        self.log.append(("click", selector))
-
-    async def fill(self, selector: str, value: str, *, timeout: int = 5000) -> None:
-        self.log.append(("fill", (selector, value)))
-
-    async def select_option(self, selector: str, value: str, *, timeout: int = 5000) -> None:
-        self.log.append(("select", (selector, value)))
-
-    async def press(self, selector: str, key: str, *, timeout: int = 5000) -> None:
-        self.log.append(("press", (selector, key)))
-
-    async def hover(self, selector: str, *, timeout: int = 5000) -> None:
-        self.log.append(("hover", selector))
-
-    def locator(self, selector: str) -> _FakeLocator:
-        self.log.append(("locator", selector))
-        return _FakeLocator(self.log)
-
-    async def wait_for_selector(
-        self, selector: str, *, timeout: int = 5000, state: str = "visible"
-    ) -> None:
-        self.log.append(("wait_for_selector", (selector, state)))
-
-    async def wait_for_timeout(self, duration_ms: int) -> None:
-        self.log.append(("wait", duration_ms))
+from tests.fixtures.playwright_fakes import FakePage
 
 
 class TestBrowserActionValidationAndExecution:
@@ -114,7 +53,7 @@ class TestBrowserActionValidationAndExecution:
             parse_actions_param(json.dumps(too_many))
 
     async def test_execute_all_allowlisted_actions(self) -> None:
-        page = _FakePage()
+        page = FakePage()
         actions = parse_actions_param(
             json.dumps(
                 [
@@ -133,7 +72,7 @@ class TestBrowserActionValidationAndExecution:
         )
         executed = await execute_browser_actions(page, actions)
         assert executed == 10
-        assert [entry[0] for entry in page.log] == [
+        assert [entry[0] for entry in page.calls] == [
             "click",
             "fill",
             "select",
@@ -147,9 +86,13 @@ class TestBrowserActionValidationAndExecution:
             "wait",
         ]
 
-    async def test_execute_browser_actions_wraps_timeout(self) -> None:
-        page = _FakePage()
-        page.click = AsyncMock(side_effect=TimeoutError("element never appeared"))  # type: ignore[method-assign]
+    async def test_execute_browser_actions_wraps_timeout(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        page = FakePage()
+        monkeypatch.setattr(
+            page, "click", AsyncMock(side_effect=TimeoutError("element never appeared"))
+        )
         with pytest.raises(BrowserActionError, match="timed out"):
             await execute_browser_actions(
                 page, [BrowserAction(type="click", selector="#missing", timeout_ms=200)]
@@ -274,7 +217,7 @@ class TestScreenshotAndRenderEndpoints:
                 new=AsyncMock(return_value="https://example.com"),
             ),
             patch(
-                "downloader.content_converter.render_html_with_playwright",
+                "downloader.browser.renderer.render_html_with_playwright",
                 new=AsyncMock(return_value=b"<html><body><h1>Clicked!</h1></body></html>"),
             ) as mock_render,
             TestClient(app) as client,
@@ -305,7 +248,7 @@ class TestScreenshotAndRenderEndpoints:
                 new=AsyncMock(return_value="https://example.com"),
             ),
             patch(
-                "downloader.content_converter.render_html_with_playwright",
+                "downloader.browser.renderer.render_html_with_playwright",
                 new=AsyncMock(return_value=b"<html><body><h1>App</h1><p>Done</p></body></html>"),
             ),
             patch(
@@ -362,7 +305,7 @@ class TestScreenshotAndRenderEndpoints:
                 new=AsyncMock(return_value="https://example.com"),
             ),
             patch(
-                "downloader.content_converter.render_html_with_playwright",
+                "downloader.browser.renderer.render_html_with_playwright",
                 new=AsyncMock(side_effect=SelectorTimeoutError("#never", 5000)),
             ),
             TestClient(app) as client,
@@ -379,7 +322,7 @@ class TestScreenshotAndRenderEndpoints:
                 new=AsyncMock(return_value="https://example.com"),
             ),
             patch(
-                "downloader.content_converter.render_html_with_playwright",
+                "downloader.browser.renderer.render_html_with_playwright",
                 new=AsyncMock(side_effect=BrowserActionError("click failed")),
             ),
             TestClient(app) as client,
@@ -418,7 +361,7 @@ class TestScreenshotAndRenderEndpoints:
                 new=AsyncMock(return_value=b"\xff\xd8\xffJPEG"),
             ),
             patch(
-                "downloader.content_converter.render_html_with_playwright",
+                "downloader.browser.renderer.render_html_with_playwright",
                 new=AsyncMock(return_value=b"<html><body><h2>Expanded</h2></body></html>"),
             ),
         ):
@@ -437,7 +380,9 @@ class TestScreenshotAndRenderEndpoints:
 
 
 @pytest.mark.unit
-async def test_pdf_and_screenshot_action_errors_map_to_400_and_408() -> None:
+async def test_pdf_and_screenshot_action_errors_map_to_400_and_408(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     """R27: Failed actions and selector waits on PDF/screenshot map to 400 and 408, never 500."""
     from playwright.async_api import Error as PlaywrightError
     from playwright.async_api import TimeoutError as PlaywrightTimeoutError
@@ -449,6 +394,7 @@ async def test_pdf_and_screenshot_action_errors_map_to_400_and_408() -> None:
         context = AsyncMock()
         context.new_page = AsyncMock(return_value=page)
         context.route = AsyncMock()
+        context.on = MagicMock()
         context.close = AsyncMock()
 
         pool = MagicMock()
@@ -458,7 +404,7 @@ async def test_pdf_and_screenshot_action_errors_map_to_400_and_408() -> None:
 
         gen = PlaywrightPDFGenerator(pool_size=1, idle_timeout=0.0)
         gen.pool = pool
-        gen.ensure_started = AsyncMock(return_value=pool)  # type: ignore[method-assign]
+        monkeypatch.setattr(gen, "ensure_started", AsyncMock(return_value=pool))
         return gen
 
     # 1. Failed action on PDF & screenshot -> BrowserActionError -> 400

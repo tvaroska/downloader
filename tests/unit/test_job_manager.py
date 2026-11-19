@@ -12,8 +12,6 @@ from downloader.job_manager import (
     JobManager,
     JobResult,
     JobStatus,
-    cleanup_job_manager,
-    get_job_manager,
 )
 from tests.fixtures.mock_fixtures import MockPipeline
 
@@ -80,8 +78,9 @@ def _make_kv_job_manager() -> tuple[JobManager, AsyncMock, AsyncMock]:
         def multi(self) -> None:
             return None
 
-        async def setex(self, key: str, _ttl: int, value: str) -> None:
+        def setex(self, key: str, _ttl: int, value: str) -> "_Pipe":
             self._ops.append((key, value))
+            return self
 
         async def execute(self) -> list[bool]:
             for k, v in self._ops:
@@ -512,7 +511,7 @@ class TestJobManagerRetryLogic:
             def __init__(self):
                 self.watch = AsyncMock()
                 self.multi = MagicMock()
-                self.setex = AsyncMock()
+                self.setex = MagicMock()
 
             async def __aenter__(self):
                 return self
@@ -555,7 +554,7 @@ class TestJobManagerRetryLogic:
             def __init__(self):
                 self.watch = AsyncMock()
                 self.multi = MagicMock()
-                self.setex = AsyncMock()
+                self.setex = MagicMock()
 
             async def __aenter__(self):
                 return self
@@ -635,9 +634,10 @@ class TestJobManagerBackgroundLifecycle:
 
         async def capture_status(*args, **kwargs):
             status_updates.append(args[1] if len(args) > 1 else kwargs.get("status"))
+            return True
 
         job_manager.update_job_status = AsyncMock(side_effect=capture_status)
-        job_manager.store_job_results = AsyncMock()
+        job_manager.complete_job = AsyncMock(return_value=True)
 
         async def processor(job_id):
             return [{"result": "success"}], {"total": 1}
@@ -647,8 +647,7 @@ class TestJobManagerBackgroundLifecycle:
 
         # Verify lifecycle
         assert JobStatus.RUNNING in status_updates
-        assert JobStatus.COMPLETED in status_updates
-        job_manager.store_job_results.assert_called_once()
+        job_manager.complete_job.assert_awaited_once()
 
     @pytest.mark.asyncio
     async def test_background_job_failure_sets_failed_status(self, job_manager, mock_redis_client):
@@ -669,6 +668,7 @@ class TestJobManagerBackgroundLifecycle:
             status_updates.append(status)
             if "error_message" in kwargs:
                 error_messages.append(kwargs["error_message"])
+            return True
 
         job_manager.update_job_status = AsyncMock(side_effect=capture_status)
 
@@ -697,6 +697,7 @@ class TestJobManagerBackgroundLifecycle:
 
         async def capture_status(job_id, status, **kwargs):
             status_updates.append(status)
+            return True
 
         job_manager.update_job_status = AsyncMock(side_effect=capture_status)
 
@@ -725,8 +726,8 @@ class TestJobManagerBackgroundLifecycle:
         )
         mock_redis_client.get.return_value = job_info.model_dump_json()
 
-        job_manager.update_job_status = AsyncMock()
-        job_manager.store_job_results = AsyncMock()
+        job_manager.update_job_status = AsyncMock(return_value=True)
+        job_manager.complete_job = AsyncMock(return_value=True)
 
         async def processor(job_id):
             return [], {}
@@ -811,6 +812,109 @@ class TestJobManagerBackgroundLifecycle:
         assert info is not None
         assert info.status == JobStatus.COMPLETED
         assert info.results_available is True
+
+    @pytest.mark.asyncio
+    async def test_cancelled_job_sends_no_completed_webhook_or_result_blob(self):
+        """A job cancelled in-flight must store no completed blob and send no completed webhook (`R84`)."""
+        manager, _, _ = _make_kv_job_manager()
+        job_id = await manager.create_job({"urls": [{"url": "https://example.com"}]})
+        req = MagicMock()
+        req.webhook_url = "https://hooks.example.com/batch"
+
+        async def _processor(jid: str, _req):
+            # Simulate concurrent cancel landing in Redis before processor returns.
+            await manager.update_job_status(jid, JobStatus.CANCELLED)
+            return [{"url": "https://example.com", "success": True}], {
+                "total_requests": 1,
+                "successful_requests": 1,
+                "failed_requests": 0,
+                "total_duration": 0.1,
+            }
+
+        with patch(
+            "downloader.services.batch_processor.notify_batch_webhook",
+            new=AsyncMock(),
+        ) as mock_hook:
+            task = await manager.start_background_job(job_id, _processor, req)
+            await task
+
+        info = await manager.get_job_info(job_id)
+        assert info is not None
+        assert info.status == JobStatus.CANCELLED
+        assert info.results_available is False
+        assert await manager.get_job_results(job_id) is None
+        mock_hook.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_failed_status_keeps_results_available_false(self):
+        """Terminal FAILED status sets `results_available = False` (`R84`)."""
+        manager, _, _ = _make_kv_job_manager()
+        job_id = await manager.create_job({"urls": [{"url": "https://example.com"}]})
+        assert await manager.update_job_status(job_id, JobStatus.RUNNING) is True
+        assert (
+            await manager.update_job_status(job_id, JobStatus.FAILED, error_message="boom") is True
+        )
+        info = await manager.get_job_info(job_id)
+        assert info is not None
+        assert info.status == JobStatus.FAILED
+        assert info.results_available is False
+
+    @pytest.mark.asyncio
+    async def test_complete_job_payload_cap_updates_summary_and_counters(self):
+        """Oversized batch result truncation updates `summary` and `JobInfo` counts (`R113`)."""
+        manager, _, _ = _make_kv_job_manager()
+        job_id = await manager.create_job(
+            {"urls": [{"url": "https://example.com/1"}, {"url": "https://example.com/2"}]}
+        )
+        await manager.update_job_status(job_id, JobStatus.RUNNING)
+        results = [
+            {"url": "https://example.com/1", "success": True, "content": "A" * 4000},
+            {"url": "https://example.com/2", "success": True, "content": "B" * 4000},
+        ]
+        summary = {
+            "total_requests": 2,
+            "successful_requests": 2,
+            "failed_requests": 0,
+            "success_rate": 100.0,
+        }
+        applied = await manager.complete_job(job_id, results, summary, max_result_bytes=1200)
+        assert applied is True
+        stored = await manager.get_job_results(job_id)
+        info = await manager.get_job_info(job_id)
+        assert stored is not None and info is not None
+        assert stored.summary["failed_requests"] >= 1
+        assert stored.summary["successful_requests"] + stored.summary["failed_requests"] == 2
+        assert info.successful_urls == stored.summary["successful_requests"]
+        assert info.failed_urls == stored.summary["failed_requests"]
+        assert any(r.get("error_type") == "content_too_large" for r in stored.results)
+
+    @pytest.mark.asyncio
+    async def test_wait_for_active_jobs_tracks_in_flight_webhook(self):
+        """`wait_for_active_jobs` awaits in-flight webhook delivery tasks (`R100`)."""
+        manager, _, _ = _make_kv_job_manager()
+        job_id = await manager.create_job({"urls": [{"url": "https://example.com"}]})
+        req = MagicMock()
+        req.webhook_url = "https://hooks.example.com/batch"
+        webhook_started = asyncio.Event()
+        release_webhook = asyncio.Event()
+
+        async def _slow_webhook(*_args, **_kwargs):
+            webhook_started.set()
+            await release_webhook.wait()
+
+        async def _processor(_jid: str, _req):
+            return [{"url": "https://example.com", "success": True}], {"total_duration": 0.1}
+
+        with patch(
+            "downloader.services.batch_processor.notify_batch_webhook",
+            new=AsyncMock(side_effect=_slow_webhook),
+        ):
+            task = await manager.start_background_job(job_id, _processor, req)
+            await webhook_started.wait()
+            assert await manager.wait_for_active_jobs(0.01) is False
+            release_webhook.set()
+            assert await manager.wait_for_active_jobs(1.0) is True
+            await task
 
 
 # =============================================================================
@@ -897,120 +1001,3 @@ class TestJobManagerHealthMonitoring:
         assert stats["status"] == "healthy"
         assert stats["pool_size"] == 20
         assert "health_check_interval" in stats
-
-    @pytest.mark.asyncio
-    async def test_cleanup_expired_jobs_removes_done_tasks(
-        self, job_manager_with_pool, mock_redis_client
-    ):
-        """Test cleanup_expired_jobs removes completed task references."""
-        job_manager_with_pool._check_redis_health = AsyncMock(return_value=True)
-
-        # Create a done task
-        async def instant():
-            return "done"
-
-        task = asyncio.create_task(instant())
-        await asyncio.sleep(0)  # Let it complete
-        job_manager_with_pool._background_tasks["done_job"] = task
-
-        # Create a running task
-        running_event = asyncio.Event()
-
-        async def wait_task():
-            await running_event.wait()
-
-        running_task = asyncio.create_task(wait_task())
-        job_manager_with_pool._background_tasks["running_job"] = running_task
-
-        await job_manager_with_pool.cleanup_expired_jobs()
-
-        # Done task should be cleaned up
-        assert "done_job" not in job_manager_with_pool._background_tasks
-        # Running task should remain
-        assert "running_job" in job_manager_with_pool._background_tasks
-
-        # Cleanup
-        running_event.set()
-        await running_task
-
-    @pytest.mark.asyncio
-    async def test_cleanup_expired_jobs_skips_on_health_failure(
-        self, job_manager_with_pool, mock_redis_client
-    ):
-        """Test cleanup is skipped when health check fails."""
-        job_manager_with_pool._check_redis_health = AsyncMock(return_value=False)
-
-        # Add a done task
-        async def instant():
-            return "done"
-
-        task = asyncio.create_task(instant())
-        await asyncio.sleep(0)
-        job_manager_with_pool._background_tasks["done_job"] = task
-
-        await job_manager_with_pool.cleanup_expired_jobs()
-
-        # Should not be cleaned up due to health check failure
-        assert "done_job" in job_manager_with_pool._background_tasks
-
-
-# =============================================================================
-# Global Singleton Tests
-# =============================================================================
-
-
-class TestJobManagerSingleton:
-    """Tests for global get_job_manager and cleanup_job_manager."""
-
-    @pytest.mark.asyncio
-    async def test_get_job_manager_creates_instance(self):
-        """Test get_job_manager creates and connects instance."""
-        import downloader.job_manager as jm
-
-        original = jm._job_manager
-        jm._job_manager = None
-
-        try:
-            with patch.object(JobManager, "connect", new_callable=AsyncMock) as mock_connect:
-                with patch.dict("os.environ", {"REDIS_URI": "redis://test:6379"}):
-                    manager = await get_job_manager()
-
-                    assert manager is not None
-                    mock_connect.assert_called_once()
-        finally:
-            if jm._job_manager:
-                jm._job_manager.redis_client = None  # Prevent actual disconnect
-            jm._job_manager = original
-
-    @pytest.mark.asyncio
-    async def test_get_job_manager_returns_existing(self):
-        """Test get_job_manager returns existing instance."""
-        import downloader.job_manager as jm
-
-        original = jm._job_manager
-        mock_manager = MagicMock()
-        jm._job_manager = mock_manager
-
-        try:
-            result = await get_job_manager()
-            assert result is mock_manager
-        finally:
-            jm._job_manager = original
-
-    @pytest.mark.asyncio
-    async def test_cleanup_job_manager_disconnects(self):
-        """Test cleanup_job_manager disconnects and clears global."""
-        import downloader.job_manager as jm
-
-        original = jm._job_manager
-        mock_manager = AsyncMock()
-        mock_manager.disconnect = AsyncMock()
-        jm._job_manager = mock_manager
-
-        try:
-            await cleanup_job_manager()
-
-            mock_manager.disconnect.assert_called_once()
-            assert jm._job_manager is None
-        finally:
-            jm._job_manager = original

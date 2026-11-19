@@ -18,14 +18,16 @@ from playwright.async_api import (
     Error as PlaywrightError,
 )
 
+from ..ports import (
+    BrowserAcquireTimeoutError as BrowserAcquireTimeoutError,
+)
+from ..ports import (
+    BrowserPoolError as BrowserPoolError,
+)
 from ..validation import EgressPolicy
 from .egress_proxy import BrowserEgressProxy
 
 logger = logging.getLogger(__name__)
-
-
-class BrowserPoolError(Exception):
-    """Raised when browser pool operations fail."""
 
 
 @dataclass
@@ -37,7 +39,6 @@ class BrowserConfig:
     acquire_timeout: float = 30.0
     headless: bool = True
     close_timeout: float = 5.0
-    force_kill_timeout: float = 2.0
     max_uses_per_browser: int = 50
 
     launch_args: list[str] = field(
@@ -94,6 +95,21 @@ class BrowserPool:
         """Return configured browser pool size."""
         return self.config.pool_size
 
+    @property
+    def available_count(self) -> int:
+        """Return the number of idle browsers currently available in the pool."""
+        return 0 if self._closed else max(0, self._available_browsers.qsize())
+
+    @property
+    def active_browser_count(self) -> int:
+        """Return total tracked browser instances currently managed by this pool."""
+        return len(self._all_browsers)
+
+    @property
+    def is_closed(self) -> bool:
+        """Return True once the pool has been closed."""
+        return self._closed
+
     async def start(self) -> None:
         """Initialize the browser pool and loopback SSRF egress proxy."""
         try:
@@ -118,8 +134,7 @@ class BrowserPool:
                 f"Browser pool initialized with {self.config.pool_size} browsers "
                 f"(memory limit: {self.config.memory_limit_mb}MB)"
             )
-        except Exception as exc:  # noqa: BLE001
-            # Roll back partially started browsers, driver, and proxy on any startup error.
+        except (PlaywrightError, BrowserPoolError, OSError, RuntimeError, ValueError) as exc:
             for started_browser in list(self._all_browsers):
                 await self._close_browser_with_timeout(started_browser)
             self._all_browsers.clear()
@@ -165,8 +180,7 @@ class BrowserPool:
                 return True
         except TimeoutError:
             logger.warning(f"Browser close timed out after {self.config.close_timeout}s")
-        except Exception as exc:  # noqa: BLE001
-            # Disconnected Playwright transports or test doubles can raise arbitrary close errors.
+        except (PlaywrightError, BrowserPoolError, OSError, RuntimeError, ValueError) as exc:
             logger.warning(f"Browser close failed: {exc}")
 
         return False
@@ -210,7 +224,7 @@ class BrowserPool:
                 self._browser_health[browser]["last_used"] = asyncio.get_running_loop().time()
             return browser
         except TimeoutError as exc:
-            raise BrowserPoolError(
+            raise BrowserAcquireTimeoutError(
                 f"No browser available within timeout ({self.config.acquire_timeout}s)"
             ) from exc
         except (PlaywrightError, RuntimeError, OSError) as exc:
@@ -247,8 +261,7 @@ class BrowserPool:
         """Check whether a browser instance remains connected."""
         try:
             return bool(browser.is_connected())
-        except Exception:  # noqa: BLE001
-            # Treat any broken transport/mock inspection failure as an unhealthy browser.
+        except (PlaywrightError, BrowserPoolError, OSError, RuntimeError, ValueError):
             return False
 
     async def _replace_browser(self, old_browser: Browser) -> None:
@@ -274,8 +287,7 @@ class BrowserPool:
             }
             await self._available_browsers.put(new_browser)
             logger.info("Successfully replaced unhealthy browser")
-        except Exception as exc:  # noqa: BLE001
-            # Never propagate replacement launch failures out of finally/release cleanup.
+        except (PlaywrightError, BrowserPoolError, OSError, RuntimeError, ValueError) as exc:
             logger.error(f"Failed to replace browser: {exc}")
 
     async def close(self) -> None:

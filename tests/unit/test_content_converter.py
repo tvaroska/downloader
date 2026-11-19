@@ -10,8 +10,13 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import pytest
 from fastapi.testclient import TestClient
 
+from downloader.browser.renderer import (
+    LocalBrowserRenderer,
+    RemoteBrowserRenderer,
+    render_html_with_playwright,
+)
 from downloader.config import Settings
-from downloader.content_converter import convert_content, render_html_with_playwright
+from downloader.content_converter import convert_content
 from downloader.dependencies import (
     get_browser_renderer,
     get_domain_throttle,
@@ -23,18 +28,13 @@ from downloader.job_manager import JobStatus
 from downloader.main import app
 from downloader.models.responses import ResponseMetadata
 from downloader.pdf_generator import PlaywrightPDFGenerator, install_ssrf_route_guard
-from downloader.ports import (
-    BrowserRenderer,
-    InMemoryJobStore,
-    InMemoryWorkQueue,
-    LocalBrowserRenderer,
-    RemoteBrowserRenderer,
-)
+from downloader.ports import BrowserRenderer
 from downloader.ratelimit_middleware import RateLimitMiddleware, reset_rate_limiter
 from downloader.services.content_processor import ConversionDeps, ConversionRequest, convert
 from downloader.services.multi_format import MultiFormatRequest, process_multiple_formats
 from downloader.validation import EgressPolicy
 from downloader.worker_queue import BrowserTaskResponse
+from tests.fixtures.in_memory_ports import InMemoryJobStore, InMemoryWorkQueue
 
 
 @pytest.mark.unit
@@ -143,6 +143,70 @@ async def test_rendered_output_size_cap_enforced_across_html_pdf_and_screenshot(
 
 
 @pytest.mark.unit
+async def test_rendered_output_exactly_at_cap_is_accepted() -> None:
+    """Exact `max_download_size` rendered bytes pass while `cap + 1` raises (`R93`)."""
+    cap = 128
+    html_exact = (
+        "<html><body>" + ("A" * (cap - len("<html><body></body></html>"))) + "</body></html>"
+    )
+    assert len(html_exact.encode("utf-8")) == cap
+    pdf_exact = b"%PDF-" + (b"0" * (cap - 5))
+    png_exact = b"\x89PNG" + (b"0" * (cap - 4))
+    assert len(pdf_exact) == cap
+    assert len(png_exact) == cap
+
+    page = AsyncMock()
+    page.url = "https://example.com/exact"
+    page.goto = AsyncMock(return_value=MagicMock(status=200, status_text="OK", request=None))
+    page.wait_for_load_state = AsyncMock()
+    page.query_selector_all = AsyncMock(return_value=[])
+    page.content = AsyncMock(return_value=html_exact)
+    page.pdf = AsyncMock(return_value=pdf_exact)
+    page.screenshot = AsyncMock(return_value=png_exact)
+
+    context = AsyncMock()
+    context.route = AsyncMock()
+    context.on = MagicMock()
+    context.new_page = AsyncMock(return_value=page)
+    context.close = AsyncMock()
+
+    pool = AsyncMock()
+    pool.get_browser = AsyncMock(return_value=MagicMock())
+    pool.create_context = AsyncMock(return_value=context)
+    pool.release_browser = AsyncMock()
+
+    cfg = Settings()
+    cfg.content.max_download_size = cap
+    policy = EgressPolicy(cfg)
+    gen = PlaywrightPDFGenerator(pool_size=1, egress_policy=policy)
+    gen.pool = pool
+
+    assert (
+        len(
+            await render_html_with_playwright(
+                "https://example.com/exact", generator=gen, egress_policy=policy
+            )
+        )
+        == cap
+    )
+    assert len(await gen.generate_pdf("https://example.com/exact")) == cap
+    assert len(await gen.generate_screenshot("https://example.com/exact")) == cap
+
+    # One byte above cap must be rejected across all three rendered formats.
+    page.content = AsyncMock(return_value=html_exact + "Z")
+    page.pdf = AsyncMock(return_value=pdf_exact + b"0")
+    page.screenshot = AsyncMock(return_value=png_exact + b"0")
+    with pytest.raises(ContentTooLargeError):
+        await render_html_with_playwright(
+            "https://example.com/exact", generator=gen, egress_policy=policy
+        )
+    with pytest.raises(ContentTooLargeError):
+        await gen.generate_pdf("https://example.com/exact")
+    with pytest.raises(ContentTooLargeError):
+        await gen.generate_screenshot("https://example.com/exact")
+
+
+@pytest.mark.unit
 async def test_install_ssrf_route_guard_requires_callable_route() -> None:
     """Reject contexts lacking `.route` instead of silently skipping SSRF interception (`R46`)."""
 
@@ -158,17 +222,18 @@ def test_ratelimit_ignores_xff_when_client_is_none(
     caplog: pytest.LogCaptureFixture,
 ) -> None:
     """Do not trust spoofed `X-Forwarded-For` when `request.client` is `None`, and log reset failures (`R58`)."""
-    from slowapi import Limiter
-
-    limiter = Limiter(key_func=lambda _req: "fallback-peer")
-    mw = RateLimitMiddleware(app, limiter)
+    mw = RateLimitMiddleware(app)
 
     fake_request = MagicMock()
     fake_request.client = None
     fake_request.headers = {"x-forwarded-for": "203.0.113.99"}
 
-    cfg = Settings()
-    assert mw._resolve_client_ip(fake_request, cfg) == "fallback-peer"
+    assert mw._resolve_client_ip(fake_request) == "unknown"
+
+    stub_limiter = MagicMock()
+    stub_limiter._key_func = lambda _req: "fallback-peer"
+    mw_with_fallback = RateLimitMiddleware(app, stub_limiter)
+    assert mw_with_fallback._resolve_client_ip(fake_request) == "fallback-peer"
 
     from limits.storage import MemoryStorage as SyncMemoryStorage
 
@@ -299,9 +364,9 @@ async def test_in_memory_ports_and_remote_browser_renderer_parity() -> None:
     assert (await queue.get_queue_depths())["batch_processing"] == 0
 
     await queue.publish_heartbeat("worker-1", {"pid": 123}, ttl=30)
-    assert len(await queue.list_active_workers()) == 1
+    assert await queue.has_heartbeat("worker-1") is True
     await queue.remove_heartbeat("worker-1")
-    assert await queue.list_active_workers() == []
+    assert await queue.has_heartbeat("worker-1") is False
 
     # Drive RemoteBrowserRenderer against InMemoryWorkQueue worker consumer coroutine
     remote = RemoteBrowserRenderer(queue, timeout=5.0, max_output_bytes=1024)

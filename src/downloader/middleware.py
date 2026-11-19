@@ -37,8 +37,6 @@ _PREFIX_METRIC_PATHS: tuple[tuple[str, str], ...] = (
     ("/batch", "/batch"),
     ("/metrics/", "/metrics"),
     ("/jobs/", "/jobs/{job_id}"),
-    ("/status/", "/status/{job_id}"),
-    ("/results/", "/results/{job_id}"),
 )
 
 
@@ -121,7 +119,8 @@ class SystemMetricsCollector:
                 await asyncio.sleep(30)
             except asyncio.CancelledError:
                 break
-            except (redis_exc.RedisError, OSError, RuntimeError, ValueError, TypeError) as exc:
+            except Exception as exc:  # noqa: BLE001
+                # Isolate unexpected gauge errors so the background loop never dies silently.
                 logger.error(f"Error collecting system metrics: {exc}")
                 await asyncio.sleep(60)
 
@@ -174,17 +173,14 @@ class SystemMetricsCollector:
             self.collector.set_gauge("pdf_pool_available", 0)
             return
 
-        pool = getattr(pdf_gen, "pool", None)
-        avail_queue = getattr(pool, "_available_browsers", None) if pool is not None else None
-        if avail_queue is not None and callable(getattr(avail_queue, "qsize", None)):
-            qsize = avail_queue.qsize()
-            if isinstance(qsize, int):
-                self.collector.set_gauge("pdf_pool_available", max(0, qsize))
-                return
+        available = getattr(pdf_gen, "available_browsers", None)
+        if isinstance(available, int) and not isinstance(available, bool):
+            self.collector.set_gauge("pdf_pool_available", max(0, available))
+            return
 
         pdf_semaphore = getattr(self.app_state, "pdf_semaphore", None)
         sem_value = getattr(pdf_semaphore, "_value", None) if pdf_semaphore is not None else None
-        if isinstance(sem_value, int):
+        if isinstance(sem_value, int) and not isinstance(sem_value, bool):
             self.collector.set_gauge("pdf_pool_available", max(0, sem_value))
             return
 

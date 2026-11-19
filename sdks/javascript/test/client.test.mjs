@@ -1,6 +1,11 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { DownloaderApiError, DownloaderClient, encodeTargetUrlPath } from "../src/index.js";
+import {
+  DownloaderApiError,
+  DownloaderClient,
+  encodePathSegment,
+  encodeTargetUrlPath,
+} from "../src/index.js";
 
 function createMockFetch() {
   return async (input, init = {}) => {
@@ -10,7 +15,7 @@ function createMockFetch() {
 
     if (url.pathname === "/health") {
       return new Response(
-        JSON.stringify({ status: "healthy", version: "0.7.0", environment: "test" }),
+        JSON.stringify({ status: "healthy", version: "0.7.1", environment: "test" }),
         { status: 200, headers: { "content-type": "application/json" } },
       );
     }
@@ -19,6 +24,9 @@ function createMockFetch() {
       const body = JSON.parse(String(init.body));
       assert.equal(body.output, "markdown");
       assert.equal(body.actions[0].type, "click");
+      if (body.timeout_ms !== undefined) {
+        assert.equal(body.timeout_ms, 5000);
+      }
       return new Response("# Rendered DOM", {
         status: 200,
         headers: {
@@ -73,6 +81,23 @@ function createMockFetch() {
           successful_urls: 1,
           failed_urls: 0,
           results_available: true,
+        }),
+        { status: 200, headers: { "content-type": "application/json" } },
+      );
+    }
+
+    if (url.pathname === "/jobs/job-cancelled/status") {
+      return new Response(
+        JSON.stringify({
+          job_id: "job-cancelled",
+          status: "cancelled",
+          progress: 50,
+          created_at: "2026-11-12T00:00:00Z",
+          total_urls: 2,
+          processed_urls: 1,
+          successful_urls: 1,
+          failed_urls: 0,
+          results_available: false,
         }),
         { status: 200, headers: { "content-type": "application/json" } },
       );
@@ -182,7 +207,7 @@ test("DownloaderClient handles download, render, OCR, screenshot, batch, and API
   });
 
   const health = await client.health();
-  assert.equal(health.version, "0.7.0");
+  assert.equal(health.version, "0.7.1");
 
   const shot = await client.screenshot("https://example.com/shot", { fullPage: true });
   assert.equal(shot.contentType, "image/png");
@@ -195,6 +220,7 @@ test("DownloaderClient handles download, render, OCR, screenshot, batch, and API
   const rendered = await client.render("https://example.com", {
     output: "markdown",
     actions: [{ type: "click", selector: "#load" }],
+    timeoutMs: 5000,
   });
   assert.equal(rendered.text(), "# Rendered DOM");
   assert.equal(rendered.renderedWithJs, true);
@@ -205,6 +231,16 @@ test("DownloaderClient handles download, render, OCR, screenshot, batch, and API
   });
   const results = await client.waitForBatch(batch.job_id, { pollIntervalMs: 5 });
   assert.equal(results.summary.successful_requests, 1);
+
+  await assert.rejects(
+    () => client.waitForBatch("job-cancelled", { pollIntervalMs: 5 }),
+    (err) => {
+      assert.ok(err instanceof DownloaderApiError);
+      assert.equal(err.statusCode, null);
+      assert.equal(err.errorType, "batch_cancelled");
+      return true;
+    },
+  );
 
   const cancelled = await client.cancelJob("job-js-1");
   assert.equal(cancelled.success, true);
@@ -260,6 +296,8 @@ test("download percent-encodes target %, ?, and # without producing duplicate ?"
     encodeTargetUrlPath("https://example.com/search?q=hello%20world&page=2#top"),
     "https://example.com/search%3Fq=hello%2520world&page=2%23top",
   );
+  assert.equal(encodePathSegment("job/1?x=2", "jobId"), "job%2F1%3Fx%3D2");
+  assert.throws(() => encodePathSegment("..", "jobId"), /must be a non-empty path segment/);
 
   const res = await client.download("https://example.com/search?q=hello%20world&page=2#top", {
     render: true,

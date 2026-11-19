@@ -98,7 +98,9 @@ async def get_live_metrics(
         "connections": {"redis": redis_stats, "http_client": http_stats},
         "system": {
             "cpu_cores": multiprocessing.cpu_count(),
-            "pdf_scaling": "2x CPU cores (max 12)",
+            "pdf_scaling": (
+                f"Pool-bounded ({active_settings.pdf.pool_size} browsers, concurrency {pdf_limit})"
+            ),
             "batch_scaling": "8x CPU cores (max 50)",
         },
     }

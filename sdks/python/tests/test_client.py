@@ -10,6 +10,7 @@ import pytest
 from downloader_sdk import (
     APIError,
     AsyncDownloaderClient,
+    BatchJobError,
     BrowserAction,
     DownloaderClient,
     RateLimitError,
@@ -17,6 +18,7 @@ from downloader_sdk import (
     ScheduleHistory,
     ServiceUnavailableError,
     ValidationError,
+    __version__,
 )
 
 
@@ -187,7 +189,7 @@ def _mock_handler(request: httpx.Request) -> httpx.Response:
             200,
             json={
                 "status": "healthy",
-                "version": "0.7.0",
+                "version": "0.7.1",
                 "environment": "test",
                 "draining": False,
                 "active_requests": 0,
@@ -219,7 +221,8 @@ def test_sync_client_end_to_end() -> None:
         transport=transport,
     ) as client:
         health = client.health()
-        assert health.version == "0.7.0"
+        assert health.version == "0.7.1"
+        assert __version__ == "0.7.1"
         assert not health.draining
 
         shot = client.screenshot("https://example.com/shot", full_page=True)
@@ -367,3 +370,170 @@ async def test_download_encodes_target_query() -> None:
         b"/https://example.com/search%3Fq=hello%2520world&page=2%23results?wait_for=%23main"
     )
     assert captured_params[1] == {"wait_for": "#main"}
+
+
+@pytest.mark.asyncio
+async def test_render_forwards_timeout_ms_only_when_specified() -> None:
+    payloads: list[dict[str, Any]] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        assert request.url.path == "/render"
+        payloads.append(json.loads(request.content))
+        return httpx.Response(200, content=b"<html/>", headers={"content-type": "text/html"})
+
+    with DownloaderClient("http://test.local", transport=httpx.MockTransport(handler)) as client:
+        client.render("https://example.com")
+        client.render("https://example.com", timeout_ms=15000)
+
+    async with AsyncDownloaderClient(
+        "http://test.local", transport=httpx.MockTransport(handler)
+    ) as aclient:
+        await aclient.render("https://example.com")
+        await aclient.render("https://example.com", timeout_ms=25000)
+
+    assert "timeout_ms" not in payloads[0]
+    assert payloads[1]["timeout_ms"] == 15000
+    assert "timeout_ms" not in payloads[2]
+    assert payloads[3]["timeout_ms"] == 25000
+
+
+@pytest.mark.asyncio
+async def test_path_segments_escaped_and_invalid_segments_rejected() -> None:
+    raw_paths: list[bytes] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        raw_paths.append(request.url.raw_path)
+        if request.url.raw_path.endswith(b"/status"):
+            return httpx.Response(
+                200,
+                json={
+                    "job_id": "j",
+                    "status": "completed",
+                    "progress": 100,
+                    "created_at": "2026-11-19T00:00:00Z",
+                    "total_urls": 1,
+                    "processed_urls": 1,
+                    "successful_urls": 1,
+                    "failed_urls": 0,
+                    "results_available": True,
+                },
+            )
+        if request.url.raw_path.endswith(b"/results"):
+            return httpx.Response(
+                200,
+                json={
+                    "job_id": "j",
+                    "status": "completed",
+                    "total_duration": 0.1,
+                    "results": [],
+                    "summary": {},
+                    "created_at": "2026-11-19T00:00:00Z",
+                    "completed_at": "2026-11-19T00:00:01Z",
+                },
+            )
+        if b"/history" in request.url.raw_path:
+            return httpx.Response(200, json={"executions": [], "total": 0, "limit": 20, "offset": 0})
+        if request.method == "DELETE":
+            return httpx.Response(200, json={"success": True})
+        return httpx.Response(
+            200,
+            json={
+                "id": "s",
+                "name": "N",
+                "url": "https://example.com",
+                "cron_expression": "0 * * * *",
+                "format": "text",
+                "enabled": True,
+                "created_at": "2026-11-19T00:00:00Z",
+            },
+        )
+
+    tricky = "a/b?c#d%20e"
+    encoded = b"a%2Fb%3Fc%23d%2520e"
+
+    with DownloaderClient("http://test.local", transport=httpx.MockTransport(handler)) as client:
+        client.get_job_status(tricky)
+        client.get_job_results(tricky)
+        client.cancel_job(tricky)
+        client.get_schedule(tricky)
+        client.get_schedule_history(tricky)
+        client.delete_schedule(tricky)
+        for bad in ("", ".", ".."):
+            with pytest.raises(ValueError, match="job_id"):
+                client.get_job_status(bad)
+            with pytest.raises(ValueError, match="job_id"):
+                client.get_job_results(bad)
+            with pytest.raises(ValueError, match="job_id"):
+                client.cancel_job(bad)
+            with pytest.raises(ValueError, match="schedule_id"):
+                client.get_schedule(bad)
+            with pytest.raises(ValueError, match="schedule_id"):
+                client.get_schedule_history(bad)
+            with pytest.raises(ValueError, match="schedule_id"):
+                client.delete_schedule(bad)
+
+    async with AsyncDownloaderClient(
+        "http://test.local", transport=httpx.MockTransport(handler)
+    ) as aclient:
+        await aclient.get_job_status(tricky)
+        await aclient.get_job_results(tricky)
+        await aclient.cancel_job(tricky)
+        await aclient.get_schedule(tricky)
+        await aclient.get_schedule_history(tricky)
+        await aclient.delete_schedule(tricky)
+        for bad in ("", ".", ".."):
+            with pytest.raises(ValueError, match="job_id"):
+                await aclient.get_job_status(bad)
+            with pytest.raises(ValueError, match="schedule_id"):
+                await aclient.delete_schedule(bad)
+
+    expected = [
+        b"/jobs/" + encoded + b"/status",
+        b"/jobs/" + encoded + b"/results",
+        b"/jobs/" + encoded,
+        b"/schedules/" + encoded,
+        b"/schedules/" + encoded + b"/history?limit=20&offset=0",
+        b"/schedules/" + encoded,
+    ]
+    assert raw_paths == expected + expected
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("terminal_status", ["cancelled", "failed"])
+async def test_wait_for_batch_terminal_error_has_no_synthetic_500(terminal_status: str) -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        assert request.url.path == "/jobs/job-term/status"
+        return httpx.Response(
+            200,
+            json={
+                "job_id": "job-term",
+                "status": terminal_status,
+                "progress": 50,
+                "created_at": "2026-11-19T00:00:00Z",
+                "total_urls": 2,
+                "processed_urls": 1,
+                "successful_urls": 1,
+                "failed_urls": 0,
+                "error_message": f"Job was {terminal_status}",
+                "results_available": False,
+            },
+        )
+
+    with DownloaderClient("http://test.local", transport=httpx.MockTransport(handler)) as client:
+        with pytest.raises(BatchJobError) as exc_info:
+            client.wait_for_batch("job-term", poll_interval=0.01)
+        assert isinstance(exc_info.value, APIError)
+        assert exc_info.value.status_code is None
+        assert exc_info.value.error_type == f"batch_{terminal_status}"
+        assert exc_info.value.job_id == "job-term"
+        assert exc_info.value.job_status == terminal_status
+
+    async with AsyncDownloaderClient(
+        "http://test.local", transport=httpx.MockTransport(handler)
+    ) as aclient:
+        with pytest.raises(BatchJobError) as aexc_info:
+            await aclient.wait_for_batch("job-term", poll_interval=0.01)
+        assert isinstance(aexc_info.value, APIError)
+        assert aexc_info.value.status_code is None
+        assert aexc_info.value.error_type == f"batch_{terminal_status}"
+        assert aexc_info.value.job_status == terminal_status

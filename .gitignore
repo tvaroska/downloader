@@ -224,3 +224,6 @@ __marimo__/
 
 # Benchmark history (pytest-benchmark local runs)
 .benchmarks/
+
+# Node / TypeScript tooling
+node_modules/
