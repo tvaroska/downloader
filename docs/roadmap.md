@@ -4,13 +4,22 @@ The ordered list of upcoming work. Each milestone ends in a tagged release; ther
 
 ## Where we are
 
-`v0.8.3` (`3fb4121`, covering Milestones 2–5 / `R1`–`R114`) is live at `https://download.tvaroska.sk` across two stateless regional GKE Autopilot replicas (`ENVIRONMENT=production`, `PDF_POOL_SIZE=1`, `PDF_CONCURRENCY=1`, single `DOWNLOADER_KEY`, no `REDIS_URI`). Only the two deferred `v0.9.0+` feature tracks remain in [`## Unscheduled backlog`](#unscheduled-backlog).
+`v0.8.3` (`3fb4121`, covering Milestones 2–5 / `R1`–`R114`) is live at `https://download.tvaroska.sk` across two stateless regional GKE Autopilot replicas (`ENVIRONMENT=production`, `PDF_POOL_SIZE=1`, `PDF_CONCURRENCY=1`, single `DOWNLOADER_KEY`, no `REDIS_URI`). Next up is Milestone 6 (`v0.8.4`: modal-closer & session teardown reliability fix for `F-2026-11-20-001`); the two deferred `v0.9.0+` feature tracks remain in [`## Unscheduled backlog`](#unscheduled-backlog).
 
 ## Milestones at a glance
 
 | # | Milestone | Done when | Size / Target |
 | :--- | :--- | :--- | :--- |
+| 6 | `v0.8.4` — Modal-Closer & Teardown Reliability | `close_page_modals()` skips hidden buttons and uses a monotonic deadline instead of `asyncio.timeout`, `BrowserSession._cleanup()` unroutes/cancels in-flight tasks before `ctx.close()`, and `0` `Future exception was never retrieved` errors occur in production | `v0.8.4` (~0.25d) |
 | Next | `v0.9.0+` — Promote selected items from [`## Unscheduled backlog`](#unscheduled-backlog) | Multi-key quota accounting or stateless Streamable HTTP MCP `2026-07-28` demand triggers scheduling | Unscheduled |
+
+## Milestone 6 — `v0.8.4`: Modal-Closer & Teardown Reliability
+
+- [ ] **R115 (P2, 0.25d): Eliminate Playwright `Future exception was never retrieved` (`TargetClosedError`) in modal dismissal and session teardown (`F-2026-11-20-001`)**
+  - **Files:** [`session.py`](../src/downloader/browser/session.py) (`close_page_modals`, `_make_ssrf_route_guard`, `BrowserSession._cleanup`), unit tests in `tests/unit/`
+  - **Root cause (verified from live logs):** `close_page_modals()` (`session.py:309-341`) wraps `await button.click(timeout=1000)` inside `async with asyncio.timeout(timeout_seconds):`. When invisible matching close buttons exhaust the `3.0s` budget mid-click, `asyncio.timeout` cancels Playwright's `Channel._inner_send` `asyncio.wait(...)` before `callback.future.cancel()` runs, leaving an orphaned Playwright RPC `Future` that rejects with `TargetClosedError` (`attempting click action`, `element is not visible`) when `BrowserSession._cleanup()` (`session.py:536-569`) calls `ctx.close()`.
+  - **Fix:** (1) In `close_page_modals()`, drop `asyncio.timeout` around Playwright RPCs; track `deadline = time.monotonic() + timeout_seconds`, skip buttons where `await button.is_visible()` is `False`, clamp `button.click(timeout=min(1000, remaining_ms))` and `page.wait_for_timeout(min(200, remaining_ms))` to remaining budget, and return cleanly once `remaining_ms <= 0`. (2) Defensively in `BrowserSession._cleanup()`, call `await ctx.unroute_all(behavior="ignoreErrors")` (when exposed) and cancel/drain `ctx._ssrf_redirect_tasks` before `ctx.close()`, and catch `PlaywrightError` around `route.continue_()` / `route.abort()` inside `_make_ssrf_route_guard` so closing a context mid-DNS lookup never leaks an unhandled route task exception.
+  - **Accept:** Unit tests cover hidden modal buttons skipped without burning click timeouts, budget exhaustion exiting cleanly without cancelling an in-flight Playwright RPC future, and `_cleanup()` unrouting/draining pending redirect tasks before `ctx.close()`; `proj-test downloader` passes.
 
 ## Unscheduled backlog
 
