@@ -11,6 +11,7 @@ The ordered list of upcoming work. Each milestone ends in a tagged release; ther
 | # | Milestone | Done when | Size / Target |
 | :--- | :--- | :--- | :--- |
 | 6 | `v0.8.4` — Modal-Closer & Teardown Reliability | `close_page_modals()` skips hidden buttons and uses a monotonic deadline instead of `asyncio.timeout`, `BrowserSession._cleanup()` unroutes/cancels in-flight tasks before `ctx.close()`, and `0` `Future exception was never retrieved` errors occur in production | `v0.8.4` (~0.25d) |
+| 7 | `v0.8.5` — Loopback E2E CI & Escape-Analysis Gate | Deterministic HTTP → Playwright loopback E2E scenarios run in `cloudbuild.yaml` against `downloader:ci` (covering modal dismissal, teardown, PDF/Markdown negotiation, and SSRF) and `AGENTS.md` enforces E2E/prod → unit escape analysis | `v0.8.5` (~0.6d) |
 | Next | `v0.9.0+` — Promote selected items from [`## Unscheduled backlog`](#unscheduled-backlog) | Multi-key quota accounting or stateless Streamable HTTP MCP `2026-07-28` demand triggers scheduling | Unscheduled |
 
 ## Milestone 6 — `v0.8.4`: Modal-Closer & Teardown Reliability
@@ -20,6 +21,17 @@ The ordered list of upcoming work. Each milestone ends in a tagged release; ther
   - **Root cause (verified from live logs):** `close_page_modals()` (`session.py:309-341`) wraps `await button.click(timeout=1000)` inside `async with asyncio.timeout(timeout_seconds):`. When invisible matching close buttons exhaust the `3.0s` budget mid-click, `asyncio.timeout` cancels Playwright's `Channel._inner_send` `asyncio.wait(...)` before `callback.future.cancel()` runs, leaving an orphaned Playwright RPC `Future` that rejects with `TargetClosedError` (`attempting click action`, `element is not visible`) when `BrowserSession._cleanup()` (`session.py:536-569`) calls `ctx.close()`.
   - **Fix:** (1) In `close_page_modals()`, drop `asyncio.timeout` around Playwright RPCs; track `deadline = time.monotonic() + timeout_seconds`, skip buttons where `await button.is_visible()` is `False`, clamp `button.click(timeout=min(1000, remaining_ms))` and `page.wait_for_timeout(min(200, remaining_ms))` to remaining budget, and return cleanly once `remaining_ms <= 0`. (2) Defensively in `BrowserSession._cleanup()`, call `await ctx.unroute_all(behavior="ignoreErrors")` (when exposed) and cancel/drain `ctx._ssrf_redirect_tasks` before `ctx.close()`, and catch `PlaywrightError` around `route.continue_()` / `route.abort()` inside `_make_ssrf_route_guard` so closing a context mid-DNS lookup never leaks an unhandled route task exception.
   - **Accept:** Unit tests cover hidden modal buttons skipped without burning click timeouts, budget exhaustion exiting cleanly without cancelling an in-flight Playwright RPC future, and `_cleanup()` unrouting/draining pending redirect tasks before `ctx.close()`; `proj-test downloader` passes.
+
+## Milestone 7 — `v0.8.5`: Loopback E2E CI & Escape-Analysis Gate
+
+- [ ] **R116 (P1, 0.5d): Wire deterministic loopback E2E scenarios into `cloudbuild.yaml`**
+  - **Files:** [`cloudbuild.yaml`](../cloudbuild.yaml), [`tests/e2e/test_html_rendering_e2e.py`](../tests/e2e/test_html_rendering_e2e.py), [`tests/e2e/test_examples.py`](../tests/e2e/test_examples.py), `tests/e2e/test_loopback_e2e.py` (new)
+  - **Scope:** Today `tests/e2e/` (`14` tests) is excluded from both `scripts/gate.sh` and `cloudbuild.yaml`, leaving only 1 real-Chromium SSRF redirect test and an inline PDF smoke in CI. Add a deterministic, zero-internet loopback HTTP fixture server inside `downloader:ci` exercising live `GET /{url}` (HTML, Markdown, PDF, hidden-modal dismissal + clean context teardown with zero `Future exception was never retrieved` warnings) and `POST /render` declarative actions, and wire it as a blocking Cloud Build step (keeping live-internet `@pytest.mark.network` tests opt-in).
+  - **Accept:** New Cloud Build E2E step runs real HTTP → FastAPI → Playwright Chromium scenarios against `downloader:ci` in no-Redis production mode and fails on any unhandled asyncio/Playwright exception.
+- [ ] **R117 (P2, 0.1d): Codify E2E/prod → unit escape-analysis rule in `AGENTS.md`**
+  - **Files:** [`AGENTS.md`](../AGENTS.md)
+  - **Scope:** Require every E2E, integration, or production finding (e.g. `F-2026-11-20-001`) to record why offline unit/fake suites missed it (`missing_unit_case | fake_drift | env_parity`) and land a failing-first unit or loopback-Chromium regression test before closing.
+  - **Accept:** `AGENTS.md` documents the escape-analysis checklist under Testing Strategy; `gate test downloader` passes.
 
 ## Unscheduled backlog
 
