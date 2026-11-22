@@ -235,7 +235,7 @@ Close all seven Redis and split-worker `P0` bugs (`R7`–`R13`) before any deplo
 
 ## Milestones 6–7 (R115–R117): Modal-Closer Reliability & Loopback E2E CI
 
-*Archived from [`../roadmap.md`](../roadmap.md) on 2026-11-22 — **Implemented locally on `main` (pending `v0.8.4` release)**.*
+*Archived from [`../roadmap.md`](../roadmap.md) on 2026-11-22 — **shipped in `v0.8.4` on 2026-11-22**.*
 
 ### Milestone 6 — `v0.8.4`: Modal-Closer & Teardown Reliability
 
