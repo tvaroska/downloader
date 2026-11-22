@@ -23,7 +23,7 @@ from .models import (
     ScheduleInfo,
 )
 
-__version__ = "0.8.3"
+__version__ = "0.8.4"
 
 __all__ = [
     "APIError",

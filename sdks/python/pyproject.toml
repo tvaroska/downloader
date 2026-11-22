@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "downloader-sdk"
-version = "0.8.3"
+version = "0.8.4"
 description = "Typed synchronous and asynchronous Python client for the REST API Downloader service."
 readme = "README.md"
 requires-python = ">=3.10"
