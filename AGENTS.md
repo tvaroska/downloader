@@ -74,11 +74,17 @@ Full endpoint schemas live in [`spec/contracts.md`](spec/contracts.md) (`GET /he
 
 ## Testing Strategy
 
-4-marker pytest suite (`1,066` collected, `1,048` offline gate tests at `>= 83%` branch coverage, plus SDK suites in `tests/smoke/test_sdk_suites.py` and `ast-grep` contract checks in `tests/test_isolation_guard.py`):
+4-marker pytest suite (`>= 83%` branch coverage enforced offline, plus SDK suites in `tests/smoke/test_sdk_suites.py` and `ast-grep` contract checks in `tests/test_isolation_guard.py`):
 - **`smoke`**: Auth, SSRF, rate limits, governance & ADR-005 link hygiene (`<3s`)
 - **`unit`**: Pure modules, Ports/Adapters parity, mocked routes (`tests/conftest.py` offline DNS guard)
 - **`integration`**: Real Chromium SSRF redirect (`requires_playwright`) and Redis queue (`requires_redis`)
-- **`e2e`**: Docker Compose + Redis + example scripts
+- **`e2e`**: Zero-internet loopback HTTP -> FastAPI -> Playwright Chromium (`tests/e2e/test_loopback_e2e.py`, blocking in `cloudbuild.yaml`) plus opt-in Docker Compose / `@pytest.mark.network` suites
+
+### Escape-Analysis Gate (E2E / Prod -> Unit)
+Every E2E, integration, or production finding (e.g., `F-2026-11-20-001`) MUST complete this checklist before closing:
+1. Classify why offline unit/fake suites missed it: `missing_unit_case | fake_drift | env_parity`.
+2. Land a failing-first unit regression test (for `missing_unit_case` or `fake_drift`) or loopback-Chromium E2E scenario (for `env_parity` / driver RPC interactions) covering the root cause.
+3. Verify the regression fails without the fix and passes under `gate test downloader` (and Cloud Build `downloader:ci` when browser/Redis runtime is involved).
 
 ## Environment & Security Summary
 

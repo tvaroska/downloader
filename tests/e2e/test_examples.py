@@ -9,8 +9,10 @@ import pytest
 
 
 @pytest.mark.e2e
+@pytest.mark.network
+@pytest.mark.docker_compose
 class TestExamples:
-    """Test that all example scripts execute successfully."""
+    """Test that all example scripts execute successfully against live URLs and Redis."""
 
     @pytest.fixture(autouse=True)
     def setup_environment(self, app_base_url):
@@ -115,8 +117,9 @@ class TestExamples:
 
 
 @pytest.mark.e2e
+@pytest.mark.docker_compose
 class TestEndpoints:
-    """Test core API endpoints in E2E environment."""
+    """Test core API endpoints in E2E docker-compose environment."""
 
     def test_health_endpoint(self, app_base_url):
         """Test that health endpoint is accessible."""
@@ -143,6 +146,7 @@ class TestEndpoints:
         assert perf.status_code == 200
         assert "uptime_seconds" in perf.json()
 
+    @pytest.mark.network
     def test_download_endpoint(self, app_base_url):
         """Test basic download functionality."""
         import requests
@@ -157,6 +161,7 @@ class TestEndpoints:
         assert response.status_code == 200
         assert len(response.text) > 0
 
+    @pytest.mark.network
     def test_batch_endpoint_with_redis(self, app_base_url):
         """Test batch endpoint with Redis backend."""
         import requests

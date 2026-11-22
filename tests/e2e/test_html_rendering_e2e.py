@@ -13,10 +13,11 @@ class TestHTMLRenderingE2E:
 
     @pytest.fixture(autouse=True)
     def setup_base_url(self):
-        """Set up base URL for tests."""
+        """Set up base URL and API key for opt-in live-network E2E tests."""
         import os
 
         self.base_url = os.getenv("E2E_BASE_URL", "http://localhost:8081")
+        self.api_key = os.getenv("DOWNLOADER_KEY", "test-api-key-e2e")
 
     @pytest.mark.asyncio
     async def test_substack_url_returns_complete_metadata(self):
@@ -34,12 +35,12 @@ class TestHTMLRenderingE2E:
         target_url = "https://ontologist.substack.com/p/understanding-shacl-12-rules"
 
         # Make request to downloader service
-        async with httpx.AsyncClient(timeout=60.0) as client:
+        async with httpx.AsyncClient(timeout=60.0, trust_env=False) as client:
             response = await client.get(
                 f"{self.base_url}/{target_url}",
                 headers={
                     "Accept": "text/html",
-                    "Authorization": "Bearer value",
+                    "Authorization": f"Bearer {self.api_key}",
                 },
                 follow_redirects=True,
             )
@@ -117,12 +118,12 @@ class TestHTMLRenderingE2E:
         target_url = "https://koomen.dev/essays/horseless-carriages/"
 
         # Make request to downloader service
-        async with httpx.AsyncClient(timeout=60.0) as client:
+        async with httpx.AsyncClient(timeout=60.0, trust_env=False) as client:
             response = await client.get(
                 f"{self.base_url}/{target_url}",
                 headers={
                     "Accept": "text/html",
-                    "Authorization": "Bearer value",
+                    "Authorization": f"Bearer {self.api_key}",
                 },
                 follow_redirects=True,
             )
@@ -173,12 +174,12 @@ class TestHTMLRenderingE2E:
         raw_has_og_title = raw_soup.find("meta", property="og:title") is not None
 
         # 2. Downloader service fetch
-        async with httpx.AsyncClient(timeout=60.0) as client:
+        async with httpx.AsyncClient(timeout=60.0, trust_env=False) as client:
             downloader_response = await client.get(
                 f"{self.base_url}/{target_url}",
                 headers={
                     "Accept": "text/html",
-                    "Authorization": "Bearer value",
+                    "Authorization": f"Bearer {self.api_key}",
                 },
                 follow_redirects=True,
             )
@@ -225,12 +226,12 @@ class TestHTMLRenderingE2E:
             url = test_case["url"]
 
             try:
-                async with httpx.AsyncClient(timeout=60.0) as client:
+                async with httpx.AsyncClient(timeout=60.0, trust_env=False) as client:
                     response = await client.get(
                         f"{self.base_url}/{url}",
                         headers={
                             "Accept": "text/html",
-                            "Authorization": "Bearer test-api-key-e2e",
+                            "Authorization": f"Bearer {self.api_key}",
                         },
                         follow_redirects=True,
                     )
@@ -257,10 +258,11 @@ class TestHTMLRenderingQuickCheck:
 
     @pytest.fixture(autouse=True)
     def setup_base_url(self):
-        """Set up base URL for tests."""
+        """Set up base URL and API key for opt-in live-network E2E tests."""
         import os
 
         self.base_url = os.getenv("E2E_BASE_URL", "http://localhost:8081")
+        self.api_key = os.getenv("DOWNLOADER_KEY", "test-api-key-e2e")
 
     @pytest.mark.asyncio
     async def test_html_endpoint_accepts_requests(self):
@@ -268,12 +270,12 @@ class TestHTMLRenderingQuickCheck:
         # Use a reliable test URL
         target_url = "https://example.com"
 
-        async with httpx.AsyncClient(timeout=30.0) as client:
+        async with httpx.AsyncClient(timeout=30.0, trust_env=False) as client:
             response = await client.get(
                 f"{self.base_url}/{target_url}",
                 headers={
                     "Accept": "text/html",
-                    "Authorization": "Bearer value",
+                    "Authorization": f"Bearer {self.api_key}",
                 },
                 follow_redirects=True,
             )

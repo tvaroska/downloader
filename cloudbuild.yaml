@@ -204,6 +204,25 @@ steps:
           downloader:ci \
           tests/ -m requires_playwright --no-cov -p no:cacheprovider -v --timeout=60
 
+  - id: loopback-e2e-tests
+    name: gcr.io/cloud-builders/docker
+    waitFor:
+      - python-lint-typecheck-and-tests
+      - docker-build-and-push
+    entrypoint: bash
+    args:
+      - -c
+      - |
+        set -euo pipefail
+        docker run --rm \
+          -v /workspace:/workspace -w /workspace \
+          -e PLAYWRIGHT_BROWSERS_PATH=/usr/local/share/playwright/browsers \
+          -e HOME=/tmp \
+          -e PYTHONDONTWRITEBYTECODE=1 \
+          --entrypoint /workspace/.venv/bin/pytest \
+          downloader:ci \
+          tests/e2e/ -m "e2e and not network and not docker_compose" --no-cov -p no:cacheprovider -v --timeout=120
+
   - id: trivy-vulnerability-scan
     name: gcr.io/cloud-builders/docker
     waitFor:
@@ -228,6 +247,7 @@ steps:
     waitFor:
       - redis-integration-tests
       - playwright-integration-tests
+      - loopback-e2e-tests
       - verify-nonroot-and-healthcheck
       - trivy-vulnerability-scan
     entrypoint: bash

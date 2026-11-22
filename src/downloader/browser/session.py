@@ -6,6 +6,7 @@ import asyncio
 import inspect
 import logging
 import os
+import time
 from collections.abc import Awaitable, Callable, Sequence
 from dataclasses import dataclass
 from typing import Any, Literal
@@ -54,6 +55,8 @@ _MODAL_CLOSE_SELECTORS: tuple[str, ...] = (
 )
 _MODAL_MAX_CLICKS = 5
 _MODAL_TOTAL_BUDGET_SECONDS = 3.0
+_MODAL_CLICK_TIMEOUT_CAP_MS = 1000
+_MODAL_SETTLE_DELAY_CAP_MS = 200
 _DEFAULT_SESSION_TIMEOUT_SECONDS = 60.0
 _NETWORKIDLE_SETTLE_CAP_MS = 2500
 
@@ -63,6 +66,14 @@ async def _maybe_await(value: Any) -> Any:
     if inspect.isawaitable(value):
         return await value
     return value
+
+
+async def _safe_route_reply(route_method: Callable[..., Any], *args: Any) -> None:
+    """Invoke a Playwright route continuation or abort without leaking teardown errors."""
+    try:
+        await _maybe_await(route_method(*args))
+    except PlaywrightError as exc:
+        logger.debug(f"Browser route callback ignored after context close: {exc}")
 
 
 def resolve_browser_user_agent(explicit_user_agent: str | None = None) -> str:
@@ -113,7 +124,7 @@ def _make_ssrf_route_guard(
         scheme = parsed.scheme.lower()
 
         if scheme in _ALLOWED_INLINE_SCHEMES:
-            await _maybe_await(route.continue_())
+            await _safe_route_reply(route.continue_)
             return
 
         if scheme not in ("http", "https"):
@@ -125,7 +136,7 @@ def _make_ssrf_route_guard(
                     f"Browser request with disallowed scheme '{scheme}': {req_url}"
                 ),
             )
-            await _maybe_await(route.abort("accessdenied"))
+            await _safe_route_reply(route.abort, "accessdenied")
             return
 
         try:
@@ -136,10 +147,10 @@ def _make_ssrf_route_guard(
         except URLValidationError as exc:
             logger.warning(f"Blocked browser request failing SSRF validation ({req_url}): {exc}")
             _record_navigation_violation(context, req, exc)
-            await _maybe_await(route.abort("accessdenied"))
+            await _safe_route_reply(route.abort, "accessdenied")
             return
 
-        await _maybe_await(route.continue_())
+        await _safe_route_reply(route.continue_)
 
     return _guard
 
@@ -306,6 +317,44 @@ async def validate_browser_navigation(  # noqa: PLR0913
         await _enforce_cross_origin_redirects(ordered_urls, initial_url, redirect_policy)
 
 
+def _remaining_modal_ms(deadline: float) -> int:
+    return int((deadline - time.monotonic()) * 1000)
+
+
+async def _is_modal_button_visible(button: Any) -> bool:
+    is_visible_fn = getattr(button, "is_visible", None)
+    if not callable(is_visible_fn):
+        return True
+    return bool(await _maybe_await(is_visible_fn()))
+
+
+async def _try_dismiss_modal_button(
+    button: Any,
+    page: Any,
+    selector: str,
+    deadline: float,
+) -> bool:
+    """Click one visible modal close button within remaining budget; return True if a click ran."""
+    if _remaining_modal_ms(deadline) <= 0:
+        return False
+    clicked = False
+    try:
+        if not await _is_modal_button_visible(button):
+            return False
+        remaining_ms = _remaining_modal_ms(deadline)
+        if remaining_ms <= 0:
+            return False
+        clicked = True
+        await button.click(timeout=min(_MODAL_CLICK_TIMEOUT_CAP_MS, remaining_ms))
+        logger.debug(f"Closed modal/popup with selector: {selector}")
+        settle_ms = min(_MODAL_SETTLE_DELAY_CAP_MS, _remaining_modal_ms(deadline))
+        if settle_ms > 0:
+            await page.wait_for_timeout(settle_ms)
+    except (PlaywrightError, TimeoutError, RuntimeError, OSError) as exc:
+        logger.debug(f"Modal close click ignored for {selector}: {exc}")
+    return clicked
+
+
 async def close_page_modals(
     page: Any,
     *,
@@ -315,28 +364,22 @@ async def close_page_modals(
     """Best-effort, bounded dismissal of common signup/cookie modal overlays."""
     if max_clicks <= 0 or timeout_seconds <= 0:
         return
+    deadline = time.monotonic() + timeout_seconds
     clicks = 0
-    try:
-        async with asyncio.timeout(timeout_seconds):
-            for selector in _MODAL_CLOSE_SELECTORS:
-                if clicks >= max_clicks:
-                    return
-                try:
-                    close_buttons = await page.query_selector_all(selector)
-                except (PlaywrightError, TimeoutError, RuntimeError, OSError) as exc:
-                    logger.debug(f"Modal selector lookup skipped for {selector}: {exc}")
-                    continue
-                for button in close_buttons:
-                    if clicks >= max_clicks:
-                        return
-                    clicks += 1
-                    try:
-                        await button.click(timeout=1000)
-                        logger.debug(f"Closed modal/popup with selector: {selector}")
-                        await page.wait_for_timeout(200)
-                    except (PlaywrightError, TimeoutError, RuntimeError, OSError) as exc:
-                        logger.debug(f"Modal close click ignored for {selector}: {exc}")
-    except TimeoutError:
+    for selector in _MODAL_CLOSE_SELECTORS:
+        if clicks >= max_clicks or _remaining_modal_ms(deadline) <= 0:
+            break
+        try:
+            close_buttons = await page.query_selector_all(selector)
+        except (PlaywrightError, TimeoutError, RuntimeError, OSError) as exc:
+            logger.debug(f"Modal selector lookup skipped for {selector}: {exc}")
+            continue
+        for button in close_buttons:
+            if clicks >= max_clicks or _remaining_modal_ms(deadline) <= 0:
+                break
+            if await _try_dismiss_modal_button(button, page, selector, deadline):
+                clicks += 1
+    if _remaining_modal_ms(deadline) <= 0:
         logger.debug(f"Modal closer reached {timeout_seconds}s budget after {clicks} attempts")
 
 
@@ -533,6 +576,25 @@ class BrowserSession:
             logger.warning(f"{error_label}: {exc}")
         return None
 
+    async def _teardown_context(self, ctx: Any) -> None:
+        unroute_all = getattr(ctx, "unroute_all", None)
+        if callable(unroute_all):
+            try:
+                await _maybe_await(unroute_all(behavior="ignoreErrors"))
+            except (PlaywrightError, RuntimeError, OSError, TypeError) as exc:
+                logger.debug(f"Browser context unroute_all ignored during cleanup: {exc}")
+
+        pending = getattr(ctx, "_ssrf_redirect_tasks", None)
+        if isinstance(pending, set) and pending:
+            tasks = list(pending)
+            pending.clear()
+            for task in tasks:
+                if hasattr(task, "done") and not task.done():
+                    task.cancel()
+            await asyncio.gather(*tasks, return_exceptions=True)
+
+        await _maybe_await(ctx.close())
+
     async def _cleanup(self) -> None:
         cancelled: asyncio.CancelledError | None = None
         try:
@@ -540,7 +602,7 @@ class BrowserSession:
                 ctx = self.context
                 self.context = None
                 cancelled = await self._run_shielded_cleanup_step(
-                    ctx.close(), "Error closing browser context"
+                    self._teardown_context(ctx), "Error closing browser context"
                 )
 
             gen_pool = getattr(self._generator, "pool", None)

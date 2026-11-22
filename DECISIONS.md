@@ -6,6 +6,16 @@ history — supersede an old decision with a new entry that references it.
 
 ---
 
+## 2026-11-22 — Milestones 6 & 7: Modal-Closer Reliability, Loopback E2E CI & Escape-Analysis Gate (`R115`–`R117`, Implemented locally, pending release)
+
+- **Decision (Modal-closer monotonic deadline & BrowserSession teardown cleanup — `R115` / `F-2026-11-20-001`):**
+  Removed `asyncio.timeout(...)` around Playwright RPCs in `close_page_modals()` (`src/downloader/browser/session.py`), tracking a `time.monotonic()` deadline, skipping invisible close buttons via `await button.is_visible()`, and clamping `button.click(timeout=...)` / `page.wait_for_timeout(...)` strictly to positive remaining budget (`> 0`). Added `ctx.unroute_all(behavior="ignoreErrors")` and cancellation/drain of `ctx._ssrf_redirect_tasks` in `BrowserSession._cleanup()` before `ctx.close()`, plus `PlaywrightError` guards around `route.continue_()` / `route.abort()` inside `_make_ssrf_route_guard`.
+  - **Why / Escape Analysis (`missing_unit_case`, `env_parity`):** Wrapping Playwright `Channel._inner_send` RPCs in `asyncio.timeout` cancelled `asyncio.wait(...)` before `callback.future.cancel()` ran, leaving an orphaned Playwright RPC `Future` that raised `TargetClosedError` (`Future exception was never retrieved`) during `ctx.close()` when hidden buttons exhausted the 3s budget. Offline unit tests used `AsyncMock` sleeps that did not model Playwright RPC cancellation or hidden `is_visible() == False` selectors.
+- **Decision (Zero-internet loopback E2E suite in `cloudbuild.yaml` & escape-analysis gate — `R116`–`R117`):**
+  Added `tests/e2e/test_loopback_e2e.py` (real `uvicorn` + FastAPI in no-Redis production mode -> Playwright Chromium -> `BrowserEgressProxy` -> loopback HTTP fixture server via scoped `resolve_and_validate_host_async` / `EgressPolicy` override for `fixture.example.test`, failing on any unhandled `asyncio` loop exception or orphaned `Future` log), added `@pytest.mark.docker_compose` to `tests/e2e/test_examples.py` and `@pytest.mark.network` separation (`pyproject.toml`, `tests/e2e/test_html_rendering_e2e.py`), wired `loopback-e2e-tests` as a blocking step in `cloudbuild.yaml` inside `downloader:ci` (verified green on `btv-scratch-01` build `6a024357-093c-4049-998d-528148fddaa3`), and codified the E2E/prod -> unit escape-analysis checklist in [`AGENTS.md`](AGENTS.md).
+
+---
+
 ## 2026-11-19 — `v0.8.3` Release Blockers, Pure Ports Split, Redis/Worker Atomicity & Contract Alignment (Shipped)
 
 - **Decision (Stateless production fixes, pure Ports split & gate enforcement — `R77`–`R78`, `R80`–`R82`, `R88`, `R90`, `R95`–`R103`, `R107`–`R114`):**
