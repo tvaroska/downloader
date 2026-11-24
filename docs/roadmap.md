@@ -4,17 +4,25 @@ The ordered list of upcoming work. Each milestone ends in a tagged release; ther
 
 ## Where we are
 
-`v0.8.4` (`aa779a3`, adding Milestones 6–7 / `R115`–`R117` atop `v0.8.3` / `R1`–`R114`) is live at `https://download.tvaroska.sk` across two stateless regional GKE Autopilot replicas (`ENVIRONMENT=production`, `PDF_POOL_SIZE=1`, `PDF_CONCURRENCY=1`, single `DOWNLOADER_KEY`, no `REDIS_URI`). All scheduled milestones are complete with zero open scheduled tasks; the two deferred `v0.9.0+` feature tracks remain in [`## Unscheduled backlog`](#unscheduled-backlog).
+`v0.8.4` (`aa779a3`, adding Milestones 6–7 / `R115`–`R117` atop `v0.8.3` / `R1`–`R114`) is live at `https://download.tvaroska.sk` across two stateless regional GKE Autopilot replicas (`ENVIRONMENT=production`, `PDF_POOL_SIZE=1`, `PDF_CONCURRENCY=1`, single `DOWNLOADER_KEY`, no `REDIS_URI`). Milestone 8 (`v0.8.5` / `R118`) is scheduled to fix mid-render `BrowserEgressProxy._handle_client` task GC teardown (`F-2026-11-24-001`); the two deferred `v0.9.0+` feature tracks remain in [`## Unscheduled backlog`](#unscheduled-backlog).
 
 ## Milestones at a glance
 
 | # | Milestone | Done when | Size / Target |
 | :--- | :--- | :--- | :--- |
+| 8 | `v0.8.5` — `BrowserEgressProxy` Task Lifecycle & Teardown Hardening (`R118`) | Active `_handle_client` tasks hold strong references, cancel/drain cleanly in `close()`, close `upstream_writer` deterministically on tunnel abort, and pass a failing-first GC/disconnect unit test | `~0.25d` / `v0.8.5` |
 | Next | `v0.9.0+` — Promote selected items from [`## Unscheduled backlog`](#unscheduled-backlog) | Multi-key quota accounting or stateless Streamable HTTP MCP `2026-07-28` demand triggers scheduling | Unscheduled |
+
+## Milestone 8 — `v0.8.5`: BrowserEgressProxy Task Lifecycle & Teardown Hardening
+
+- [ ] **R118 (P3, 0.25d)**: Fix mid-render `BrowserEgressProxy._handle_client` task GC teardown and `GeneratorExit` error (`F-2026-11-24-001`)
+  Files: [`../src/downloader/browser/egress_proxy.py`](../src/downloader/browser/egress_proxy.py), [`../tests/unit/test_browser_ssrf_redirect_unit.py`](../tests/unit/test_browser_ssrf_redirect_unit.py) (or new `tests/unit/test_browser_egress_proxy.py`)
+  Verified from raw GKE Cloud Logging payloads (`2026-11-23T11:05:48Z` on `download-5dcf9cb955-m58v7`, `2026-11-24T11:03:00Z` on `download-5dcf9cb955-6njqj` — both 2.7–3.8s after cold Chromium startup during active `a16z.simplecast.com` renders that still returned `HTTP 200`): in Python 3.13, `StreamReaderProtocol.connection_made` (`asyncio/streams.py:255`) holds `self._task` only on the client protocol; `BrowserEgressProxy` holds no strong active-task set and does not cancel/drain active tasks in `close()` (`:136-145`). When a client connection detaches while `_forward_connect` (`:189-192`) or `_forward_http` (`:217-220`) awaits `asyncio.gather(_pump_stream(...), _pump_stream(...))` (which also leaves `upstream_writer` unreturned until after `gather`), GC finalizes the unreachable `_handle_client` coroutine with `GeneratorExit`, jumping to `finally:` (`:263-265`) where `await _close_writer(client_writer)` yields on `wait_closed()` and raises `RuntimeError: coroutine ignored GeneratorExit`, followed by `ERROR asyncio: Task was destroyed but it is pending!`. Fix: (1) track active `_handle_client` tasks in a strong `set[asyncio.Task[None]]` with `add_done_callback(discard)` and cancel/drain them in `close()`, (2) close `upstream_writer` in a `try/finally` inside `_forward_connect`/`_forward_http` and cancel the sibling `_pump_stream` task as soon as either side closes, (3) close writers synchronously in `finally:` without yielding across `GeneratorExit`, and (4) add a failing-first unit regression test (`missing_unit_case` per [`../AGENTS.md`](../AGENTS.md)) reproducing client disconnect + `gc.collect()` mid-tunnel and `BrowserEgressProxy.close()` with active tunnels.
+  Accept: `gate test downloader` passes with the new regression test asserting zero `Task was destroyed` / `RuntimeError: coroutine ignored GeneratorExit` warnings and closed upstream writers, and `v0.8.5` runs 24h on GKE with zero `BrowserEgressProxy` container errors.
 
 ## Unscheduled backlog
 
-Items below have no target release and use plain bullets rather than `- [ ]` checkboxes so `work_sync.py` counts only scheduled milestone tasks (`0` open). Promote an item into a milestone (`- [ ]`) when scheduling it.
+Items below have no target release and use plain bullets rather than `- [ ]` checkboxes so scheduled milestone counts stay accurate. Promote an item into a milestone (`- [ ]`) when scheduling it.
 
 ### Features
 
