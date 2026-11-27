@@ -6,6 +6,17 @@ history — supersede an old decision with a new entry that references it.
 
 ---
 
+## 2026-11-27 — `v0.8.5` P0 & P1 Review Hardening Pass (Implemented Locally at `fc8e6c4` & `30795c8`, Pending Release)
+
+- **Decision (Manual redirect cap, strict action schema, worker self-reclaim guard, browser RPC socket timeout & access-log redaction — `A-1`, `A-2`, `S-1`, `S-2`, `S-9` at `fc8e6c4`):**
+  Replaced `httpx` auto-redirect following in `http_client.py` and `crawling/robots.py` with manual `3xx` hop loops that close redirect responses unread before decompression (`A-1`); enforced `ConfigDict(extra="forbid")` on `BrowserAction` (`A-2`); passed `include_self=False` in the periodic worker reclaim loop while keeping `include_self=True` on cold startup (`S-1`); isolated `WorkerQueue._browser_pool` with `socket_timeout >= timeout + 5s`, `retry_on_timeout=False`, and `TimeoutError` -> `WorkerTimeoutError` (`HTTP 504`, `S-2`); and redacted target URL userinfo and query tokens in `RedactingAccessFormatter` and `CustomJsonFormatter` (`S-9`).
+- **Decision (Image OCR HTML contract, end-to-end HTTP download deadline & all-failed multi-format error classification — `A-3`..`A-5` at `30795c8`):**
+  Added HTML-escaped OCR rendering (`format_ocr_html` via `html.escape`) across `GET /{url}` (`Accept: text/html`), multi-format `Accept`, `/batch`, and `/schedules` while preserving `HTTP 415` on non-OCR binary media (`A-3`); wrapped `HTTPClient._stream_and_read` (redirect hops, crawl-delay waits, and streaming body decode) in a single `asyncio.timeout(self.timeout)` deadline mapped to `HTTPTimeoutError` (`A-4`); and preserved typed domain exceptions in `multi_format.py` so partial failures still return `HTTP 200` with `"errors"` while total failure across all requested formats raises the first typed error through `classify_domain_error` (`A-5`).
+- **Decision (WebRTC non-proxied UDP block, C-brotli 32 KiB slab limit, transactional `FakeRedis` & CI/local gate parity — `S-4`, `T-1`..`T-10` at `30795c8`):**
+  Added `--force-webrtc-ip-handling-policy=disable_non_proxied_udp` and `--enforce-webrtc-ip-permission-check` to `BrowserConfig.launch_args`, empirically verified against a loopback UDP STUN listener in `chrome-headless-shell` (`S-4`). Clamped `_decode_brotli_stream` per-call `output_buffer_limit` to `_BROTLI_SLAB_LIMIT = 32_752` (`T-2`) because the C `brotli` extension grows slabs (`32,752` then `+65,520 = 98,272`) whenever allocated bytes are strictly below `output_buffer_limit`. Upgraded `FakeRedis` / `_FakeRedisPipeline` to track key versions across KV and list mutations, enforce `MULTI` write buffering, and raise `WatchError` (`T-4`), pinned multi-record DNS validation (`T-1`), blank production keys (`T-3`), Redis Lua `max_wait` (`T-5`), binary multi-format JSON (`T-6`), TLS `trust_env=False` (`T-7`), CI/container structural invariants (`T-8`), `.venv/bin/ast-grep` + `-n auto` + `--cov-fail-under=83` + mandatory SDK toolchains in `scripts/gate.sh` (`T-9`), and `--port 0` Uvicorn readiness synchronization (`T-10`) plus `lifespan_context` isolation for `ASGITransport` drain tests.
+
+---
+
 ## 2026-11-22 — Milestones 6 & 7: Modal-Closer Reliability, Loopback E2E CI & Escape-Analysis Gate (`R115`–`R117`, Shipped in `v0.8.4`)
 
 - **Decision (Modal-closer monotonic deadline & BrowserSession teardown cleanup — `R115` / `F-2026-11-20-001`):**
