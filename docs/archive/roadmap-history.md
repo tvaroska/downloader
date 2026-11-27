@@ -372,3 +372,13 @@ Close all seven Redis and split-worker `P0` bugs (`R7`–`R13`) before any deplo
 - [x] **T-13 (P2): Enforce or drop the per-module coverage rule (names R80)** CRITICAL.md:30; pyproject.toml:139. Total is 89.14 percent against an 83 floor and nothing checks the 75 percent per-module rule; main.py is at 75.50. Next: raise the floor to 88 and add a test that reads the coverage JSON for the listed modules. Verify: uv run --no-sync pytest --cov=src/downloader -m "not (integration or e2e or network or requires_redis or requires_playwright)" -q
 
 - [x] **T-14 (P2): Split oversized, version-named test files and drop private reach-ins (names R108)** tests/unit/test_drain.py; tests/unit/test_security_surface.py; tests/unit/test_ssrf_wiring.py:49-53. Six test files exceed 800 lines and guards for unrelated subsystems share files. Next: regroup by subsystem and assert transport wiring through a public accessor. Verify: uv run --no-sync pytest tests/unit -q
+
+## Milestone 8 - `v0.8.7`: Remaining 2026-11-27 Review Findings
+
+*Archived from [`../roadmap.md`](../roadmap.md) on 2026-11-27.*
+
+### Review findings track — 2026-11-27
+
+Fresh read-only production-standard review of `a7a05c3` (`v0.8.4` plus 3 doc commits): computed grade `5.6 / 10` (range `5.1` to `5.6`; slices core `4.95`, surface `6.15`, tests `5.60`), 49 findings (5 `P0` after promoting `S-9`, 14 `P1`, 16 `P2`, 13 `P3`, 1 `P4`), 59 one-line mutants plus a valid control with 42 killed (71%; gate and release files 1 of 7). `P0` here means fix before the release; `A-1`, `A-2` and `S-9` reach the deployed stateless setup, `S-1` and `S-2` reach split worker setups only. All initial four `P0` items were re-executed by a second reviewer and none was refuted; owner call promoted `S-9` from `P2` to `P0`. All 5 `P0` items (`fc8e6c4`), all 14 `P1` items (`30795c8`), all 16 `P2` items (`38cea8e`), `R118` plus all 13 `P3` items (`269399e`, `375e8e7`), and `A-18` (`33d176a`) are shipped live in `v0.8.7`.
+
+- [x] **A-18 (P4): `Accept` q-values ignored** src/downloader/services/content_negotiation.py:40-87. Dropped `q<=0` / invalid `q` entries and ordered formats by `q` descending across `parse_accept_headers()` and `parse_accept_header()`, verified by `test_accept_header_q_values_drop_zero_and_order_descending` in `tests/unit/test_content_converter.py` and shipped live in `v0.8.7`.
