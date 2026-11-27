@@ -38,6 +38,8 @@ def test_python_sdk_suite_passes() -> None:
 
 @pytest.mark.smoke
 def test_javascript_sdk_suite_passes_without_untracked_build() -> None:
+    if os.environ.get("CLOUDBUILD_PYTHON_ONLY") == "1":
+        pytest.skip("JS SDK suite runs in dedicated sdk-js-tests Cloud Build step")
     node = shutil.which("node")
     if node is None:
         pytest.fail("node toolchain not installed in PATH")
@@ -77,6 +79,8 @@ def test_javascript_sdk_suite_passes_without_untracked_build() -> None:
 @pytest.mark.smoke
 @pytest.mark.timeout(90)
 def test_go_sdk_gofmt_vet_and_race_suite_pass() -> None:
+    if os.environ.get("CLOUDBUILD_PYTHON_ONLY") == "1":
+        pytest.skip("Go SDK suite runs in dedicated sdk-go-tests Cloud Build step")
     go_bin = shutil.which("go")
     gofmt_bin = shutil.which("gofmt")
     if go_bin is None or gofmt_bin is None:
