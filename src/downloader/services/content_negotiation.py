@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import math
 from urllib.parse import quote, urlsplit, urlunsplit
 
 FORMAT_MIME_SPECS: tuple[tuple[str, str, tuple[str, ...]], ...] = (
@@ -25,36 +26,59 @@ def format_to_mime_type(format_type: str) -> str:
     return FORMAT_TO_MIME.get(format_type, "application/octet-stream")
 
 
+def _parse_q_value(params: list[str]) -> float:
+    """Extract RFC 9110 quality factor `q` (default 1.0; invalid/<=0 treated as 0.0)."""
+    for param in params:
+        key, sep, val = param.strip().partition("=")
+        if sep and key.strip().lower() == "q":
+            try:
+                q = float(val.strip())
+            except ValueError:
+                return 0.0
+            if math.isnan(q) or q <= 0.0:
+                return 0.0
+            return min(q, 1.0)
+    return 1.0
+
+
 def parse_accept_header(accept_header: str | None) -> str:
-    """Parse a single `Accept` header string into an internal format name."""
+    """Parse a single `Accept` header string into the highest-priority internal format name."""
     if not accept_header:
         return "text"
-
-    lowered = accept_header.lower()
-    for fmt, _, aliases in FORMAT_MIME_SPECS:
-        if any(alias in lowered for alias in aliases):
-            return fmt
-    return "raw"
+    ranked = parse_accept_headers(accept_header)
+    return ranked[0] if ranked else "raw"
 
 
 def parse_accept_headers(accept_headers: str | list[str] | None) -> list[str]:
-    """Parse `Accept` header(s) into deduplicated requested format names in caller order."""
+    """Parse `Accept` header(s) into deduplicated requested format names ordered by `q` descending."""
     if not accept_headers:
         return []
 
     header_list = [accept_headers] if isinstance(accept_headers, str) else accept_headers
-    seen: set[str] = set()
-    unique_formats: list[str] = []
+    best_by_fmt: dict[str, tuple[float, int]] = {}
+    order = 0
 
     for header in header_list:
         for part in header.split(","):
-            media_type = part.strip().split(";", 1)[0].strip().lower()
-            fmt = MIME_TO_FORMAT.get(media_type)
-            if fmt is not None and fmt not in seen:
-                seen.add(fmt)
-                unique_formats.append(fmt)
+            raw = part.strip()
+            if not raw:
+                continue
+            media_type, *params = raw.split(";")
+            fmt = MIME_TO_FORMAT.get(media_type.strip().lower())
+            if fmt is None:
+                continue
+            q = _parse_q_value(params)
+            if q <= 0.0:
+                continue
+            prev = best_by_fmt.get(fmt)
+            if prev is None:
+                best_by_fmt[fmt] = (q, order)
+            else:
+                best_by_fmt[fmt] = (max(prev[0], q), prev[1])
+            order += 1
 
-    return unique_formats
+    ranked = sorted(best_by_fmt.items(), key=lambda item: (-item[1][0], item[1][1]))
+    return [fmt for fmt, _ in ranked]
 
 
 def sanitize_original_url_header(url: str) -> str:

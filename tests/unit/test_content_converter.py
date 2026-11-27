@@ -410,3 +410,22 @@ async def test_in_memory_ports_and_remote_browser_renderer_parity() -> None:
     await worker_task
     assert "# Remote Worker OK" in conv.text
     assert get_browser_renderer is not None
+
+
+@pytest.mark.unit
+def test_accept_header_q_values_drop_zero_and_order_descending() -> None:
+    """Drop `q=0` entries and order remaining formats by `q` descending (`A-18`)."""
+    from downloader.services.content_negotiation import parse_accept_header, parse_accept_headers
+
+    assert parse_accept_headers("text/html;q=0.5, text/markdown;q=0.9, text/plain;q=0") == [
+        "markdown",
+        "html",
+    ]
+    assert parse_accept_headers("text/plain;q=0.0, application/pdf;q=0.2, text/markdown") == [
+        "markdown",
+        "pdf",
+    ]
+    assert parse_accept_headers("text/html;q=0, text/plain;q=nan") == []
+    assert parse_accept_header("text/html;q=0.5, text/markdown;q=0.9") == "markdown"
+    assert parse_accept_header("text/plain;q=0, text/html;q=0.4") == "html"
+    assert parse_accept_header("text/plain;q=0") == "raw"
