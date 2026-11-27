@@ -35,7 +35,7 @@ steps:
         printf "Resolved commit=%s tag=%s\n" "$${SHA}" "$${CB_TAG}"
 
   - id: python-lint-typecheck-and-tests
-    name: ghcr.io/astral-sh/uv:0.12.24-python3.13-trixie-slim
+    name: ghcr.io/astral-sh/uv:0.12.24-python3.13-trixie-slim@sha256:adb723cc75f8a5fa33fa1928af0e032d9199694599c77ffeea5527a76e37a512
     waitFor: ["-"]
     entrypoint: bash
     env:
@@ -64,7 +64,7 @@ steps:
       - -c
       - |
         set -euo pipefail
-        docker run -d --name downloader-ci-redis --network cloudbuild redis:7-alpine
+        docker run -d --name downloader-ci-redis --network cloudbuild redis:7-alpine@sha256:7f7d30b7fdd09467bac58198a1f166dd69789d348d4fe859cccb20e0cf287fbe
         trap "docker rm -f downloader-ci-redis >/dev/null 2>&1 || true" EXIT
         REDIS_OK=0
         for i in $$(seq 1 15); do
@@ -82,11 +82,11 @@ steps:
           -v /workspace:/workspace -w /workspace \
           -e REDIS_URI=redis://downloader-ci-redis:6379 \
           -e PYTHONDONTWRITEBYTECODE=1 \
-          ghcr.io/astral-sh/uv:0.12.24-python3.13-trixie-slim \
+          ghcr.io/astral-sh/uv:0.12.24-python3.13-trixie-slim@sha256:adb723cc75f8a5fa33fa1928af0e032d9199694599c77ffeea5527a76e37a512 \
           /workspace/.venv/bin/pytest tests/ -m requires_redis --no-cov -p no:cacheprovider -v --timeout=30
 
   - id: sdk-go-tests
-    name: golang:1.24-bookworm
+    name: golang:1.24-bookworm@sha256:1a6d4452c65dea36aac2e2d606b01b4a029ec90cc1ae53890540ce6173ea77ac
     waitFor: ["-"]
     entrypoint: bash
     args:
@@ -103,7 +103,7 @@ steps:
         go -C sdks/go test -race -v ./...
 
   - id: sdk-js-tests
-    name: node:22-bookworm-slim
+    name: node:22-bookworm-slim@sha256:be979e5523c76fa4d5ca4ebd3099078f220aa47ec39c48ad5b5df9314debd6eb
     waitFor: ["-"]
     entrypoint: bash
     args:
@@ -159,7 +159,7 @@ steps:
         trap "docker rm -f downloader-smoke >/dev/null 2>&1 || true" EXIT
         HEALTH_OK=0
         for i in $$(seq 1 20); do
-          if docker exec downloader-smoke curl -fsS http://127.0.0.1:8000/health >/dev/null; then
+          if docker exec downloader-smoke python -c "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/health', timeout=3).read()" >/dev/null 2>&1; then
             echo "HTTP /health probe passed on attempt $$i"
             HEALTH_OK=1
             break
@@ -234,7 +234,7 @@ steps:
         set -euo pipefail
         docker run --rm \
           -v /var/run/docker.sock:/var/run/docker.sock \
-          aquasec/trivy:0.58.1 image \
+          aquasec/trivy:0.58.1@sha256:ab70a02200597efa04748f210f793936eb647cbcdb0ea69cc30b226d6f5a22c7 image \
           --scanners vuln \
           --pkg-types os,library \
           --severity HIGH,CRITICAL \

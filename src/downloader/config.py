@@ -6,15 +6,24 @@ import math
 import multiprocessing
 from typing import Annotated, Any, Literal
 
+import limits
 from pydantic import AliasChoices, Field, field_validator, model_validator
 from pydantic_settings import BaseSettings, NoDecode, SettingsConfigDict
 
 from .runtime_config import (
-    OCRConfig,
-    ShutdownConfig,
-    TelemetryConfig,
-    WebhookConfig,
-    WorkerConfig,
+    OCRConfig as OCRConfig,
+)
+from .runtime_config import (
+    ShutdownConfig as ShutdownConfig,
+)
+from .runtime_config import (
+    TelemetryConfig as TelemetryConfig,
+)
+from .runtime_config import (
+    WebhookConfig as WebhookConfig,
+)
+from .runtime_config import (
+    WorkerConfig as WorkerConfig,
 )
 
 
@@ -191,12 +200,6 @@ class ContentConfig(BaseSettings):
         default=["substack.com", "medium.com", "notion.so", "ghost.io"],
         description="Known JS-heavy domains that always need rendering",
     )
-    min_body_text_threshold: int = Field(
-        default=100,
-        ge=10,
-        le=1000,
-        description="Minimum body text chars to consider content useful (default: 100)",
-    )
     min_js_framework_content_threshold: int = Field(
         default=200,
         ge=50,
@@ -342,8 +345,13 @@ class SSRFConfig(BaseSettings):
         default=True,
         description="Resolve DNS and check IPs before making requests",
     )
+    allow_unresolved_dns_production: bool = Field(
+        default=False,
+        alias="SSRF_ALLOW_UNRESOLVED_DNS_PRODUCTION",
+        description="Explicitly allow SSRF_RESOLVE_DNS=false when ENVIRONMENT=production (unsafe)",
+    )
 
-    model_config = SettingsConfigDict(env_prefix="SSRF_", extra="ignore")
+    model_config = SettingsConfigDict(env_prefix="SSRF_", populate_by_name=True, extra="ignore")
 
 
 class CORSConfig(BaseSettings):
@@ -412,6 +420,15 @@ class RateLimitConfig(BaseSettings):
     )
 
     model_config = SettingsConfigDict(env_prefix="RATELIMIT_", extra="ignore")
+
+    @field_validator("default_limit", "download_limit", "batch_limit", "status_limit")
+    @classmethod
+    def validate_rate_limit_syntax(cls, v: str) -> str:
+        try:
+            limits.parse(v)
+        except ValueError as exc:
+            raise ValueError(f"Invalid rate limit expression {v!r}: {exc}") from exc
+        return v
 
     @field_validator("trusted_proxies", mode="before")
     @classmethod
@@ -548,12 +565,26 @@ class Settings(BaseSettings):
         return self
 
     @model_validator(mode="after")
+    def validate_production_ssrf(self) -> Settings:
+        """Refuse to start in production with DNS SSRF resolution disabled unless explicitly opted out."""
+        if (
+            self.environment == "production"
+            and not self.ssrf.resolve_dns
+            and not self.ssrf.allow_unresolved_dns_production
+        ):
+            raise ValueError(
+                "SSRF_RESOLVE_DNS=false is not allowed when ENVIRONMENT=production "
+                "(set SSRF_ALLOW_UNRESOLVED_DNS_PRODUCTION=true to explicitly opt out)."
+            )
+        return self
+
+    @model_validator(mode="after")
     def validate_worker_heartbeat_covers_drain(self) -> Settings:
         """Ensure worker heartbeat TTL covers shutdown drain plus one heartbeat interval (`R83`)."""
         min_ttl = self.shutdown.drain_timeout + self.worker.heartbeat_interval
         if "heartbeat_ttl" not in self.worker.model_fields_set:
             if self.worker.heartbeat_ttl < min_ttl:
-                self.worker.heartbeat_ttl = min(600, math.ceil(min_ttl))
+                self.worker.heartbeat_ttl = math.ceil(min_ttl)
         elif self.worker.heartbeat_ttl < min_ttl:
             raise ValueError(
                 f"worker.heartbeat_ttl ({self.worker.heartbeat_ttl}s) must be >= "

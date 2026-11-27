@@ -374,3 +374,104 @@ class TestBrowserSSRFRedirectAndContextHardening:
             await proxy.close()  # idempotent close
             upstream_srv.close()
             await upstream_srv.wait_closed()
+
+    async def test_egress_proxy_client_disconnect_gc_and_close_drain_cleanly(self) -> None:
+        """`R118`: Client disconnect + `gc.collect()` mid-tunnel and `close()` emit zero GC/GeneratorExit errors."""
+        import gc
+
+        from downloader.config import Settings
+        from downloader.validation import EgressPolicy
+
+        loop = asyncio.get_running_loop()
+        loop_exceptions: list[dict[str, object]] = []
+        prev_handler = loop.get_exception_handler()
+        loop.set_exception_handler(lambda _lp, ctx: loop_exceptions.append(ctx))
+
+        upstream_connected = asyncio.Event()
+        upstream_closed_events = [asyncio.Event(), asyncio.Event()]
+        conn_idx = 0
+
+        async def _holding_upstream(
+            reader: asyncio.StreamReader, writer: asyncio.StreamWriter
+        ) -> None:
+            nonlocal conn_idx
+            my_idx = conn_idx
+            conn_idx += 1
+            upstream_connected.set()
+            try:
+                while await reader.read(64):
+                    pass
+            finally:
+                if my_idx < len(upstream_closed_events):
+                    upstream_closed_events[my_idx].set()
+                if not writer.is_closing():
+                    writer.close()
+
+        upstream_srv = await asyncio.start_server(_holding_upstream, "127.0.0.1", 0)
+        assert upstream_srv.sockets
+        up_port = upstream_srv.sockets[0].getsockname()[1]
+
+        class _AllowLoopbackPolicy(EgressPolicy):
+            async def resolve_host(self, hostname: str, port: int | None = None) -> list[str]:
+                if hostname == "allowed.test":
+                    return ["127.0.0.1"]
+                return await super().resolve_host(hostname, port)
+
+        proxy = BrowserEgressProxy(egress_policy=_AllowLoopbackPolicy(Settings()))
+        await proxy.start()
+        w2: asyncio.StreamWriter | None = None
+        try:
+            # 1. Establish CONNECT tunnel, abruptly drop client + references, run gc.collect()
+            r1, w1 = await asyncio.open_connection("127.0.0.1", proxy.port)
+            w1.write(
+                f"CONNECT allowed.test:{up_port} HTTP/1.1\r\nHost: allowed.test\r\n\r\n".encode(
+                    "ascii"
+                )
+            )
+            await w1.drain()
+            hdr = await r1.readuntil(b"\r\n\r\n")
+            assert hdr.startswith(b"HTTP/1.1 200 Connection Established")
+            await asyncio.wait_for(upstream_connected.wait(), timeout=2.0)
+            assert len(proxy._client_tasks) == 1
+
+            w1.close()
+            await w1.wait_closed()
+            del r1, w1
+            gc.collect()
+            await asyncio.wait_for(upstream_closed_events[0].wait(), timeout=1.0)
+            gc.collect()
+
+            # 2. Establish a second active tunnel and call proxy.close() while client stays open
+            upstream_connected.clear()
+            r2, w2 = await asyncio.open_connection("127.0.0.1", proxy.port)
+            w2.write(
+                f"CONNECT allowed.test:{up_port} HTTP/1.1\r\nHost: allowed.test\r\n\r\n".encode(
+                    "ascii"
+                )
+            )
+            await w2.drain()
+            hdr2 = await r2.readuntil(b"\r\n\r\n")
+            assert hdr2.startswith(b"HTTP/1.1 200 Connection Established")
+            await asyncio.wait_for(upstream_connected.wait(), timeout=2.0)
+            assert len(proxy._client_tasks) == 1
+
+            await proxy.close()
+            assert len(proxy._client_tasks) == 0
+            await asyncio.wait_for(upstream_closed_events[1].wait(), timeout=1.0)
+            gc.collect()
+            await asyncio.sleep(0.02)
+
+            assert loop_exceptions == [], f"Unexpected asyncio loop errors: {loop_exceptions}"
+
+            # 3. Direct GeneratorExit injection on _handle_client coroutine never raises RuntimeError
+            fake_writer = MagicMock()
+            fake_writer.is_closing.return_value = False
+            coro = proxy._handle_client(asyncio.StreamReader(), fake_writer)
+            coro.close()
+        finally:
+            if w2 is not None and not w2.is_closing():
+                w2.close()
+            loop.set_exception_handler(prev_handler)
+            await proxy.close()
+            upstream_srv.close()
+            await upstream_srv.wait_closed()

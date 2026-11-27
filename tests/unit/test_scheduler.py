@@ -982,8 +982,8 @@ class TestSchedulerServiceJobManagement:
         """Test remove_job is no-op when scheduler is None."""
         service._scheduler = None
 
-        # Should not raise
-        service.remove_job("job-123")
+        assert service.remove_job("job-123") is None
+        assert service._scheduler is None
 
 
 # ============= ScheduledJobExecutor Tests =============

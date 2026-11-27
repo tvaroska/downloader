@@ -32,7 +32,12 @@ from ..ports import (
     enforce_rendered_output_size,
 )
 from ..telemetry import get_tracer
-from ..validation import EgressPolicy, SSRFProtectionError, URLValidationError
+from ..validation import (
+    DNSResolutionError,
+    EgressPolicy,
+    SSRFProtectionError,
+    URLValidationError,
+)
 from .session import (
     BrowserSession,
     NavigationOptions,
@@ -307,6 +312,7 @@ class LocalBrowserRenderer:
 
 
 _SIMPLE_REMOTE_ERROR_MAP: dict[str, type[Exception]] = {
+    "dns_resolution_error": DNSResolutionError,
     "ssrf_protection_error": SSRFProtectionError,
     "validation_error": URLValidationError,
     "browser_action_error": BrowserActionError,

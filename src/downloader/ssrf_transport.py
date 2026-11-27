@@ -27,7 +27,7 @@ class SSRFSafeNetworkBackend(httpcore.AsyncNetworkBackend):
         self._get_settings = settings_getter
         self._egress_policy = egress_policy
 
-    async def connect_tcp(  # noqa: PLR0913
+    async def connect_tcp(
         self,
         host: str,
         port: int,

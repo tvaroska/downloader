@@ -94,7 +94,7 @@ class ScheduledJobExecutor:
             max_output_bytes=cfg.content.max_download_size,
         )
 
-    async def _emit_schedule_webhook(  # noqa: PLR0913
+    async def _emit_schedule_webhook(
         self,
         execution: ScheduleExecution,
         url: str,
@@ -209,8 +209,12 @@ class ScheduledJobExecutor:
                 target_format=format,
             )
         if sanitized_headers:
-            return await self.http_client.download(validated_url, headers=sanitized_headers)
-        return await self.http_client.download(validated_url)
+            res_with_headers: tuple[bytes, ResponseMetadata] = await self.http_client.download(
+                validated_url, headers=sanitized_headers
+            )
+            return res_with_headers
+        res_plain: tuple[bytes, ResponseMetadata] = await self.http_client.download(validated_url)
+        return res_plain
 
     async def _execute_single_attempt(  # noqa: PLR0913
         self,

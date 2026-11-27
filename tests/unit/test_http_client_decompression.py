@@ -309,3 +309,44 @@ async def test_decompression_step_output_bounded_for_brotli_gzip_and_deflate(
     assert exc_info.value.actual_size <= cap + 65_536 + 1
     if encoding_header != "br":
         assert exc_info.value.actual_size == cap + 1
+
+
+@pytest.mark.unit
+@pytest.mark.asyncio
+async def test_raw_deflate_large_compressible_tail_drains_cleanly() -> None:
+    """Valid raw-deflate bodies >64 KiB whose final chunk overflows `step_limit` drain cleanly (`A-10`)."""
+    boundary_payload = b"\x00" * 65_537
+    comp_b = zlib.compressobj(level=9, wbits=-zlib.MAX_WBITS)
+    raw_boundary = comp_b.compress(boundary_payload) + comp_b.flush()
+
+    large_payload = b"\x00" * 100_000
+    comp_l = zlib.compressobj(level=9, wbits=-zlib.MAX_WBITS)
+    raw_large = comp_l.compress(large_payload) + comp_l.flush()
+    truncated_raw = raw_large[:-2]
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/boundary":
+            payload = raw_boundary
+        elif request.url.path == "/truncated":
+            payload = truncated_raw
+        else:
+            payload = raw_large
+        return httpx.Response(
+            200,
+            headers={"Content-Type": "text/plain", "Content-Encoding": "deflate"},
+            stream=httpx.ByteStream(payload),
+            request=request,
+        )
+
+    async with HTTPClient(
+        max_download_size=256 * 1024,
+        transport=httpx.MockTransport(handler),
+    ) as client:
+        decoded_boundary, _ = await client.download("https://example.com/boundary")
+        assert decoded_boundary == boundary_payload
+
+        decoded, _ = await client.download("https://example.com/valid")
+        assert decoded == large_payload
+
+        with pytest.raises(HTTPClientError, match="Truncated deflate|Invalid deflate"):
+            await client.download("https://example.com/truncated")

@@ -80,8 +80,9 @@ def _rewrite_http_request_head(
     return ("\r\n".join(forwarded_headers) + "\r\n\r\n").encode("latin-1")
 
 
-async def _pump_stream(reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
-    """Forward bytes until EOF or peer disconnect."""
+async def _pump_stream(reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> bool:
+    """Forward bytes until EOF or peer disconnect; return True if terminated by socket error."""
+    had_error = False
     try:
         while True:
             data = await reader.read(_PUMP_CHUNK_BYTES)
@@ -89,20 +90,66 @@ async def _pump_stream(reader: asyncio.StreamReader, writer: asyncio.StreamWrite
                 break
             writer.write(data)
             await writer.drain()
-    except (ConnectionError, asyncio.CancelledError, OSError):
+    except (ConnectionError, OSError):
+        had_error = True
+    except asyncio.CancelledError:
         pass
     finally:
         with contextlib.suppress(OSError, RuntimeError):
             if writer.can_write_eof():
                 writer.write_eof()
+    return had_error
+
+
+def _close_writer_sync(writer: asyncio.StreamWriter | None) -> None:
+    if writer is None:
+        return
+    with contextlib.suppress(OSError, RuntimeError):
+        writer.close()
 
 
 async def _close_writer(writer: asyncio.StreamWriter | None) -> None:
     if writer is None:
         return
-    writer.close()
+    _close_writer_sync(writer)
     with contextlib.suppress(OSError, RuntimeError, ConnectionError):
         await writer.wait_closed()
+
+
+def _cancel_tasks(tasks: set[asyncio.Task[bool]] | tuple[asyncio.Task[bool], ...]) -> None:
+    for task in tasks:
+        if not task.done():
+            task.cancel()
+
+
+async def _pump_bidirectional(
+    client_reader: asyncio.StreamReader,
+    client_writer: asyncio.StreamWriter,
+    upstream_reader: asyncio.StreamReader,
+    upstream_writer: asyncio.StreamWriter,
+    *,
+    cancel_client_on_upstream_eof: bool,
+) -> None:
+    c2u = asyncio.create_task(_pump_stream(client_reader, upstream_writer))
+    u2c = asyncio.create_task(_pump_stream(upstream_reader, client_writer))
+    genexit = False
+    try:
+        done, pending = await asyncio.wait({c2u, u2c}, return_when=asyncio.FIRST_COMPLETED)
+        should_cancel_peer = (
+            u2c in done
+            and (cancel_client_on_upstream_eof or u2c.result() or client_writer.is_closing())
+        ) or (c2u in done and (c2u.result() or upstream_writer.is_closing()))
+        if should_cancel_peer:
+            _cancel_tasks(pending)
+        if pending:
+            await asyncio.gather(*pending, return_exceptions=True)
+    except GeneratorExit:
+        genexit = True
+        raise
+    finally:
+        _cancel_tasks((c2u, u2c))
+        if not genexit:
+            await asyncio.gather(c2u, u2c, return_exceptions=True)
 
 
 class BrowserEgressProxy:
@@ -111,6 +158,7 @@ class BrowserEgressProxy:
     def __init__(self, *, egress_policy: EgressPolicy | None = None) -> None:
         self._server: asyncio.Server | None = None
         self._egress_policy = egress_policy
+        self._client_tasks: set[asyncio.Task[None]] = set()
         self.port: int = 0
 
     @property
@@ -134,14 +182,19 @@ class BrowserEgressProxy:
         logger.info(f"Started Chromium SSRF-pinning egress proxy on {self.server_url}")
 
     async def close(self) -> None:
-        if self._server is None:
-            return
         server = self._server
         self._server = None
         self.port = 0
-        server.close()
-        with contextlib.suppress(OSError, RuntimeError):
-            await server.wait_closed()
+        if server is not None:
+            server.close()
+        active_tasks = list(self._client_tasks)
+        for task in active_tasks:
+            task.cancel()
+        if active_tasks:
+            await asyncio.gather(*active_tasks, return_exceptions=True)
+        if server is not None:
+            with contextlib.suppress(OSError, RuntimeError):
+                await server.wait_closed()
 
     async def _send_error(
         self,
@@ -181,16 +234,28 @@ class BrowserEgressProxy:
         target: str,
         client_reader: asyncio.StreamReader,
         client_writer: asyncio.StreamWriter,
-    ) -> asyncio.StreamWriter:
+    ) -> None:
         host, port = _split_host_port(target, 443)
         upstream_reader, upstream_writer = await self._open_pinned_upstream(host, port)
-        client_writer.write(b"HTTP/1.1 200 Connection Established\r\n\r\n")
-        await client_writer.drain()
-        await asyncio.gather(
-            _pump_stream(client_reader, upstream_writer),
-            _pump_stream(upstream_reader, client_writer),
-        )
-        return upstream_writer
+        genexit = False
+        try:
+            client_writer.write(b"HTTP/1.1 200 Connection Established\r\n\r\n")
+            await client_writer.drain()
+            await _pump_bidirectional(
+                client_reader,
+                client_writer,
+                upstream_reader,
+                upstream_writer,
+                cancel_client_on_upstream_eof=False,
+            )
+        except GeneratorExit:
+            genexit = True
+            raise
+        finally:
+            if genexit:
+                _close_writer_sync(upstream_writer)
+            else:
+                await _close_writer(upstream_writer)
 
     async def _forward_http(
         self,
@@ -198,7 +263,7 @@ class BrowserEgressProxy:
         header_lines: list[str],
         client_reader: asyncio.StreamReader,
         client_writer: asyncio.StreamWriter,
-    ) -> asyncio.StreamWriter | None:
+    ) -> None:
         method, target, version = request_line
         parsed = urlsplit(target)
         if parsed.scheme.lower() != "http" or not parsed.hostname:
@@ -207,48 +272,74 @@ class BrowserEgressProxy:
                 b"HTTP/1.1 403 Forbidden",
                 b"Blocked non-HTTP scheme in browser proxy",
             )
-            return None
+            return
 
         port = parsed.port or 80
         upstream_reader, upstream_writer = await self._open_pinned_upstream(parsed.hostname, port)
-        rewritten_head = _rewrite_http_request_head(method, version, parsed, header_lines)
-        upstream_writer.write(rewritten_head)
-        await upstream_writer.drain()
-        await asyncio.gather(
-            _pump_stream(client_reader, upstream_writer),
-            _pump_stream(upstream_reader, client_writer),
+        genexit = False
+        try:
+            rewritten_head = _rewrite_http_request_head(method, version, parsed, header_lines)
+            upstream_writer.write(rewritten_head)
+            await upstream_writer.drain()
+            await _pump_bidirectional(
+                client_reader,
+                client_writer,
+                upstream_reader,
+                upstream_writer,
+                cancel_client_on_upstream_eof=True,
+            )
+        except GeneratorExit:
+            genexit = True
+            raise
+        finally:
+            if genexit:
+                _close_writer_sync(upstream_writer)
+            else:
+                await _close_writer(upstream_writer)
+
+    async def _dispatch_proxy_request(
+        self,
+        client_reader: asyncio.StreamReader,
+        client_writer: asyncio.StreamWriter,
+    ) -> None:
+        raw_head = await asyncio.wait_for(
+            client_reader.readuntil(b"\r\n\r\n"),
+            timeout=_CONNECT_TIMEOUT_SECONDS,
         )
-        return upstream_writer
+        if len(raw_head) > _HEADER_READ_LIMIT:
+            raise asyncio.LimitOverrunError("Request header fields too large", len(raw_head))
+
+        lines = raw_head[:-4].decode("latin-1").split("\r\n")
+        if not lines or not lines[0]:
+            return
+        parts = lines[0].split(" ")
+        if len(parts) != 3:
+            await self._send_error(client_writer, b"HTTP/1.1 400 Bad Request")
+            return
+
+        method, target, version = parts
+        if method.upper() == "CONNECT":
+            await self._forward_connect(target, client_reader, client_writer)
+        else:
+            await self._forward_http(
+                (method, target, version), lines[1:], client_reader, client_writer
+            )
 
     async def _handle_client(
         self,
         client_reader: asyncio.StreamReader,
         client_writer: asyncio.StreamWriter,
     ) -> None:
-        upstream_writer: asyncio.StreamWriter | None = None
+        current_task = asyncio.current_task()
+        if current_task is not None:
+            self._client_tasks.add(current_task)
+            current_task.add_done_callback(self._client_tasks.discard)
+        genexit = False
         try:
-            raw_head = await asyncio.wait_for(
-                client_reader.readuntil(b"\r\n\r\n"),
-                timeout=_CONNECT_TIMEOUT_SECONDS,
-            )
-            if len(raw_head) > _HEADER_READ_LIMIT:
-                raise asyncio.LimitOverrunError("Request header fields too large", len(raw_head))
-
-            lines = raw_head[:-4].decode("latin-1").split("\r\n")
-            if not lines or not lines[0]:
-                return
-            parts = lines[0].split(" ")
-            if len(parts) != 3:
-                await self._send_error(client_writer, b"HTTP/1.1 400 Bad Request")
-                return
-
-            method, target, version = parts
-            if method.upper() == "CONNECT":
-                upstream_writer = await self._forward_connect(target, client_reader, client_writer)
-            else:
-                upstream_writer = await self._forward_http(
-                    (method, target, version), lines[1:], client_reader, client_writer
-                )
+            await self._dispatch_proxy_request(client_reader, client_writer)
+        except GeneratorExit:
+            genexit = True
+            raise
         except asyncio.LimitOverrunError:
             await self._send_error(client_writer, b"HTTP/1.1 431 Request Header Fields Too Large")
         except URLValidationError as exc:
@@ -261,5 +352,9 @@ class BrowserEgressProxy:
         except (asyncio.IncompleteReadError, TimeoutError, ConnectionError, OSError):
             await self._send_error(client_writer, b"HTTP/1.1 502 Bad Gateway")
         finally:
-            await _close_writer(upstream_writer)
-            await _close_writer(client_writer)
+            if current_task is not None:
+                self._client_tasks.discard(current_task)
+            if genexit:
+                _close_writer_sync(client_writer)
+            else:
+                await _close_writer(client_writer)

@@ -27,7 +27,7 @@ from .ports import (
     UnsupportedMediaTypeError,
     WorkerTimeoutError,
 )
-from .validation import URLValidationError, redact_url_for_log
+from .validation import DNSResolutionError, URLValidationError, redact_url_for_log
 
 ErrorContext = Literal["download", "render", "batch", "schedule"]
 LogLevel = Literal["info", "warning", "error", "exception"]
@@ -47,6 +47,7 @@ class ErrorClassification:
 
 _SIMPLE_RULES: tuple[tuple[type[Exception], int, str, bool, LogLevel], ...] = (
     (RobotsDisallowedError, 403, "robots_disallowed", False, "info"),
+    (DNSResolutionError, 502, "http_error", True, "warning"),
     (URLValidationError, 400, "validation_error", False, "warning"),
     (BrowserActionError, 400, "browser_action_error", False, "warning"),
     (SelectorTimeoutError, 408, "selector_timeout_error", True, "warning"),
@@ -70,7 +71,7 @@ def _prefix_once(prefix: str, text: str) -> str:
 
 
 def _classify_http_status_error(raw_code: int | None, message: str) -> ErrorClassification:
-    if raw_code is None or raw_code >= 500:
+    if raw_code is None or raw_code < 400 or raw_code >= 500:
         return ErrorClassification(
             status_code=502,
             error_type="http_error",
@@ -158,7 +159,7 @@ def _classify_special_error(
             else (str(exc).strip() or "Request timed out")
         )
         return ErrorClassification(
-            status_code=408 if context in {"batch", "render"} else 504,
+            status_code=408,
             error_type="timeout_error",
             message=msg,
             retryable=True,

@@ -30,7 +30,7 @@ from downloader.ports import (
     WorkerTimeoutError,
 )
 from downloader.transformers.ocr import OCRError
-from downloader.validation import SSRFProtectionError, URLValidationError
+from downloader.validation import DNSResolutionError, SSRFProtectionError, URLValidationError
 
 
 @pytest.mark.unit
@@ -61,6 +61,7 @@ def test_render_timeout_uses_worker_timeout_error_type() -> None:
     ("exc", "context", "expected_status", "expected_type", "expected_retryable"),
     [
         (SSRFProtectionError("private ip"), "download", 400, "validation_error", False),
+        (DNSResolutionError("nxdomain.invalid"), "download", 502, "http_error", True),
         (URLValidationError("bad url"), "download", 400, "validation_error", False),
         (BrowserActionError("click failed"), "render", 400, "browser_action_error", False),
         (
@@ -133,7 +134,7 @@ def test_render_timeout_uses_worker_timeout_error_type() -> None:
         (BrowserCapacityError("full"), "download", 503, "service_unavailable", True),
         (BrowserPoolError("pool dead"), "download", 503, "service_unavailable", True),
         (WorkerTimeoutError("worker dead"), "download", 504, "worker_timeout", True),
-        (TimeoutError("deadline"), "download", 504, "timeout_error", True),
+        (TimeoutError("deadline"), "download", 408, "timeout_error", True),
         (TimeoutError("deadline"), "render", 408, "timeout_error", True),
         (TimeoutError("deadline"), "batch", 408, "timeout_error", True),
         (ContentConversionError("bad html"), "download", 500, "conversion_error", False),
@@ -214,3 +215,64 @@ def test_upstream_429_preserves_http_error_type(api_client, env_no_auth) -> None
         assert detail["error_type"] == "http_error"
     finally:
         app.dependency_overrides.pop(get_http_client, None)
+
+
+@pytest.mark.unit
+@pytest.mark.asyncio
+async def test_ocr_true_with_render_true_runs_ocr_instead_of_browser_render() -> None:
+    """`A-14`: `?ocr=true&render=true` checks OCR before the `force_render` branch in single and multi-format."""
+    from downloader.models.responses import ResponseMetadata
+    from downloader.services.content_processor import ConversionDeps, ConversionRequest, convert
+    from downloader.services.multi_format import MultiFormatRequest, process_multiple_formats
+
+    png_bytes = b"\x89PNG\r\n\x1a\nfakepng"
+    img_meta: ResponseMetadata = {
+        "url": "https://example.com/scan.png",
+        "status_code": 200,
+        "content_type": "image/png",
+        "size": len(png_bytes),
+        "headers": {"content-type": "image/png"},
+        "http_version": "HTTP/1.1",
+        "connection_reused": False,
+    }
+    mock_renderer = MagicMock()
+    mock_renderer.render_html = AsyncMock(return_value=b"<html>wrong branch</html>")
+
+    async def _fetcher() -> tuple[bytes, ResponseMetadata]:
+        return png_bytes, img_meta
+
+    deps = ConversionDeps(renderer=mock_renderer, http_fetcher=_fetcher)
+    with patch(
+        "downloader.services.content_processor.extract_text_from_image",
+        new=AsyncMock(return_value="OCR extracted invoice text"),
+    ) as mock_ocr:
+        single_res = await convert(
+            ConversionRequest(
+                url="https://example.com/scan.png",
+                output_format="text",
+                force_render=True,
+                force_ocr=True,
+            ),
+            deps,
+        )
+        assert single_res.text == "OCR extracted invoice text"
+        assert single_res.headers.get("X-OCR-Applied") == "true"
+        mock_renderer.render_html.assert_not_awaited()
+        assert mock_ocr.await_count == 1
+
+    with patch(
+        "downloader.services.content_processor.extract_text_from_image",
+        new=AsyncMock(return_value="OCR multi text"),
+    ) as mock_multi_ocr:
+        multi_res = await process_multiple_formats(
+            MultiFormatRequest(
+                url="https://example.com/scan.png",
+                formats=["text", "markdown"],
+                force_render=True,
+                force_ocr=True,
+            ),
+            deps,
+        )
+        assert multi_res["text/plain"] == "OCR multi text"
+        mock_renderer.render_html.assert_not_awaited()
+        assert mock_multi_ocr.await_count >= 1

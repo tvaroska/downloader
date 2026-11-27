@@ -53,7 +53,8 @@ async def get_http_client(request: Request) -> HTTPClient:
     """Return the lifespan-managed `HTTPClient` from `app.state`."""
     if not hasattr(request.app.state, "http_client"):
         raise RuntimeError("HTTP client not initialized. Check app lifespan configuration.")
-    return request.app.state.http_client
+    client: HTTPClient = request.app.state.http_client
+    return client
 
 
 async def get_job_manager_dependency(request: Request) -> JobStore | None:
@@ -65,14 +66,16 @@ def get_pdf_semaphore(request: Request) -> asyncio.Semaphore:
     """Return the shared browser concurrency semaphore from `app.state`."""
     if not hasattr(request.app.state, "pdf_semaphore"):
         raise RuntimeError("PDF semaphore not initialized. Check app lifespan configuration.")
-    return request.app.state.pdf_semaphore
+    pdf_sem: asyncio.Semaphore = request.app.state.pdf_semaphore
+    return pdf_sem
 
 
 def get_batch_semaphore(request: Request) -> asyncio.Semaphore:
     """Return the batch concurrency semaphore from `app.state`."""
     if not hasattr(request.app.state, "batch_semaphore"):
         raise RuntimeError("Batch semaphore not initialized. Check app lifespan configuration.")
-    return request.app.state.batch_semaphore
+    batch_sem: asyncio.Semaphore = request.app.state.batch_semaphore
+    return batch_sem
 
 
 def get_settings_dependency() -> Settings:

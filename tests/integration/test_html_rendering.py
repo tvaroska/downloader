@@ -6,6 +6,7 @@ import pytest
 
 from downloader.browser.renderer import LocalBrowserRenderer, render_html_with_playwright
 from downloader.models.responses import ResponseMetadata
+from downloader.ports import PDFGeneratorError, RenderTimeoutError
 from downloader.services.content_processor import ConversionDeps, ConversionRequest, convert
 
 
@@ -54,10 +55,11 @@ class TestPlaywrightHTMLRendering:
         # Configure mock to return 404
         mock_page.goto.return_value = MagicMock(status=404)
 
-        # Execute and expect exception
+        # Execute and expect domain error
         url = "https://example.com/not-found"
-        with pytest.raises(Exception, match="Failed to load page"):
+        with pytest.raises(PDFGeneratorError, match="Failed to load page") as exc_info:
             await render_html_with_playwright(url)
+        assert exc_info.value.status_code == 404
 
         # Verify cleanup still happens
         mock_context.close.assert_called_once()
@@ -66,38 +68,29 @@ class TestPlaywrightHTMLRendering:
         """Test handling of page load timeout."""
         mock_generator, mock_browser, mock_context, mock_page = mock_playwright_for_html
 
-        # Configure mock to timeout
-        import asyncio
-
         mock_page.goto.side_effect = TimeoutError("Page load timeout")
 
-        # Execute and expect exception
         url = "https://example.com/slow-page"
-        with pytest.raises((Exception, asyncio.TimeoutError)):
+        with pytest.raises(RenderTimeoutError, match="Timeout loading page"):
             await render_html_with_playwright(url)
 
-        # Verify cleanup still happens
         mock_context.close.assert_called_once()
 
     async def test_render_html_closes_modals(self, mock_playwright_for_html):
         """Test that modal closing logic is attempted."""
         mock_generator, mock_browser, mock_context, mock_page = mock_playwright_for_html
 
-        # Configure mocks
         mock_page.goto.return_value = MagicMock(status=200)
         mock_page.content.return_value = "<html><body>Content</body></html>"
 
-        # Create mock close button
         mock_close_button = AsyncMock()
         mock_page.query_selector_all.return_value = [mock_close_button]
 
-        # Execute
         url = "https://example.com/article"
-        await render_html_with_playwright(url)
+        result = await render_html_with_playwright(url)
 
-        # Verify modal closing was attempted
+        assert result == b"<html><body>Content</body></html>"
         assert mock_page.query_selector_all.called
-        # Check that close button selectors were queried
         call_args = [str(call) for call in mock_page.query_selector_all.call_args_list]
         assert any("close" in str(arg).lower() for arg in call_args)
 
@@ -108,33 +101,30 @@ class TestPlaywrightHTMLRendering:
         mock_page.goto.return_value = MagicMock(status=200)
         mock_page.content.return_value = "<html><body>Content</body></html>"
 
-        # Execute
         url = "https://example.com/article"
-        await render_html_with_playwright(url)
+        result = await render_html_with_playwright(url)
 
-        # Verify browser was released
+        assert result == b"<html><body>Content</body></html>"
         mock_generator.pool.release_browser.assert_called_once_with(mock_browser)
 
     async def test_render_html_browser_not_initialized(self):
         """Test error when browser pool is not initialized."""
-        # Mock get_shared_pdf_generator to return None
         with patch("downloader.pdf_generator.get_shared_pdf_generator", return_value=None):
             url = "https://example.com/article"
 
-            with pytest.raises(Exception, match="PDF generator pool not initialized"):
+            with pytest.raises(PDFGeneratorError, match="PDF generator pool not initialized"):
                 await render_html_with_playwright(url)
 
     async def test_render_html_no_response_from_goto(self, mock_playwright_for_html):
         """Test handling when page.goto() returns None."""
         mock_generator, mock_browser, mock_context, mock_page = mock_playwright_for_html
 
-        # Configure mock to return None
         mock_page.goto.return_value = None
 
-        # Execute and expect exception
         url = "https://example.com/article"
-        with pytest.raises(Exception, match="Failed to load page"):
+        with pytest.raises(PDFGeneratorError, match="Failed to load page") as exc_info:
             await render_html_with_playwright(url)
+        assert exc_info.value.status_code is None
 
 
 @pytest.mark.unit

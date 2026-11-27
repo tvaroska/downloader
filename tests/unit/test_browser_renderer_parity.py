@@ -22,7 +22,7 @@ from downloader.ports import (
     ScreenshotGeneratorError,
     SelectorTimeoutError,
 )
-from downloader.validation import SSRFProtectionError, URLValidationError
+from downloader.validation import DNSResolutionError, SSRFProtectionError, URLValidationError
 from downloader.worker import process_worker_browser_task
 from downloader.worker_queue import WorkerQueue
 from tests.fixtures.in_memory_ports import InMemoryWorkQueue
@@ -34,6 +34,7 @@ from tests.fixtures.mock_fixtures import FakeRedis
 @pytest.mark.parametrize(
     ("kind", "exc_factory"),
     [
+        ("render_html", lambda: DNSResolutionError("nxdomain.invalid")),
         ("render_html", lambda: SSRFProtectionError("Blocked private IP 127.0.0.1")),
         ("render_html", lambda: URLValidationError("Malformed URL")),
         ("render_html", lambda: RobotsDisallowedError("https://example.com/private")),
@@ -51,6 +52,7 @@ from tests.fixtures.mock_fixtures import FakeRedis
         ("screenshot", lambda: ScreenshotGeneratorError("Viewport capture error")),
     ],
     ids=[
+        "dns_resolution",
         "ssrf",
         "validation",
         "robots",
@@ -77,6 +79,20 @@ async def test_local_and_remote_agree_on_error_classification(kind: str, exc_fac
     queue = InMemoryWorkQueue()
     remote_renderer = RemoteBrowserRenderer(queue, timeout=5.0)
     worker_sem = asyncio.Semaphore(2)
+    domain_errors = (
+        URLValidationError,
+        RobotsDisallowedError,
+        CrawlDelayExceededError,
+        SelectorTimeoutError,
+        BrowserActionError,
+        ContentTooLargeError,
+        ContentConversionError,
+        BrowserCapacityError,
+        BrowserPoolError,
+        RenderTimeoutError,
+        PDFGeneratorError,
+        ScreenshotGeneratorError,
+    )
 
     async def _run_local() -> Exception:
         with (
@@ -93,7 +109,7 @@ async def test_local_and_remote_agree_on_error_classification(kind: str, exc_fac
                 new=AsyncMock(side_effect=local_exc),
             ),
         ):
-            with pytest.raises(Exception) as exc_info:
+            with pytest.raises(domain_errors) as exc_info:
                 if kind == "pdf":
                     await local_renderer.render_pdf("https://example.com")
                 elif kind == "screenshot":
@@ -132,7 +148,7 @@ async def test_local_and_remote_agree_on_error_classification(kind: str, exc_fac
 
         worker_task = asyncio.create_task(_worker_once())
         try:
-            with pytest.raises(Exception) as exc_info:
+            with pytest.raises(domain_errors) as exc_info:
                 if kind == "pdf":
                     await remote_renderer.render_pdf("https://example.com")
                 elif kind == "screenshot":
@@ -149,6 +165,7 @@ async def test_local_and_remote_agree_on_error_classification(kind: str, exc_fac
 
     raised_local = await _run_local()
     raised_remote = await _run_remote()
+    assert isinstance(raised_local, type(local_exc))
 
     local_cls = classify_domain_error(raised_local, context="download")
     remote_cls = classify_domain_error(raised_remote, context="download")

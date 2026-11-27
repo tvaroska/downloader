@@ -359,8 +359,10 @@ class TestBrowserPoolReleaseBrowser:
         browser = await pool.get_browser()
         await pool.close()
 
-        # Should not raise
         await pool.release_browser(browser)
+        assert pool._closed is True
+        assert len(pool._all_browsers) == 0
+        assert pool._available_browsers.empty()
 
     @pytest.mark.asyncio
     async def test_release_unknown_browser_ignored(self, mock_playwright):
@@ -371,8 +373,10 @@ class TestBrowserPoolReleaseBrowser:
         await pool.start()
 
         unknown_browser = Mock()
-        # Should not raise
         await pool.release_browser(unknown_browser)
+        assert unknown_browser not in pool._all_browsers
+        assert unknown_browser not in pool._browser_health
+        assert pool._available_browsers.qsize() == pool.pool_size
 
         await pool.close()
 
@@ -511,8 +515,10 @@ class TestBrowserPoolReplaceBrowser:
         ):
             await pool._replace_browser(mock_browser)
 
-        # Old browser should be removed
+        # Old browser should be removed and no replacement queued
         assert mock_browser not in pool._all_browsers
+        assert mock_browser not in pool._browser_health
+        assert pool._available_browsers.empty()
 
 
 class TestBrowserPoolClose:

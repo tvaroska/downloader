@@ -69,3 +69,48 @@ async def test_redirect_policy_crawl_delay_maps_to_429(api_client, env_no_auth) 
         app.dependency_overrides.pop(get_robots_checker, None)
         app.dependency_overrides.pop(get_domain_throttle, None)
         await route_http.close()
+
+
+@pytest.mark.unit
+@pytest.mark.asyncio
+@pytest.mark.parametrize("status_code", [300, 302, 304, 305])
+async def test_3xx_with_no_location_maps_to_502_http_error(
+    api_client, env_no_auth, status_code: int
+) -> None:
+    """Unfollowed `3xx` responses without `Location` raise `HTTPClientError` -> `502 http_error` (`A-11`)."""
+    from downloader.http_client import HTTPClientError
+
+    def _no_location_handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            status_code,
+            headers={"Content-Type": "text/html"},
+            stream=httpx.ByteStream(b"<html>multiple choices</html>"),
+            request=request,
+        )
+
+    async with HTTPClient(transport=httpx.MockTransport(_no_location_handler)) as client:
+        with pytest.raises(HTTPClientError) as exc_info:
+            await client.download("https://example.com/no-location")
+        assert exc_info.value.status_code == status_code
+
+    class _AllowRobots:
+        async def check_allowed(self, _url: str, _ua: str | None = None) -> float | None:
+            return None
+
+    class _NoopThrottle:
+        async def wait_if_needed(self, _domain: str, _delay: float | None) -> float:
+            return 0.0
+
+    route_http = HTTPClient(transport=httpx.MockTransport(_no_location_handler))
+    app.dependency_overrides[get_http_client] = lambda: route_http
+    app.dependency_overrides[get_robots_checker] = lambda: _AllowRobots()
+    app.dependency_overrides[get_domain_throttle] = lambda: _NoopThrottle()
+    try:
+        resp = api_client.get("/https://example.com/no-location", headers={"Accept": "text/plain"})
+        assert resp.status_code == 502
+        assert resp.json()["detail"]["error_type"] == "http_error"
+    finally:
+        app.dependency_overrides.pop(get_http_client, None)
+        app.dependency_overrides.pop(get_robots_checker, None)
+        app.dependency_overrides.pop(get_domain_throttle, None)
+        await route_http.close()

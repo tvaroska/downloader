@@ -110,7 +110,7 @@ class WorkerConfig(BaseSettings):
         default=60,
         ge=5,
         le=600,
-        description="TTL in seconds for worker heartbeat keys in Redis",
+        description="TTL in seconds for worker heartbeat keys in Redis (up to drain_timeout 300s + heartbeat_interval 120s)",
     )
     max_concurrent_jobs: int = Field(
         default=4,

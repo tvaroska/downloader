@@ -73,11 +73,11 @@ select = [
     "PLR0912", # too-many-branches
     "PLR0913", # too-many-arguments
     "PLR0915", # too-many-statements
+    "RUF100",  # unused-noqa
 ]
 ignore = [
     "E501",  # Line too long (handled by formatter)
     "B008",  # Function call in argument defaults (FastAPI Depends pattern)
-    "B904",  # Exception chaining
 ]
 
 [tool.ruff.lint.per-file-ignores]
@@ -107,7 +107,7 @@ addopts = [
     "-ra",
 ]
 markers = [
-    "smoke: Fast sanity checks (<3s total) - run on every commit",
+    "smoke: Fast sanity checks (<15s total) - run on every commit",
     "integration: Tests with Playwright/Redis dependencies (~15s)",
     "e2e: Full system tests with Docker (~60s)",
     "docker_compose: Tests requiring docker-compose service stack",
@@ -156,10 +156,20 @@ plugins = ["pydantic.mypy"]
 mypy_path = ["src", "."]
 explicit_package_bases = true
 exclude = ["^\\.venv/"]
-warn_unused_configs = true
-disallow_untyped_defs = false
-check_untyped_defs = true
+strict = true
 ignore_missing_imports = true
+
+[[tool.mypy.overrides]]
+module = ["tests", "tests.*"]
+disallow_any_generics = false
+disallow_subclassing_any = false
+disallow_untyped_calls = false
+disallow_untyped_defs = false
+disallow_incomplete_defs = false
+disallow_untyped_decorators = false
+warn_return_any = false
+warn_unused_ignores = false
+no_implicit_reexport = false
 
 [dependency-groups]
 dev = [

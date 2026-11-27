@@ -1031,7 +1031,7 @@ class TestJobManagerWatchMultiAtomicity:
                 assert await manager.update_job_status(job_id, JobStatus.CANCELLED) is True
             return out
 
-        monkeypatch.setattr(jm_mod.asyncio, "to_thread", _cancel_during_to_thread)
+        monkeypatch.setattr("downloader.job_manager.asyncio.to_thread", _cancel_during_to_thread)
         monkeypatch.setattr(jm_mod, "_cap_job_result_payload_with_counts", orig_cap)
 
         completed = await manager.complete_job(

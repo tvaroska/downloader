@@ -1628,3 +1628,66 @@ class TestOpenTelemetryIntegration:
             _resolve_otlp_traces_endpoint("http://otel-collector:4318/v1/traces")
             == "http://otel-collector:4318/v1/traces"
         )
+
+
+@pytest.mark.unit
+@pytest.mark.asyncio
+async def test_teardown_isolation_catches_unlisted_exceptions_and_worker_metrics_enforces_auth() -> (
+    None
+):
+    """`S-13` & `S-14`: `_run_teardown_step` isolates arbitrary `Exception` subclasses and worker `/metrics` enforces `DOWNLOADER_KEY`."""
+    from downloader.config import AuthConfig
+    from downloader.main import _run_teardown_step
+    from downloader.worker_runtime import _start_worker_metrics_server
+
+    ran_second_step = False
+
+    async def _bad_step() -> None:
+        raise KeyError("unexpected-shutdown-key-error")
+
+    async def _good_step() -> None:
+        nonlocal ran_second_step
+        ran_second_step = True
+
+    await _run_teardown_step("bad_step", _bad_step)
+    await _run_teardown_step("good_step", _good_step)
+    assert ran_second_step is True
+
+    auth_cfg = Settings(auth=AuthConfig(api_key="worker-metrics-secret"))
+    srv = await _start_worker_metrics_server(0, settings=auth_cfg)
+    assert srv.sockets
+    port = srv.sockets[0].getsockname()[1]
+    try:
+        # 1. Unauthenticated scrape -> 401 Unauthorized
+        r1, w1 = await asyncio.open_connection("127.0.0.1", port)
+        w1.write(b"GET /metrics HTTP/1.1\r\nHost: 127.0.0.1\r\n\r\n")
+        await w1.drain()
+        unauth_resp = await r1.read(4096)
+        w1.close()
+        await w1.wait_closed()
+        assert unauth_resp.startswith(b"HTTP/1.1 401 Unauthorized")
+
+        # 2. Invalid Bearer token -> 401 Unauthorized
+        r2, w2 = await asyncio.open_connection("127.0.0.1", port)
+        w2.write(b"GET /metrics HTTP/1.1\r\nHost: 127.0.0.1\r\nAuthorization: Bearer wrong\r\n\r\n")
+        await w2.drain()
+        wrong_resp = await r2.read(4096)
+        w2.close()
+        await w2.wait_closed()
+        assert wrong_resp.startswith(b"HTTP/1.1 401 Unauthorized")
+
+        # 3. Valid Bearer token -> 200 OK with Prometheus exposition
+        r3, w3 = await asyncio.open_connection("127.0.0.1", port)
+        w3.write(
+            b"GET /metrics HTTP/1.1\r\nHost: 127.0.0.1\r\n"
+            b"Authorization: Bearer worker-metrics-secret\r\n\r\n"
+        )
+        await w3.drain()
+        ok_resp = await r3.read(8192)
+        w3.close()
+        await w3.wait_closed()
+        assert ok_resp.startswith(b"HTTP/1.1 200 OK")
+        assert b"downloader_uptime_seconds" in ok_resp
+    finally:
+        srv.close()
+        await srv.wait_closed()

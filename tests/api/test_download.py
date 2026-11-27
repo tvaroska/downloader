@@ -126,7 +126,7 @@ class TestDownloadEndpoint:
                 "http_error",
             ),
             (OCRError("Corrupt image"), 422, "ocr_error"),
-            (TimeoutError("Operation timed out"), 504, "timeout_error"),
+            (TimeoutError("Operation timed out"), 408, "timeout_error"),
             (HTTPClientError("Connection refused"), 502, "http_error"),
             (DownloadError("Generic download error"), 500, "download_error"),
             (RuntimeError("Unexpected failure"), 500, "internal_error"),

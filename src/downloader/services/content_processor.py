@@ -127,11 +127,24 @@ class _HeaderSpec:
     content_disposition: str | None = None
 
 
+def _sanitize_header_value(value: str) -> str:
+    """Ensure echoed HTTP header values are CR/LF-free and valid Latin-1."""
+    cleaned = value.replace("\r", "").replace("\n", "").replace("\x00", "")
+    parts: list[str] = []
+    for ch in cleaned:
+        code = ord(ch)
+        if ch == "\t" or (0x20 <= code <= 0xFF and code != 0x7F):
+            parts.append(ch)
+        else:
+            parts.extend(f"%{b:02X}" for b in ch.encode("utf-8", errors="surrogatepass"))
+    return "".join(parts)
+
+
 def _build_conversion_headers(spec: _HeaderSpec) -> dict[str, str]:
     """Construct canonical `X-Original-*` and content metadata headers in one place."""
-    headers: dict[str, str] = {"X-Original-URL": spec.original_url}
+    headers: dict[str, str] = {"X-Original-URL": _sanitize_header_value(spec.original_url)}
     if spec.original_content_type is not None:
-        headers["X-Original-Content-Type"] = spec.original_content_type
+        headers["X-Original-Content-Type"] = _sanitize_header_value(spec.original_content_type)
     if spec.original_size is not None:
         headers["X-Content-Length"] = str(spec.original_size)
     if spec.content_length is not None:
@@ -141,9 +154,9 @@ def _build_conversion_headers(spec: _HeaderSpec) -> dict[str, str]:
     if spec.ocr_applied:
         headers["X-OCR-Applied"] = "true"
         if spec.ocr_language:
-            headers["X-OCR-Language"] = spec.ocr_language
+            headers["X-OCR-Language"] = _sanitize_header_value(spec.ocr_language)
     if spec.content_disposition is not None:
-        headers["Content-Disposition"] = spec.content_disposition
+        headers["Content-Disposition"] = _sanitize_header_value(spec.content_disposition)
     return headers
 
 
@@ -167,7 +180,7 @@ def _make_result(
 ) -> ConversionResult:
     return ConversionResult(
         body=body,
-        media_type=media_type,
+        media_type=_sanitize_header_value(media_type),
         headers=_build_conversion_headers(header_spec),
         original_content_type=original_content_type,
         rendered_with_js=header_spec.rendered_with_js,
@@ -281,7 +294,8 @@ async def _convert_json(req: ConversionRequest, deps: ConversionDeps) -> Convers
 
 async def _convert_raw(req: ConversionRequest, deps: ConversionDeps) -> ConversionResult:
     content, metadata = await _require_http_payload(req, deps)
-    orig_ct = metadata.get("content_type", "application/octet-stream")
+    raw_ct = (metadata.get("content_type") or "").strip()
+    orig_ct = raw_ct if raw_ct and raw_ct.lower() != "unknown" else "application/octet-stream"
     return _make_result(
         content,
         orig_ct,
@@ -452,9 +466,13 @@ async def _convert_text_or_markdown(
         meta = (metadata["url"], metadata["content_type"], metadata["size"])
         return _text_result_from_meta(converted, media_type, meta, rendered_with_js=False)
 
-    if req.force_render and (
-        req.content is None
-        or (req.metadata is not None and "html" in req.metadata["content_type"].lower())
+    if (
+        req.force_render
+        and not req.force_ocr
+        and (
+            req.content is None
+            or (req.metadata is not None and "html" in req.metadata["content_type"].lower())
+        )
     ):
         return await _force_render_text_or_markdown(req, deps, fmt, media_type)
 
@@ -569,9 +587,13 @@ async def _convert_html(req: ConversionRequest, deps: ConversionDeps) -> Convers
         content, metadata = await _require_http_payload(req, deps)
         return _static_html_result(content, metadata, rendered_with_js=False)
 
-    if req.force_render and (
-        req.content is None
-        or (req.metadata is not None and "html" in req.metadata["content_type"].lower())
+    if (
+        req.force_render
+        and not req.force_ocr
+        and (
+            req.content is None
+            or (req.metadata is not None and "html" in req.metadata["content_type"].lower())
+        )
     ):
         return await _force_render_html(req, deps)
 

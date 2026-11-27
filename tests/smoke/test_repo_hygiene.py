@@ -227,3 +227,42 @@ def test_version_strings_match_package_manifest() -> None:
     spec_text = (REPO_ROOT / "spec" / "contracts.md").read_text(encoding="utf-8")
     assert f"(service `{expected}`)" in spec_text
     assert f'"version": "{expected}"' in spec_text
+
+
+@pytest.mark.smoke
+def test_dockerfile_and_cloudbuild_image_hardening() -> None:
+    """`S-15`: Pin digests on base/CI images, drop `curl`, and keep `/app` root-owned read-only."""
+    import importlib
+
+    yaml_mod = importlib.import_module("yaml")
+    dockerfile_text = (REPO_ROOT / "Dockerfile").read_text(encoding="utf-8")
+    for line in dockerfile_text.splitlines():
+        stripped = line.strip()
+        if stripped.upper().startswith("FROM "):
+            image_ref = stripped.split()[1]
+            assert "@sha256:" in image_ref, f"Dockerfile FROM must pin digest: {stripped}"
+
+    non_comment_lines = "\n".join(
+        ln for ln in dockerfile_text.splitlines() if not ln.strip().startswith("#")
+    )
+    assert "curl" not in non_comment_lines, "Dockerfile must not install or invoke curl"
+    assert "chown -R root:root /app" in dockerfile_text
+    assert "chown -R appuser:appuser /app" not in dockerfile_text
+
+    cb = yaml_mod.safe_load((REPO_ROOT / "cloudbuild.yaml").read_text(encoding="utf-8"))
+    for step in cb["steps"]:
+        step_name = step["name"]
+        if step_name.startswith(("gcr.io/", "${_REGION}-docker.pkg.dev/")):
+            continue
+        assert "@sha256:" in step_name, (
+            f"Cloud Build step {step.get('id')} must pin digest: {step_name}"
+        )
+
+    trivy_script = " ".join(
+        next(s["args"] for s in cb["steps"] if s.get("id") == "trivy-vulnerability-scan")
+    )
+    assert "aquasec/trivy:" in trivy_script and "@sha256:" in trivy_script
+    redis_script = " ".join(
+        next(s["args"] for s in cb["steps"] if s.get("id") == "redis-integration-tests")
+    )
+    assert "redis:7-alpine@sha256:" in redis_script

@@ -1,7 +1,5 @@
 {
   "config": [
-    "mypy:not-strict",
-    "ruff-ignore:B904",
     "ruff:ANN",
     "ruff:RUF",
     "ruff:S"

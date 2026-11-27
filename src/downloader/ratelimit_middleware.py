@@ -288,11 +288,13 @@ class RateLimitMiddleware(BaseHTTPMiddleware):
     async def dispatch(self, request: Request, call_next: Callable[..., Any]) -> Response:
         path = request.url.path
         if path in _SKIP_PATHS:
-            return await call_next(request)
+            skip_resp: Response = await call_next(request)
+            return skip_resp
 
         classified = self._classify_path(path, request)
         if classified is None:
-            return await call_next(request)
+            unclassified_resp: Response = await call_next(request)
+            return unclassified_resp
 
         bucket, limit_str = classified
         cfg = self.settings

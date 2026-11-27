@@ -26,6 +26,7 @@ from .content_processor import (
     ConversionDeps,
     ConversionRequest,
     ConversionResult,
+    HTTPFallbackFetcher,
     OutputFormat,
     convert,
 )
@@ -160,7 +161,7 @@ def _make_batch_http_fetcher(
     validated_url: str,
     sanitized_headers: dict[str, str] | None,
     format_to_use: str,
-):
+) -> HTTPFallbackFetcher:
     cached: tuple[bytes, ResponseMetadata] | None = None
     require_text = format_to_use in {"text", "markdown", "html"}
     allow_ocr = require_text

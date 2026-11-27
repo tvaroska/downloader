@@ -380,13 +380,6 @@ class TestPlaywrightDetection:
 class TestConfigurableThresholds:
     """Test configurable content detection thresholds."""
 
-    def test_default_body_text_threshold_is_100(self):
-        """Test that default min_body_text_threshold is 100."""
-        from downloader.config import ContentConfig
-
-        config = ContentConfig()
-        assert config.min_body_text_threshold == 100
-
     def test_default_js_framework_threshold_is_200(self):
         """Test that default min_js_framework_content_threshold is 200."""
         from downloader.config import ContentConfig

@@ -12,8 +12,9 @@ from typing import Any
 import redis.exceptions as redis_exc
 from pydantic import ValidationError
 
+from .auth import is_auth_enabled, verify_api_key
 from .browser.renderer import LocalBrowserRenderer
-from .config import Settings
+from .config import Settings, get_settings
 from .crawling import DomainThrottle, RobotsChecker
 from .http_client import HTTPClient
 from .job_manager import JobManager
@@ -45,7 +46,13 @@ from .ports import (
 from .scheduler import ExecutionStorage, ScheduledJobExecutor, SchedulerService
 from .telemetry import shutdown_telemetry
 from .transformers.ocr import shutdown_ocr_executor
-from .validation import EgressPolicy, SSRFProtectionError, URLValidationError, canonical_host
+from .validation import (
+    DNSResolutionError,
+    EgressPolicy,
+    SSRFProtectionError,
+    URLValidationError,
+    canonical_host,
+)
 from .worker_queue import WorkerQueue
 
 logger = logging.getLogger(__name__)
@@ -73,6 +80,7 @@ class _WorkerRuntime:
 _SIMPLE_BROWSER_TASK_ERRORS: tuple[
     tuple[type[Exception] | tuple[type[Exception], ...], str, int], ...
 ] = (
+    (DNSResolutionError, "dns_resolution_error", 502),
     (SSRFProtectionError, "ssrf_protection_error", 400),
     (URLValidationError, "validation_error", 400),
     (RobotsDisallowedError, "robots_disallowed", 403),
@@ -140,15 +148,49 @@ def _expired_browser_response(task: BrowserTaskRequest) -> BrowserTaskResponse:
     )
 
 
-async def _start_worker_metrics_server(port: int) -> asyncio.Server:
+def _extract_raw_http_api_key(header_lines: list[str]) -> str | None:
+    for line in header_lines:
+        if ":" not in line:
+            continue
+        name, val = line.split(":", 1)
+        lower_name = name.strip().lower()
+        stripped = val.strip()
+        if lower_name == "authorization" and stripped.lower().startswith("bearer "):
+            tok = stripped[7:].strip()
+            if tok:
+                return tok
+        elif lower_name == "x-api-key" and stripped:
+            return stripped
+    return None
+
+
+async def _start_worker_metrics_server(
+    port: int,
+    *,
+    settings: Settings | None = None,
+) -> asyncio.Server:
     """Start a lightweight HTTP endpoint exporting Prometheus metrics for the worker process."""
+    cfg = settings or get_settings()
 
     async def _handle(reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
         try:
-            request_line = await asyncio.wait_for(reader.readline(), timeout=5.0)
-            parts = request_line.decode("latin-1", errors="replace").split()
+            raw_head = await asyncio.wait_for(reader.readuntil(b"\r\n\r\n"), timeout=5.0)
+            lines = raw_head[:-4].decode("latin-1", errors="replace").split("\r\n")
+            parts = lines[0].split() if lines and lines[0] else []
             path = parts[1] if len(parts) >= 2 else "/"
-            if path == "/metrics":
+            if path != "/metrics":
+                writer.write(
+                    b"HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
+                )
+            elif is_auth_enabled(cfg) and not (
+                (tok := _extract_raw_http_api_key(lines[1:])) and verify_api_key(tok, cfg)
+            ):
+                writer.write(
+                    b"HTTP/1.1 401 Unauthorized\r\n"
+                    b"WWW-Authenticate: Bearer\r\n"
+                    b"Content-Length: 0\r\nConnection: close\r\n\r\n"
+                )
+            else:
                 body = get_metrics_collector().get_prometheus_metrics().encode("utf-8")
                 header = (
                     "HTTP/1.1 200 OK\r\n"
@@ -157,19 +199,21 @@ async def _start_worker_metrics_server(port: int) -> asyncio.Server:
                     "Connection: close\r\n\r\n"
                 ).encode("ascii")
                 writer.write(header + body)
-            else:
-                writer.write(
-                    b"HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
-                )
             await writer.drain()
-        except (TimeoutError, OSError, ValueError):
+        except (
+            asyncio.IncompleteReadError,
+            asyncio.LimitOverrunError,
+            TimeoutError,
+            OSError,
+            ValueError,
+        ):
             pass
         finally:
             writer.close()
             with contextlib.suppress(OSError):
                 await writer.wait_closed()
 
-    return await asyncio.start_server(_handle, host="0.0.0.0", port=port)
+    return await asyncio.start_server(_handle, host="0.0.0.0", port=port, limit=16384)
 
 
 async def _init_worker_runtime(
@@ -280,7 +324,9 @@ async def _init_worker_runtime(
 
     metrics_server: asyncio.Server | None = None
     if settings.worker.metrics_port is not None:
-        metrics_server = await _start_worker_metrics_server(settings.worker.metrics_port)
+        metrics_server = await _start_worker_metrics_server(
+            settings.worker.metrics_port, settings=settings
+        )
         logger.info(f"Worker Prometheus metrics listening on port {settings.worker.metrics_port}")
 
     return _WorkerRuntime(

@@ -309,3 +309,56 @@ async def test_content_encoding_edge_cases_and_content_negotiation() -> None:
     assert user_only.isascii() and "@example.com/p" in user_only
     ipv6_sanitized = sanitize_original_url_header("https://[2001:db8::1]:8080/café")
     assert ipv6_sanitized.isascii() and "[2001:db8::1]:8080" in ipv6_sanitized
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize(
+    ("codec", "bom", "declared_ct"),
+    [
+        ("utf-16-le", b"\xff\xfe", "text/plain; charset=utf-16le"),
+        ("utf-16-be", b"\xfe\xff", "text/plain; charset=utf-16be"),
+        ("utf-32-le", b"\xff\xfe\x00\x00", "text/plain; charset=utf-32le"),
+        ("utf-32-be", b"\x00\x00\xfe\xff", "text/plain; charset=utf-32be"),
+    ],
+)
+def test_utf16_and_utf32_strip_bom_and_allow_bomless_declared_charset(
+    codec: str, bom: bytes, declared_ct: str
+) -> None:
+    """`A-13`: UTF-16/UTF-32 BOM is stripped and BOM-less declared UTF-16/32 skips NUL rejection."""
+    from downloader.content_encoding import is_text_convertible_content_type
+
+    raw_bomless = "Hello Café 東京".encode(codec)
+    raw_with_bom = bom + raw_bomless
+
+    # 1. BOM-prefixed bytes strip U+FEFF both with and without Content-Type charset
+    decoded_auto, _ = resolve_charset_and_decode(raw_with_bom, "text/plain")
+    assert decoded_auto == "Hello Café 東京"
+    assert "\ufeff" not in decoded_auto
+
+    decoded_decl, _ = resolve_charset_and_decode(raw_with_bom, declared_ct)
+    assert decoded_decl == "Hello Café 東京"
+    assert "\ufeff" not in decoded_decl
+
+    # 2. BOM-less bytes with declared UTF-16/32 charset pass NUL sniff and decode cleanly
+    assert is_text_convertible_content_type(declared_ct, sample_bytes=raw_bomless) is True
+    decoded_bomless, _ = resolve_charset_and_decode(raw_bomless, declared_ct)
+    assert decoded_bomless == "Hello Café 東京"
+    assert convert_content(raw_bomless, declared_ct, "text") == "Hello Café 東京"
+
+    # 3. Bare charset=utf-16 / charset=utf-32 without BOM defaults to little-endian instead of UnicodeError
+    if codec == "utf-16-le":
+        assert is_text_convertible_content_type(
+            "text/plain; charset=utf-16", sample_bytes=raw_bomless
+        )
+        assert (
+            resolve_charset_and_decode(raw_bomless, "text/plain; charset=utf-16")[0]
+            == "Hello Café 東京"
+        )
+    if codec == "utf-32-le":
+        assert is_text_convertible_content_type(
+            "text/plain; charset=utf-32", sample_bytes=raw_bomless
+        )
+        assert (
+            resolve_charset_and_decode(raw_bomless, "text/plain; charset=utf-32")[0]
+            == "Hello Café 東京"
+        )

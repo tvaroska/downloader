@@ -206,7 +206,7 @@ async def _run_teardown_step(name: str, step: Callable[[], Any]) -> None:
         result = step()
         if inspect.isawaitable(result):
             await result
-    except (redis_exc.RedisError, OSError, RuntimeError, ValueError, TimeoutError) as exc:
+    except Exception as exc:  # noqa: BLE001
         logger.warning(f"Shutdown step '{name}' failed: {exc}")
 
 

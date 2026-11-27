@@ -25,9 +25,6 @@ def format_to_mime_type(format_type: str) -> str:
     return FORMAT_TO_MIME.get(format_type, "application/octet-stream")
 
 
-_format_to_mime_type = format_to_mime_type
-
-
 def parse_accept_header(accept_header: str | None) -> str:
     """Parse a single `Accept` header string into an internal format name."""
     if not accept_header:

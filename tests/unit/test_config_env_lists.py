@@ -104,3 +104,75 @@ def test_dotenv_reaches_nested_settings(tmp_path: Path, monkeypatch: pytest.Monk
         "https://dotenv.example.com",
         "https://two.example.com",
     ]
+
+
+@pytest.mark.unit
+@pytest.mark.asyncio
+async def test_ratelimit_and_ssrf_startup_validation_and_cloud_metadata_toggle(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """`A-15`: Validate rate-limit strings at startup, wire `SSRF_BLOCK_CLOUD_METADATA`, and guard prod DNS."""
+    from pydantic import ValidationError
+
+    from downloader.config import RateLimitConfig, SSRFConfig
+    from downloader.validation import SSRFProtectionError, validate_url_async
+
+    # 1. Invalid rate-limit string fails immediately at model construction
+    with pytest.raises(ValidationError, match="Invalid rate limit expression"):
+        RateLimitConfig(default_limit="not-a-rate-limit")
+    with pytest.raises(ValidationError, match="Invalid rate limit expression"):
+        RateLimitConfig(download_limit="60/fortnights")
+
+    # 2. SSRF_BLOCK_CLOUD_METADATA independently controls cloud metadata IPs and hostnames
+    private_open_meta_blocked = Settings(
+        ssrf=SSRFConfig(block_private_ips=False, block_cloud_metadata=True, resolve_dns=False)
+    )
+    with pytest.raises(SSRFProtectionError):
+        await validate_url_async(
+            "http://169.254.169.254/latest/meta-data/", private_open_meta_blocked
+        )
+    with pytest.raises(SSRFProtectionError):
+        await validate_url_async(
+            "http://metadata.google.internal/computeMetadata/v1/", private_open_meta_blocked
+        )
+    assert (
+        await validate_url_async("http://10.0.0.5/internal", private_open_meta_blocked)
+        == "http://10.0.0.5/internal"
+    )
+
+    both_open = Settings(
+        ssrf=SSRFConfig(block_private_ips=False, block_cloud_metadata=False, resolve_dns=False)
+    )
+    assert (
+        await validate_url_async("http://169.254.169.254/latest/meta-data/", both_open)
+        == "http://169.254.169.254/latest/meta-data/"
+    )
+    assert (
+        await validate_url_async("http://metadata.google.internal/computeMetadata/v1/", both_open)
+        == "http://metadata.google.internal/computeMetadata/v1/"
+    )
+
+    # Disabling only SSRF_BLOCK_CLOUD_METADATA while SSRF_BLOCK_PRIVATE_IPS=true still blocks link-local/private metadata IPs
+    meta_off_private_on = Settings(
+        ssrf=SSRFConfig(block_private_ips=True, block_cloud_metadata=False, resolve_dns=False)
+    )
+    for meta_ip_url in (
+        "http://169.254.169.254/latest/meta-data/",
+        "http://[fd00:ec2::254]/latest/meta-data/",
+        "http://100.100.100.200/latest/meta-data/",
+    ):
+        with pytest.raises(SSRFProtectionError):
+            await validate_url_async(meta_ip_url, meta_off_private_on)
+
+    # 3. Production refuses SSRF_RESOLVE_DNS=false unless SSRF_ALLOW_UNRESOLVED_DNS_PRODUCTION=true
+    monkeypatch.setenv("ENVIRONMENT", "production")
+    monkeypatch.setenv("DOWNLOADER_KEY", "prod-secret-key")
+    monkeypatch.setenv("SSRF_RESOLVE_DNS", "false")
+    monkeypatch.delenv("SSRF_ALLOW_UNRESOLVED_DNS_PRODUCTION", raising=False)
+    with pytest.raises(ValidationError, match="SSRF_RESOLVE_DNS=false"):
+        Settings()
+
+    monkeypatch.setenv("SSRF_ALLOW_UNRESOLVED_DNS_PRODUCTION", "true")
+    opted_out = Settings()
+    assert opted_out.ssrf.resolve_dns is False
+    assert opted_out.ssrf.allow_unresolved_dns_production is True

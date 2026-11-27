@@ -224,6 +224,11 @@ class HTTPClient:
         allow_ocr_images: bool,
         target_format: str,
     ) -> tuple[bytes, ResponseMetadata]:
+        if 300 <= response.status_code < 400:
+            raise HTTPClientError(
+                f"HTTP {response.status_code}: {response.reason_phrase}",
+                status_code=response.status_code,
+            )
         if response.status_code >= 400:
             raise HTTPClientError(
                 f"HTTP {response.status_code}: {response.reason_phrase}",
@@ -234,12 +239,14 @@ class HTTPClient:
         if cl_val is not None and cl_val > self.max_download_size:
             raise ContentTooLargeError(max_size=self.max_download_size, actual_size=cl_val)
 
-        resp_ct = extract_header_case_insensitive(response.headers, "content-type") or "unknown"
+        raw_ct = (extract_header_case_insensitive(response.headers, "content-type") or "").strip()
         if require_text_convertible and not is_text_convertible_content_type(
-            resp_ct,
+            raw_ct,
             allow_ocr_images=allow_ocr_images,
         ):
-            raise UnsupportedMediaTypeError(resp_ct, target_format=target_format)
+            raise UnsupportedMediaTypeError(
+                raw_ct or "application/octet-stream", target_format=target_format
+            )
 
         content = await read_bounded_response_bytes(
             response,
@@ -252,12 +259,17 @@ class HTTPClient:
         )
 
         if require_text_convertible and not is_text_convertible_content_type(
-            resp_ct,
+            raw_ct,
             allow_ocr_images=allow_ocr_images,
             sample_bytes=content,
         ):
-            raise UnsupportedMediaTypeError(resp_ct, target_format=target_format)
+            raise UnsupportedMediaTypeError(
+                raw_ct or "application/octet-stream", target_format=target_format
+            )
 
+        resp_ct = raw_ct or (
+            "text/plain" if require_text_convertible else "application/octet-stream"
+        )
         metadata: ResponseMetadata = {
             "status_code": response.status_code,
             "headers": dict(response.headers),
@@ -355,6 +367,9 @@ class HTTPClient:
         except (httpx.TimeoutException, TimeoutError) as exc:
             logger.error(f"Timeout downloading {safe_url}: {exc}")
             raise HTTPTimeoutError(f"Request timed out after {self.timeout}s") from exc
+        except httpx.InvalidURL as exc:
+            logger.warning(f"Invalid upstream URL downloading {safe_url}: {exc}")
+            raise HTTPClientError(f"Invalid upstream URL: {exc}") from exc
         except httpx.RequestError as exc:
             logger.error(f"Request error downloading {safe_url}: {exc}")
             raise HTTPClientError(f"Request failed: {exc}") from exc

@@ -399,3 +399,98 @@ class TestCustomJsonFormatterAccessFields:
         assert payload["path"] == "/health"
         assert payload["method"] == "GET"
         assert payload["status_code"] == 200
+
+
+@pytest.mark.unit
+@pytest.mark.asyncio
+async def test_upstream_header_sanitization_invalid_redirect_url_and_missing_content_type(
+    api_client, env_no_auth
+) -> None:
+    """`A-12`: Non-Latin-1 echoed headers sanitise cleanly, invalid redirect URLs return 502, missing type defaults to octet-stream."""
+    import httpx
+
+    from downloader.dependencies import get_domain_throttle, get_http_client, get_robots_checker
+    from downloader.http_client import HTTPClient, HTTPClientError
+    from downloader.main import app
+
+    def _handler(request: httpx.Request) -> httpx.Response:
+        path = request.url.path
+        if path == "/non-latin1-header":
+            return httpx.Response(
+                200,
+                headers=[
+                    (b"content-type", "text/plain; charset=utf-8; note=東京".encode()),
+                ],
+                stream=httpx.ByteStream(b"hello world"),
+                request=request,
+            )
+        if path == "/missing-ct":
+            return httpx.Response(
+                200,
+                headers=[],
+                stream=httpx.ByteStream(b"\x89PNG\r\n\x1a\n\x00\x00"),
+                request=request,
+            )
+        return httpx.Response(
+            302,
+            headers={"Location": "http://[::1:bad/path"},
+            stream=httpx.ByteStream(b""),
+            request=request,
+        )
+
+    class _AllowRobots:
+        async def check_allowed(self, _url: str, _ua: str | None = None) -> float | None:
+            return None
+
+    class _NoopThrottle:
+        async def wait_if_needed(self, _domain: str, _delay: float | None) -> float:
+            return 0.0
+
+    route_http = HTTPClient(transport=httpx.MockTransport(_handler))
+    app.dependency_overrides[get_http_client] = lambda: route_http
+    app.dependency_overrides[get_robots_checker] = lambda: _AllowRobots()
+    app.dependency_overrides[get_domain_throttle] = lambda: _NoopThrottle()
+    try:
+        r_hdr = api_client.get(
+            "/https://example.com/non-latin1-header",
+            headers={"Accept": "text/plain"},
+        )
+        assert r_hdr.status_code == 200
+        assert r_hdr.text == "hello world"
+        assert "%E6%9D%B1%E4%BA%AC" in r_hdr.headers["X-Original-Content-Type"]
+
+        r_hdr_raw = api_client.get(
+            "/https://example.com/non-latin1-header",
+            headers={"Accept": "*/*"},
+        )
+        assert r_hdr_raw.status_code == 200
+        assert "%E6%9D%B1%E4%BA%AC" in r_hdr_raw.headers["content-type"]
+
+        r_raw = api_client.get(
+            "/https://example.com/missing-ct",
+            headers={"Accept": "*/*"},
+        )
+        assert r_raw.status_code == 200
+        assert r_raw.headers["content-type"] == "application/octet-stream"
+
+        r_json = api_client.get(
+            "/https://example.com/missing-ct",
+            headers={"Accept": "application/json"},
+        )
+        assert r_json.status_code == 200
+        assert r_json.json()["metadata"]["content_type"] == "application/octet-stream"
+
+        r_bad_loc = api_client.get(
+            "/https://example.com/bad-redirect",
+            headers={"Accept": "text/plain"},
+        )
+        assert r_bad_loc.status_code == 502
+        assert r_bad_loc.json()["detail"]["error_type"] == "http_error"
+
+        with pytest.raises(HTTPClientError, match="Invalid URL"):
+            await route_http.download("https://example.com/bad-redirect")
+    finally:
+        app.dependency_overrides.pop(get_http_client, None)
+        app.dependency_overrides.pop(get_robots_checker, None)
+        app.dependency_overrides.pop(get_domain_throttle, None)
+        await route_http.close()

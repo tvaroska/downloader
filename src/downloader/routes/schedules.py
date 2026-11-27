@@ -401,7 +401,7 @@ async def get_schedule(
 
 
 @router.get("/schedules/{schedule_id}/history", response_model=ScheduleExecutionListResponse)
-async def get_schedule_history(  # noqa: PLR0913
+async def get_schedule_history(
     schedule_id: str = Path(..., description="Schedule identifier"),
     limit: int = Query(20, ge=1, le=100, description="Maximum results per page"),
     offset: int = Query(0, ge=0, description="Number of results to skip"),

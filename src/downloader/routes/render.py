@@ -96,7 +96,7 @@ async def render_url(  # noqa: PLR0913
         )
     except HTTPException:
         raise
-    except Exception as exc:  # noqa: BLE001
+    except Exception as exc:
         # Map every domain and unexpected runtime error through the single classification table.
         classified = classify_domain_error(exc, context="render")
         log_classified_error(logger, render_request.url, exc, classified)

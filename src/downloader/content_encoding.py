@@ -117,9 +117,19 @@ def _has_binary_nul_bytes(sample: bytes) -> bool:
     """Detect NUL bytes in unlabeled bodies while allowing UTF-16/UTF-32 BOM-prefixed text."""
     if not sample:
         return False
-    if sample.startswith((b"\xff\xfe", b"\xfe\xff", b"\x00\x00\xfe\xff")):
+    if sample.startswith((b"\xff\xfe\x00\x00", b"\x00\x00\xfe\xff", b"\xff\xfe", b"\xfe\xff")):
         return False
     return b"\x00" in sample[:4096]
+
+
+def _extract_header_charset(content_type: str | None) -> str | None:
+    if not content_type:
+        return None
+    header_match = _HEADER_CHARSET_RE.search(content_type)
+    if not header_match:
+        return None
+    raw_param = header_match.group(1) or header_match.group(2) or header_match.group(3)
+    return _normalize_codec_name(raw_param)
 
 
 def is_text_convertible_content_type(
@@ -130,7 +140,9 @@ def is_text_convertible_content_type(
 ) -> bool:
     """Return True if `content_type` can be safely decoded as text/HTML/markdown (or OCR image)."""
     media_type = normalize_media_type(content_type)
-    no_nul = sample_bytes is None or not _has_binary_nul_bytes(sample_bytes)
+    header_charset = _extract_header_charset(content_type)
+    is_wide_unicode = header_charset is not None and header_charset.startswith(("utf-16", "utf-32"))
+    no_nul = is_wide_unicode or sample_bytes is None or not _has_binary_nul_bytes(sample_bytes)
 
     if allow_ocr_images and is_ocr_image_content_type(media_type):
         return True
@@ -157,11 +169,16 @@ def _normalize_codec_name(raw_charset: str | None) -> str | None:
         return None
 
 
-def _detect_bom_charset(head_bytes: bytes) -> str | None:
+def _match_bom(head_bytes: bytes) -> tuple[bytes, str] | None:
     for prefix, codec in _BOM_CHARSETS:
         if head_bytes.startswith(prefix):
-            return codec
+            return prefix, codec
     return None
+
+
+def _detect_bom_charset(head_bytes: bytes) -> str | None:
+    matched = _match_bom(head_bytes)
+    return matched[1] if matched is not None else None
 
 
 def _detect_meta_charset(head_bytes: bytes) -> str | None:
@@ -187,17 +204,32 @@ def extract_declared_charset(
     if bom_charset is not None:
         return bom_charset
 
-    if content_type:
-        header_match = _HEADER_CHARSET_RE.search(content_type)
-        if header_match:
-            raw_param = header_match.group(1) or header_match.group(2) or header_match.group(3)
-            resolved = _normalize_codec_name(raw_param)
-            if resolved is not None:
-                return resolved
+    header_charset = _extract_header_charset(content_type)
+    if header_charset is not None:
+        return header_charset
 
     if not _is_markup_media_type(content_type):
         return None
     return _detect_meta_charset(head_bytes)
+
+
+def _decode_bom_or_declared(
+    content: bytes,
+    content_type: str | None,
+) -> tuple[str, str] | None:
+    bom_match = _match_bom(content[:4])
+    if bom_match is not None:
+        bom_prefix, bom_codec = bom_match
+        if bom_codec == "utf-8-sig":
+            return content.decode("utf-8-sig", errors="replace"), "utf-8"
+        return content[len(bom_prefix) :].decode(bom_codec, errors="replace"), bom_codec
+
+    declared = extract_declared_charset(content_type, content[:4096])
+    if declared is None:
+        return None
+    effective = {"utf-16": "utf-16-le", "utf-32": "utf-32-le"}.get(declared, declared)
+    canonical = "utf-8" if effective == "utf-8-sig" else effective
+    return content.decode(effective, errors="replace"), canonical
 
 
 def resolve_charset_and_decode(
@@ -208,10 +240,9 @@ def resolve_charset_and_decode(
     if not content:
         return "", "utf-8"
 
-    declared = extract_declared_charset(content_type, content[:4096])
-    if declared is not None:
-        canonical = "utf-8" if declared == "utf-8-sig" else declared
-        return content.decode(declared, errors="replace"), canonical
+    explicit = _decode_bom_or_declared(content, content_type)
+    if explicit is not None:
+        return explicit
 
     try:
         return content.decode("utf-8"), "utf-8"
@@ -358,6 +389,41 @@ def _init_deflate_decompressor(
         return fallback, fallback.decompress(raw_chunk, step_limit)
 
 
+def _drain_zlib_tail(
+    zlib_dec: zlib._Decompress,
+    tail: bytes,
+    buf: _BoundedDecodeBuffer,
+) -> bool:
+    while tail:
+        piece = zlib_dec.decompress(tail, buf.step_limit())
+        if buf.append_decoded(piece):
+            return True
+        next_tail = zlib_dec.unconsumed_tail
+        if next_tail == tail:
+            break
+        tail = next_tail
+    return False
+
+
+def _finalize_zlib_stream(
+    zlib_dec: zlib._Decompress | None,
+    codec: str,
+    buf: _BoundedDecodeBuffer,
+    on_decode_error: Callable[[str], Exception],
+) -> bytes:
+    if zlib_dec is None:
+        raise on_decode_error(f"Invalid {codec} stream: truncated or incomplete input")
+    while True:
+        piece = zlib_dec.decompress(b"", buf.step_limit())
+        if not piece:
+            break
+        if buf.append_decoded(piece):
+            return buf.build_bytes()
+    if not zlib_dec.eof:
+        raise on_decode_error(f"Invalid {codec} stream: truncated or incomplete input")
+    return buf.build_bytes()
+
+
 async def _decode_zlib_stream(
     response: Any,
     codec: str,
@@ -377,22 +443,11 @@ async def _decode_zlib_stream(
                 tail = zlib_dec.unconsumed_tail
             else:
                 tail = raw_chunk
-
-            while tail:
-                piece = zlib_dec.decompress(tail, buf.step_limit())
-                if buf.append_decoded(piece):
-                    return buf.build_bytes()
-                next_tail = zlib_dec.unconsumed_tail
-                if next_tail == tail:
-                    break
-                tail = next_tail
-
-        if zlib_dec is None or not zlib_dec.eof:
-            raise on_decode_error(f"Invalid {codec} stream: truncated or incomplete input")
-        buf.append_decoded(zlib_dec.flush())
+            if _drain_zlib_tail(zlib_dec, tail, buf):
+                return buf.build_bytes()
+        return _finalize_zlib_stream(zlib_dec, codec, buf, on_decode_error)
     except zlib.error as exc:
         raise on_decode_error(f"Invalid {codec} stream: {exc}") from exc
-    return buf.build_bytes()
 
 
 async def read_bounded_response_bytes(

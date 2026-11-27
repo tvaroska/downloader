@@ -314,14 +314,23 @@ class TestSystemMetricsCollectorCollect:
         """Test _collect_metrics_snapshot handles missing app_state."""
         collector = SystemMetricsCollector()
         collector.app_state = None
+        mock_collector = MagicMock()
+        collector.collector = mock_collector
 
-        with patch.object(collector, "_collect_redis_metrics", new_callable=AsyncMock):
-            with patch.object(collector, "_collect_pdf_pool_metrics", new_callable=AsyncMock):
-                with patch.object(
-                    collector, "_collect_http_client_metrics", new_callable=AsyncMock
-                ):
-                    # Should not raise
-                    await collector._collect_metrics_snapshot()
+        with (
+            patch.object(collector, "_collect_redis_metrics", new_callable=AsyncMock) as mock_redis,
+            patch.object(
+                collector, "_collect_pdf_pool_metrics", new_callable=AsyncMock
+            ) as mock_pdf,
+            patch.object(
+                collector, "_collect_http_client_metrics", new_callable=AsyncMock
+            ) as mock_http,
+        ):
+            await collector._collect_metrics_snapshot()
+            mock_redis.assert_awaited_once()
+            mock_pdf.assert_awaited_once()
+            mock_http.assert_awaited_once()
+            mock_collector.set_gauge.assert_not_called()
 
     @pytest.mark.asyncio
     async def test_collect_redis_metrics_healthy(self):

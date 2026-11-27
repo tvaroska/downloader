@@ -1,13 +1,14 @@
 """Integration tests for browser rendering with Playwright - ?render=true and ?wait_for= parameters."""
 
-import asyncio
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
+from playwright.async_api import Error as PlaywrightError
 from playwright.async_api import TimeoutError as PlaywrightTimeoutError
 
 from downloader.browser.renderer import render_html_with_playwright
 from downloader.content_converter import SelectorTimeoutError
+from downloader.ports import PDFGeneratorError, RenderTimeoutError
 
 
 @pytest.fixture
@@ -150,8 +151,9 @@ class TestBrowserRenderingJSContent:
         mock_page.content.return_value = "<html><body>Content</body></html>"
         mock_page.goto.return_value = AsyncMock(status=200)
 
-        await render_html_with_playwright("https://example.com/test")
+        result = await render_html_with_playwright("https://example.com/test")
 
+        assert result == b"<html><body>Content</body></html>"
         mock_page.goto.assert_called_once()
         call_kwargs = mock_page.goto.call_args[1]
         assert call_kwargs.get("wait_until") == "domcontentloaded"
@@ -190,10 +192,11 @@ class TestWaitForSelectorFunctionality:
         mock_page.goto.return_value = AsyncMock(status=200)
 
         complex_selector = "div.article > h1.title"
-        await render_html_with_playwright(
+        result = await render_html_with_playwright(
             "https://example.com/article", wait_for_selector=complex_selector
         )
 
+        assert result == b"<html><body>Content</body></html>"
         call_args, _ = mock_page.wait_for_selector.call_args
         assert call_args[0] == complex_selector
 
@@ -204,10 +207,11 @@ class TestWaitForSelectorFunctionality:
         mock_page.content.return_value = "<html><body>Content</body></html>"
         mock_page.goto.return_value = AsyncMock(status=200)
 
-        await render_html_with_playwright(
+        result = await render_html_with_playwright(
             "https://example.com/article", wait_for_selector="#content"
         )
 
+        assert result == b"<html><body>Content</body></html>"
         call_kwargs = mock_page.wait_for_selector.call_args[1]
         assert call_kwargs.get("state") == "visible"
 
@@ -218,10 +222,11 @@ class TestWaitForSelectorFunctionality:
         mock_page.content.return_value = "<html><body>Content</body></html>"
         mock_page.goto.return_value = AsyncMock(status=200)
 
-        await render_html_with_playwright(
+        result = await render_html_with_playwright(
             "https://example.com/article", wait_for_selector=".content"
         )
 
+        assert result == b"<html><body>Content</body></html>"
         call_kwargs = mock_page.wait_for_selector.call_args[1]
         assert call_kwargs.get("timeout") == 10000
 
@@ -272,11 +277,11 @@ class TestBrowserRenderingTimeouts:
 
         mock_page.goto.side_effect = TimeoutError("Page load timeout")
 
-        with pytest.raises((asyncio.TimeoutError, Exception)):
+        with pytest.raises(RenderTimeoutError, match="Timeout loading page"):
             await render_html_with_playwright("https://example.com/slow-page")
 
-        # Verify cleanup still happens
         mock_context.close.assert_called_once()
+        mock_generator.pool.release_browser.assert_called_once_with(mock_browser)
 
     async def test_networkidle_timeout_proceeds_with_dom_content(
         self, mock_playwright_for_rendering
@@ -295,15 +300,14 @@ class TestBrowserRenderingTimeouts:
         mock_context.close.assert_called_once()
 
     async def test_cleanup_on_any_exception(self, mock_playwright_for_rendering):
-        """Test that browser resources are cleaned up on any exception."""
+        """Test that browser resources are cleaned up on runtime exception."""
         mock_generator, mock_browser, mock_context, mock_page = mock_playwright_for_rendering
 
-        mock_page.goto.side_effect = Exception("Unexpected error")
+        mock_page.goto.side_effect = RuntimeError("Unexpected error")
 
-        with pytest.raises(Exception, match="Unexpected error"):
+        with pytest.raises(PDFGeneratorError, match="Unexpected error"):
             await render_html_with_playwright("https://example.com/error")
 
-        # Both context close and browser release should be called
         mock_context.close.assert_called_once()
         mock_generator.pool.release_browser.assert_called_once_with(mock_browser)
 
@@ -317,12 +321,12 @@ class TestBrowserRenderingErrorHandling:
         """Test handling of network connection errors."""
         mock_generator, mock_browser, mock_context, mock_page = mock_playwright_for_rendering
 
-        mock_page.goto.side_effect = Exception("net::ERR_CONNECTION_REFUSED")
+        mock_page.goto.side_effect = PlaywrightError("net::ERR_CONNECTION_REFUSED")
 
-        with pytest.raises(Exception, match="ERR_CONNECTION_REFUSED"):
+        with pytest.raises(PDFGeneratorError, match="ERR_CONNECTION_REFUSED"):
             await render_html_with_playwright("https://unreachable.example.com")
 
-        mock_generator.pool.release_browser.assert_called_once()
+        mock_generator.pool.release_browser.assert_called_once_with(mock_browser)
 
     async def test_page_load_returns_404(self, mock_playwright_for_rendering):
         """Test handling of HTTP 404 response."""
@@ -330,8 +334,9 @@ class TestBrowserRenderingErrorHandling:
 
         mock_page.goto.return_value = AsyncMock(status=404)
 
-        with pytest.raises(Exception, match="Failed to load page"):
+        with pytest.raises(PDFGeneratorError, match="Failed to load page") as exc_info:
             await render_html_with_playwright("https://example.com/not-found")
+        assert exc_info.value.status_code == 404
 
     async def test_page_load_returns_500(self, mock_playwright_for_rendering):
         """Test handling of HTTP 500 response."""
@@ -339,8 +344,9 @@ class TestBrowserRenderingErrorHandling:
 
         mock_page.goto.return_value = AsyncMock(status=500)
 
-        with pytest.raises(Exception, match="Failed to load page"):
+        with pytest.raises(PDFGeneratorError, match="Failed to load page") as exc_info:
             await render_html_with_playwright("https://example.com/server-error")
+        assert exc_info.value.status_code == 500
 
     async def test_page_goto_returns_none(self, mock_playwright_for_rendering):
         """Test handling when page.goto returns None."""
@@ -348,13 +354,14 @@ class TestBrowserRenderingErrorHandling:
 
         mock_page.goto.return_value = None
 
-        with pytest.raises(Exception, match="Failed to load page"):
+        with pytest.raises(PDFGeneratorError, match="Failed to load page") as exc_info:
             await render_html_with_playwright("https://example.com/no-response")
+        assert exc_info.value.status_code is None
 
     async def test_browser_pool_not_initialized(self):
         """Test error when browser pool is not initialized."""
         with patch("downloader.pdf_generator.get_shared_pdf_generator", return_value=None):
-            with pytest.raises(Exception, match="PDF generator pool not initialized"):
+            with pytest.raises(PDFGeneratorError, match="PDF generator pool not initialized"):
                 await render_html_with_playwright("https://example.com/article")
 
     async def test_browser_released_after_successful_render(self, mock_playwright_for_rendering):
@@ -364,17 +371,18 @@ class TestBrowserRenderingErrorHandling:
         mock_page.content.return_value = "<html><body>Success</body></html>"
         mock_page.goto.return_value = AsyncMock(status=200)
 
-        await render_html_with_playwright("https://example.com/success")
+        result = await render_html_with_playwright("https://example.com/success")
 
+        assert result == b"<html><body>Success</body></html>"
         mock_generator.pool.release_browser.assert_called_once_with(mock_browser)
 
     async def test_browser_released_after_failed_render(self, mock_playwright_for_rendering):
         """Test that browser is released back to pool even after failure."""
         mock_generator, mock_browser, mock_context, mock_page = mock_playwright_for_rendering
 
-        mock_page.goto.side_effect = Exception("Render failed")
+        mock_page.goto.side_effect = PlaywrightError("Render failed")
 
-        with pytest.raises(Exception, match="Render failed"):
+        with pytest.raises(PDFGeneratorError, match="Render failed"):
             await render_html_with_playwright("https://example.com/fail")
 
         mock_generator.pool.release_browser.assert_called_once_with(mock_browser)

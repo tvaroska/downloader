@@ -233,7 +233,7 @@ async def _prepare_shared_dom(
         metadata is not None and "html" in metadata["content_type"].lower()
     )
 
-    if multi_req.force_render and can_render and has_html_formats:
+    if multi_req.force_render and not multi_req.force_ocr and can_render and has_html_formats:
         (
             content,
             metadata,
@@ -243,7 +243,8 @@ async def _prepare_shared_dom(
         ) = await _force_render_shared_dom(multi_req, deps, content, metadata)
 
     needs_http = any(fmt == "json" for fmt in multi_req.formats) or (
-        not multi_req.force_render and any(fmt not in _BINARY_FORMATS for fmt in multi_req.formats)
+        (not multi_req.force_render or multi_req.force_ocr)
+        and any(fmt not in _BINARY_FORMATS for fmt in multi_req.formats)
     )
     if needs_http and (content is None or metadata is None) and deps.http_fetcher is not None:
         content, metadata = await deps.http_fetcher()

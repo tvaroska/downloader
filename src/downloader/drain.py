@@ -91,7 +91,8 @@ class DrainMiddleware(BaseHTTPMiddleware):
     async def dispatch(self, request: Request, call_next: Callable[..., Any]) -> Response:
         coordinator: DrainCoordinator | None = getattr(request.app.state, "drain_coordinator", None)
         if coordinator is None or request.url.path in _DRAIN_EXEMPT_PATHS:
-            return await call_next(request)
+            exempt_resp: Response = await call_next(request)
+            return exempt_resp
 
         if coordinator.is_draining:
             return JSONResponse(
@@ -106,7 +107,8 @@ class DrainMiddleware(BaseHTTPMiddleware):
             )
 
         async with coordinator.track_request():
-            return await call_next(request)
+            tracked_resp: Response = await call_next(request)
+            return tracked_resp
 
 
 def _restore_sigterm_handler(expected: Any, prev_handler: Any) -> None:

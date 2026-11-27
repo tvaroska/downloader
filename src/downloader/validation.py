@@ -31,6 +31,8 @@ _FORBIDDEN_CUSTOM_HEADERS = frozenset(
 )
 _OCTET_RE = re.compile(r"(0x[0-9a-f]+|0[0-7]*|[1-9]\d*)")
 _HEADER_NAME_RE = re.compile(r"[!#$%&'*+\-.^_`|~0-9A-Za-z]+")
+_CLOUD_METADATA_IPS = frozenset({"169.254.169.254", "fd00:ec2::254", "100.100.100.200"})
+_CLOUD_METADATA_HOSTS = frozenset({"metadata.google.internal", "metadata", "instance-data"})
 
 
 class URLValidationError(Exception):
@@ -320,6 +322,12 @@ async def resolve_and_validate_host_async(
     if _is_malformed_ip_or_numeric_tld(hostname):
         raise URLValidationError("Invalid hostname format")
 
+    clean_host = hostname.strip().strip("[]").rstrip(".").lower()
+    if cfg.ssrf.block_cloud_metadata and clean_host in _CLOUD_METADATA_HOSTS:
+        raise SSRFProtectionError(
+            f"Access to cloud metadata endpoints is not allowed (hostname: {hostname})"
+        )
+
     if not cfg.ssrf.resolve_dns:
         logger.debug(f"DNS resolution disabled, checking hostname '{hostname}' directly")
         if _is_hostname_blocked(hostname, cfg):
@@ -346,14 +354,14 @@ def _classify_restricted_ip(
     is cloud metadata, link-local, and private).
     """
     ip_str = str(ip_obj)
+    if ip_str in _CLOUD_METADATA_IPS:
+        if settings.ssrf.block_cloud_metadata:
+            return ("cloud metadata", "cloud metadata endpoints")
+        if not settings.ssrf.block_private_ips:
+            return None
     checks: tuple[tuple[bool, str, str], ...] = (
         (ip_obj.is_loopback, "loopback", "loopback private addresses"),
         (ip_obj.is_unspecified, "unspecified", "unspecified addresses"),
-        (
-            settings.ssrf.block_cloud_metadata and ip_str in {"169.254.169.254", "fd00:ec2::254"},
-            "cloud metadata",
-            "cloud metadata endpoints",
-        ),
         (ip_obj.is_link_local, "link-local", "link-local addresses"),
         (ip_obj.is_multicast, "multicast", "multicast addresses"),
         (ip_obj.is_reserved, "reserved", "reserved IP addresses"),
@@ -399,16 +407,19 @@ def _validate_ip_address(
 
 def _is_hostname_blocked(hostname: str, settings: Settings | None = None) -> bool:
     """Check if hostname string matches restricted patterns when DNS resolution is disabled."""
+    cfg = settings or get_settings()
     clean = hostname.strip().strip("[]").rstrip(".").lower()
     if clean in {"localhost", "localhost.localdomain", "ip6-localhost", "ip6-loopback"}:
         return True
     if clean.endswith(".localhost"):
         return True
+    if cfg.ssrf.block_cloud_metadata and clean in _CLOUD_METADATA_HOSTS:
+        return True
 
     ip_obj = _try_parse_ip_literal(clean)
     if ip_obj is not None:
         try:
-            _validate_ip_address(ip_obj, hostname, settings or get_settings())
+            _validate_ip_address(ip_obj, hostname, cfg)
         except SSRFProtectionError:
             return True
     return False
