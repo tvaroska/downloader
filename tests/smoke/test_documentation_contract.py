@@ -243,3 +243,26 @@ def test_gate_ci_and_container_structural_guards() -> None:
     assert graceful_budget > min_budget, (
         f"Dockerfile --timeout-graceful-shutdown ({graceful_budget}s) <= {min_budget}s"
     )
+
+
+@pytest.mark.smoke
+def test_health_score_ratelimit_and_worker_metrics_contract_alignment() -> None:
+    """`S-14`: Verify `spec/contracts.md` documents threshold-only health factors, per-replica memory limits, and worker `/metrics` auth."""
+    from downloader.metrics import MetricsCollector
+
+    collector = MetricsCollector()
+    healthy = collector.get_system_health_score()
+    assert healthy == {"overall_score": 100, "status": "healthy", "factors": {}}
+
+    spec_text = (REPO_ROOT / "spec" / "contracts.md").read_text(encoding="utf-8")
+    assert '"factors": {}' in spec_text
+    assert "enforced per replica in process memory" in spec_text
+    for line in spec_text.splitlines():
+        if line.strip().startswith("| `WORKER_METRICS_PORT`"):
+            assert "Bearer" in line and "X-API-Key" in line and "DOWNLOADER_KEY" in line
+            break
+    else:
+        raise AssertionError("WORKER_METRICS_PORT row missing from spec/contracts.md")
+
+    agents_text = (REPO_ROOT / "AGENTS.md").read_text(encoding="utf-8")
+    assert "SHUTDOWN_PRE_STOP_DELAY=2.0" in agents_text

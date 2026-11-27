@@ -759,30 +759,44 @@ Get a composite health score with diagnostic breakdown.
 
 **Endpoint:** `GET /metrics/health-score`
 
-**Response:**
+**Response (healthy within all thresholds — `factors` is `{}`):**
 ```json
 {
-  "overall_score": 92,
+  "overall_score": 100,
+  "status": "healthy",
+  "factors": {}
+}
+```
+
+**Response (when threshold factors fire):**
+```json
+{
+  "overall_score": 83,
   "status": "healthy",
   "factors": {
     "error_rate": {
-      "value": 0.97,
-      "penalty": 5.0,
-      "status": "good"
+      "value": 6.0,
+      "penalty": 12.0,
+      "status": "warning"
     },
     "response_time": {
-      "value": 0.37,
-      "penalty": 3.0,
-      "status": "good"
+      "value": 1.5,
+      "penalty": 5.0,
+      "status": "warning"
     },
     "uptime": {
-      "value": 3600.5,
+      "value": 90000.0,
       "bonus": 0,
       "status": "good"
     }
   }
 }
 ```
+
+**Factor Thresholds (`factors` omits keys below threshold):**
+- `error_rate` - Emitted when `5xx` server error rate `> 5%` (`penalty = min(30, error_rate * 2)`, `status`: `"warning"` up to `10%`, `"critical"` above `10%`).
+- `response_time` - Emitted when overall average response time `> 1.0s` (`penalty = min(25, (avg_response_time - 1.0) * 10)`, `status`: `"warning"` up to `3.0s`, `"critical"` above `3.0s`).
+- `uptime` - Emitted when `uptime_seconds > 86400` (`bonus: 0`, `status`: `"good"`).
 
 **Health Status Values:**
 - `healthy` - Score >= 80
@@ -1043,7 +1057,7 @@ Rate limiting supports two storage backends:
 | Backend | Configuration | Use Case |
 |---------|---------------|----------|
 | Redis | Set `RATELIMIT_STORAGE_URI` or `REDIS_URI` | Distributed rate limiting across multiple instances |
-| In-memory | Default (no config needed) | Single instance deployments |
+| In-memory | Default (no config needed) | Single-instance or stateless multi-replica deployments (enforced per replica in process memory; set `RATELIMIT_STORAGE_URI` or `REDIS_URI` to share counters across replicas) |
 
 ### Rate Limit Headers
 
@@ -1691,7 +1705,7 @@ Failed scheduled jobs are automatically retried for transient errors:
 | `WORKER_BROWSER_TASK_TIMEOUT` | `45.0` | Timeout waiting for remote worker Playwright/PDF/screenshot RPC (alias for `WORKER_REMOTE_BROWSER_TIMEOUT`) |
 | `WORKER_MAX_CONCURRENT_JOBS` | `4` | Max concurrent batch jobs processed per worker instance |
 | `WORKER_MAX_REMOTE_BROWSER_CALLS` | `8` | Max concurrent in-flight remote browser RPC calls per API process |
-| `WORKER_METRICS_PORT` | `null` | Optional TCP port exposing Prometheus `/metrics` on the standalone worker process |
+| `WORKER_METRICS_PORT` | `null` | Optional TCP port exposing Prometheus `/metrics` on the standalone worker process (requires `Authorization: Bearer <key>` or `X-API-Key` when `DOWNLOADER_KEY` is configured) |
 | `OTEL_ENABLED` | `false` | Opt-in OpenTelemetry distributed tracing (`false` adds zero runtime overhead) |
 | `OTEL_SERVICE_NAME` | `downloader` | OpenTelemetry service name resource attribute |
 | `OTEL_EXPORTER_OTLP_ENDPOINT` | `null` | OTLP HTTP exporter endpoint (base URLs like `http://otel-collector:4318` automatically append `/v1/traces`) |
