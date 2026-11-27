@@ -4,6 +4,19 @@ Historical entries archived verbatim from [`../../DECISIONS.md`](../../DECISIONS
 
 ---
 
+## 2026-11-12 — `v0.6.2` single-pass browser settle & `v0.7.0` extended features and operations
+
+- **Decision (`v0.6.2` single-pass `domcontentloaded` + bounded settle — `F-2026-11-05-002`):**
+  Replaced the two-pass `networkidle` navigation draft with a single `page.goto(url, wait_until="domcontentloaded", timeout=timeout_ms)` followed by a bounded non-fatal `page.wait_for_load_state("networkidle", timeout=min(timeout_ms, 2500))`.
+- **Decision (Screenshot/PDF output toggle & declarative allowlisted browser actions — zero raw JS eval):**
+  Added `output=screenshot|pdf`, `full_page`, `screenshot_format=png|jpeg`, `Accept: image/png|jpeg`, and strictly allowlisted declarative actions (`click`, `fill`, `select`, `scroll`, `wait`, `wait_for_selector`, `hover`, `press`; max `20` steps, zero raw JS evaluation).
+- **Decision (SSRF-safe HMAC-SHA256 webhooks firing strictly post-persistence):**
+  Added `src/downloader/services/webhooks.py` (`deliver_webhook`) using `validate_url_async` + DNS-pinned `SSRFSafeHTTPTransport` with `follow_redirects=False`, bounded retries (`WEBHOOK_MAX_RETRIES=3`), and `X-Downloader-Signature-256: sha256=<hex>` signatures.
+- **Decision (Tesseract OCR, graceful drain, split workers, opt-in OpenTelemetry & typed SDKs):**
+  Added `src/downloader/transformers/ocr.py`, `src/downloader/drain.py`, `DEPLOYMENT_MODE=all|api|worker`, opt-in `OTEL_ENABLED`, and standalone typed SDKs in `sdks/{python,javascript,go}`.
+
+---
+
 ## 2026-11-12 — Replan `v0.7.0` around Extended Features & Operations; move Multi-Tenant Quotas past `v0.7.0`
 
 - **Decision (Roadmap reprioritization — supersedes `2026-11-01` post-Sprint-4 sequencing):**
