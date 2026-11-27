@@ -327,6 +327,8 @@ Close all seven Redis and split-worker `P0` bugs (`R7`–`R13`) before any deplo
 
 - [x] **S-13 (P3): Teardown isolation narrower than stated** *(Implemented locally at `269399e` — pending `v0.8.5` release)* src/downloader/main.py:203-210. Unlisted exception types skip later shutdown steps (executed). Next: catch Exception per step and log. Verify: uv run --no-sync pytest tests/unit/test_v070_ops_drain_worker_otel.py
 
+- [x] **S-14 (P3): Document and contract drift** *(Implemented locally at `269399e` & `375e8e7` — pending `v0.8.5` release)* spec/contracts.md:752-768,1031, AGENTS.md:95, src/downloader/worker_runtime.py:172. Health-score factors (executed), pre-stop default, per-replica limiter and open worker metrics (read) differ from the text. Next: align text or code. Verify: uv run --no-sync pytest tests/smoke/test_documentation_contract.py
+
 - [x] **S-15 (P3): Image and CI hardening** *(Implemented locally at `269399e` — pending `v0.8.5` release)* Dockerfile:2,4,19,63, cloudbuild.yaml:38,67,89,106,237. Tags instead of digests, curl kept for HEALTHCHECK, app directory writable (read). Next: pin digests, drop curl, make the app tree root-owned. Verify: uv run --no-sync pytest tests/smoke/test_repo_hygiene.py
 
 - [x] **T-15 (P3): Retire stale config debt** *(Implemented locally at `269399e` — pending `v0.8.5` release)* pyproject.toml:77-81,153-162; tests/standards_debt.json. B904 has zero hits, strict mypy on src has 11 errors, six noqa comments are unused. Next: drop the B904 ignore, fix the 11 errors and enable strict for src, enable RUF100. Verify: uv run --no-sync ruff check src/ tests/ examples/ and uv run --no-sync mypy src/ tests/
