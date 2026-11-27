@@ -170,7 +170,7 @@ class _LoopbackFixtureServer:
             "/blocked-by-robots": "<html><body><p>Disallowed</p></body></html>",
             "/oversized-dom": (
                 "<!DOCTYPE html><html><head><title>Big DOM</title></head><body><main>"
-                + ("<p>" + ("X" * 1024) + "</p>" * 1150)
+                + (("<p>" + ("X" * 1024) + "</p>") * 1150)
                 + "</main></body></html>"
             ),
         }
