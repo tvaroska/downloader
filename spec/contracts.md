@@ -2,7 +2,7 @@
 
 **Last Updated:** 2026-11-19
 
-Complete API documentation for the REST API Downloader service (`v0.8.4`).
+Complete API documentation for the REST API Downloader service (`v0.8.5`).
 
 ## Base URL
 
@@ -117,7 +117,7 @@ Check service health, version, deployment mode, connection drain state, and spli
   "status": "healthy",
   "draining": false,
   "active_requests": 0,
-  "version": "0.8.4",
+  "version": "0.8.5",
   "environment": "production",
   "deployment_mode": "all",
   "telemetry_enabled": false,
@@ -177,7 +177,7 @@ When `REDIS_URI` is configured, `services.workers.queue_configured` is `true` (u
   "status": "draining",
   "draining": true,
   "active_requests": 2,
-  "version": "0.8.4",
+  "version": "0.8.5",
   "environment": "production",
   "deployment_mode": "all",
   "telemetry_enabled": false,
@@ -1683,7 +1683,7 @@ Failed scheduled jobs are automatically retried for transient errors:
 
 ---
 
-### Operational Configuration (`v0.8.4`)
+### Operational Configuration (`v0.8.5`)
 
 | Environment Variable | Default | Description |
 |---------------------|---------|-------------|
@@ -1715,7 +1715,7 @@ Failed scheduled jobs are automatically retried for transient errors:
 
 ## Versioning
 
-Current API version: `v1.0` (service `0.8.4`)
+Current API version: `v1.0` (service `0.8.5`)
 
 Version information available via `/health` endpoint.
 

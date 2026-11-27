@@ -6,7 +6,7 @@ Canonical operating brief for all coding agents working in this repository (`CLA
 
 REST API Downloader — FastAPI service for programmatic URL downloading, article extraction, stateless-first ethical crawling (`robots.txt` + `Crawl-delay`), headless Chromium rendering, OCR, and optional Redis-backed batch/scheduled jobs.
 
-- **Version:** 0.8.4
+- **Version:** 0.8.5
 - **Stack:** Python 3.13+, FastAPI, httpx, Redis, Playwright, pytesseract/Pillow, OpenTelemetry (opt-in)
 - **Registry:** `us-central1-docker.pkg.dev/sites-470716/containers/downloader` ([`cloudbuild.yaml`](cloudbuild.yaml) + GKE Autopilot / Flux CD GitOps)
 - **Production domain:** `https://download.tvaroska.sk`
