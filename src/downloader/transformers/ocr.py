@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import html
 import io
 import logging
 import os
@@ -173,3 +174,14 @@ def format_ocr_markdown(text: str, source_url: str | None = None) -> str:
     if source_url:
         return f"<!-- OCR extracted from {source_url} -->\n\n{body}"
     return body
+
+
+def format_ocr_html(text: str, source_url: str | None = None) -> str:
+    """Wrap HTML-escaped OCR text into a `<pre>` HTML block."""
+    body = html.escape(text.strip())
+    if not body:
+        return "<pre></pre>"
+    if source_url:
+        safe_url = html.escape(source_url, quote=True)
+        return f"<!-- OCR extracted from {safe_url} -->\n<pre>{body}</pre>"
+    return f"<pre>{body}</pre>"

@@ -205,7 +205,7 @@ class ScheduledJobExecutor:
                 validated_url,
                 headers=sanitized_headers,
                 require_text_convertible=format in {"text", "markdown", "html"},
-                allow_ocr_images=format in {"text", "markdown"},
+                allow_ocr_images=format in {"text", "markdown", "html"},
                 target_format=format,
             )
         if sanitized_headers:

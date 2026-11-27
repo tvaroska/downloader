@@ -122,7 +122,7 @@ def _resolve_single_format(
     if output == "screenshot":
         return "screenshot", screenshot_format
     negotiated = parse_accept_header(accept)
-    if force_ocr and negotiated not in {"text", "markdown"}:
+    if force_ocr and negotiated not in {"text", "markdown", "html"}:
         negotiated = "text"
     shot_fmt: Literal["png", "jpeg"] = (
         "jpeg" if negotiated == "screenshot_jpeg" else screenshot_format
@@ -143,11 +143,11 @@ def _build_http_fetcher(
         http_formats = [f for f in formats if f not in {"pdf", "screenshot", "screenshot_jpeg"}]
         if http_formats and "json" not in http_formats:
             require_text = True
-            allow_ocr = any(f in {"text", "markdown"} for f in http_formats)
+            allow_ocr = any(f in {"text", "markdown", "html"} for f in http_formats)
             target_label = ",".join(http_formats)
     elif format_type in {"text", "markdown", "html"}:
         require_text = True
-        allow_ocr = format_type in {"text", "markdown"}
+        allow_ocr = True
 
     cached: tuple[bytes, ResponseMetadata] | None = None
 

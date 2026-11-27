@@ -188,11 +188,13 @@ class TestGetApiKey:
 
 
 @pytest.mark.smoke
-@pytest.mark.parametrize("blank_key", [None, "", "   "])
+@pytest.mark.parametrize("blank_key", [None, "", "   ", "\t\n "])
 def test_production_without_key_refuses_to_start(
     monkeypatch: pytest.MonkeyPatch, blank_key: str | None
 ) -> None:
-    """Production refuses to start without a non-empty `DOWNLOADER_KEY` unless opted out (`R37`)."""
+    """Production refuses missing, empty, and whitespace-only keys across env and direct init (`R37`, `T-3`)."""
+    assert AuthConfig(api_key=blank_key).api_key is None
+
     monkeypatch.setenv("ENVIRONMENT", "production")
     monkeypatch.delenv("AUTH_ALLOW_UNAUTHENTICATED_PRODUCTION", raising=False)
     if blank_key is None:
@@ -202,6 +204,15 @@ def test_production_without_key_refuses_to_start(
 
     with pytest.raises(ValidationError, match="DOWNLOADER_KEY"):
         Settings()
+
+    with pytest.raises(ValidationError, match="DOWNLOADER_KEY"):
+        Settings(
+            environment="production",
+            auth=AuthConfig.model_construct(
+                api_key=blank_key,
+                allow_unauthenticated_production=False,
+            ),
+        )
 
     # Explicit opt-out allows unauthenticated production startup
     monkeypatch.setenv("AUTH_ALLOW_UNAUTHENTICATED_PRODUCTION", "true")

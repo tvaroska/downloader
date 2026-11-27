@@ -44,11 +44,21 @@ class TestSSRFWiring:
         monkeypatch.setenv("HTTP_PROXY", "http://127.0.0.1:9999")
         monkeypatch.setenv("HTTPS_PROXY", "http://127.0.0.1:9999")
         monkeypatch.setenv("ALL_PROXY", "socks5://127.0.0.1:9999")
+        monkeypatch.setenv("SSL_CERT_FILE", "/nonexistent/bogus-ca-bundle.pem")
+        monkeypatch.setenv("SSL_CERT_DIR", "/nonexistent/bogus-ca-dir")
+
+        transport = SSRFSafeHTTPTransport()
+        ssl_ctx = transport._pool._ssl_context
+        assert ssl_ctx is not None
+        assert ssl_ctx.cert_store_stats()["x509_ca"] > 0
 
         async with HTTPClient() as client:
             assert client._client.trust_env is False
             assert client._client._mounts == {}
             assert isinstance(client._client._transport, SSRFSafeHTTPTransport)
+            client_ssl = client._client._transport._pool._ssl_context
+            assert client_ssl is not None
+            assert client_ssl.cert_store_stats()["x509_ca"] > 0
             assert isinstance(
                 client._client._transport._pool._network_backend, SSRFSafeNetworkBackend
             )

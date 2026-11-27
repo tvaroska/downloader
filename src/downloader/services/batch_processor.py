@@ -163,7 +163,7 @@ def _make_batch_http_fetcher(
 ):
     cached: tuple[bytes, ResponseMetadata] | None = None
     require_text = format_to_use in {"text", "markdown", "html"}
-    allow_ocr = format_to_use in {"text", "markdown"}
+    allow_ocr = require_text
 
     async def _fetch() -> tuple[bytes, ResponseMetadata]:
         nonlocal cached

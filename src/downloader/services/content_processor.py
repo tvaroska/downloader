@@ -38,6 +38,7 @@ from ..ports import (
 )
 from ..transformers.ocr import (
     extract_text_from_image,
+    format_ocr_html,
     format_ocr_markdown,
     is_ocr_image_content_type,
 )
@@ -293,15 +294,18 @@ async def _maybe_convert_ocr(
     req: ConversionRequest,
     content: bytes,
     metadata: ResponseMetadata,
-    fmt: Literal["text", "markdown"],
+    fmt: Literal["text", "markdown", "html"],
     media_type: str,
 ) -> ConversionResult | None:
     content_type = metadata["content_type"]
     if is_ocr_image_content_type(content_type):
         extracted = await extract_text_from_image(content, language=req.ocr_language)
-        text_body = (
-            format_ocr_markdown(extracted, metadata["url"]) if fmt == "markdown" else extracted
-        )
+        if fmt == "markdown":
+            text_body = format_ocr_markdown(extracted, metadata["url"])
+        elif fmt == "html":
+            text_body = format_ocr_html(extracted, metadata["url"])
+        else:
+            text_body = extracted
         return _make_result(
             text_body.encode("utf-8"),
             media_type,
@@ -572,6 +576,9 @@ async def _convert_html(req: ConversionRequest, deps: ConversionDeps) -> Convers
         return await _force_render_html(req, deps)
 
     content, metadata = await _require_http_payload(req, deps)
+    ocr_res = await _maybe_convert_ocr(req, content, metadata, "html", "text/html; charset=utf-8")
+    if ocr_res is not None:
+        return ocr_res
     if not is_text_convertible_content_type(
         metadata["content_type"],
         allow_ocr_images=False,

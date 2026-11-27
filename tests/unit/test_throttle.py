@@ -8,7 +8,12 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import pytest
 from fastapi.testclient import TestClient
 
-from downloader.crawling.throttle import CrawlDelayExceededError, DomainThrottle
+from downloader.crawling.throttle import (
+    _REFUND_SLOT_LUA,
+    _RESERVE_SLOT_LUA,
+    CrawlDelayExceededError,
+    DomainThrottle,
+)
 from downloader.dependencies import get_domain_throttle, get_http_client, get_robots_checker
 from downloader.main import app
 from tests.unit.test_robots import FakeAsyncRedis
@@ -120,3 +125,12 @@ async def test_wait_is_bounded_and_key_is_canonical(monkeypatch: pytest.MonkeyPa
         app.dependency_overrides.pop(get_robots_checker, None)
         app.dependency_overrides.pop(get_domain_throttle, None)
         app.dependency_overrides.pop(get_http_client, None)
+
+
+@pytest.mark.unit
+def test_redis_lua_scripts_pin_bound_and_refund_comparisons() -> None:
+    """Pin Lua comparison operators so flipped limit or refund branches fail offline (`T-5`)."""
+    assert "if now_wall < next_wall then" in _RESERVE_SLOT_LUA
+    assert "if max_wait ~= nil and wait_s > max_wait then" in _RESERVE_SLOT_LUA
+    assert "return tostring(-wait_s)" in _RESERVE_SLOT_LUA
+    assert "if refunded <= now_wall then" in _REFUND_SLOT_LUA

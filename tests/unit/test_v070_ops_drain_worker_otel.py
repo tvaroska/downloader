@@ -7,7 +7,6 @@ import json
 import logging
 import os
 import signal
-import socket
 import subprocess
 import sys
 import time
@@ -129,28 +128,29 @@ class TestGracefulShutdownAndDrain:
         app.dependency_overrides[get_http_client] = lambda: mock_http
         app.dependency_overrides[get_robots_checker] = lambda: mock_robots
         try:
-            app.state.drain_coordinator.reset()
-            app.state.settings = Settings()
-            transport = httpx.ASGITransport(app=app)
-            async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
-                inflight = asyncio.create_task(client.get("/https://example.com"))
-                await asyncio.wait_for(started.wait(), timeout=2.0)
+            async with app.router.lifespan_context(app):
+                app.state.drain_coordinator.reset()
+                app.state.settings = Settings()
+                transport = httpx.ASGITransport(app=app)
+                async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
+                    inflight = asyncio.create_task(client.get("/https://example.com"))
+                    await asyncio.wait_for(started.wait(), timeout=2.0)
 
-                assert app.state.drain_coordinator.active_requests == 1
-                assert await app.state.drain_coordinator.wait_until_drained(0.01) is False
+                    assert app.state.drain_coordinator.active_requests == 1
+                    assert await app.state.drain_coordinator.wait_until_drained(0.01) is False
 
-                app.state.drain_coordinator.start_drain()
-                rejected = await client.get("/https://example.com")
-                assert rejected.status_code == 503
-                assert rejected.json()["detail"]["error_type"] == "service_draining"
+                    app.state.drain_coordinator.start_drain()
+                    rejected = await client.get("/https://example.com")
+                    assert rejected.status_code == 503
+                    assert rejected.json()["detail"]["error_type"] == "service_draining"
 
-                release.set()
-                ok_resp = await inflight
-                assert ok_resp.status_code == 200
-                assert app.state.drain_coordinator.active_requests == 0
-                assert await app.state.drain_coordinator.wait_until_drained(1.0) is True
+                    release.set()
+                    ok_resp = await inflight
+                    assert ok_resp.status_code == 200
+                    assert app.state.drain_coordinator.active_requests == 0
+                    assert await app.state.drain_coordinator.wait_until_drained(1.0) is True
+                app.state.drain_coordinator.reset()
         finally:
-            app.state.drain_coordinator.reset()
             app.dependency_overrides.pop(get_http_client, None)
             app.dependency_overrides.pop(get_robots_checker, None)
 
@@ -231,48 +231,47 @@ class TestGracefulShutdownAndDrain:
         """SIGTERM holds `/health` at 503 for `pre_stop_delay` before chaining server stop (`R100`)."""
         coord = DrainCoordinator()
         chained_at: list[float] = []
-        orig_handler = signal.getsignal(signal.SIGTERM)
 
         def _prev(_signum: int, _frame: object) -> None:
             chained_at.append(time.monotonic())
 
-        signal.signal(signal.SIGTERM, _prev)
-        prev_coord = getattr(app.state, "drain_coordinator", None)
-        app.state.drain_coordinator = coord
-        try:
-            restore = install_sigterm_drain_handler(coord, pre_stop_delay=0.15)
+        async with app.router.lifespan_context(app):
+            orig_handler = signal.getsignal(signal.SIGTERM)
+            signal.signal(signal.SIGTERM, _prev)
+            prev_coord = app.state.drain_coordinator
+            app.state.drain_coordinator = coord
             try:
-                sent_at = time.monotonic()
-                os.kill(os.getpid(), signal.SIGTERM)
-                # Immediately enters drain mode while server shutdown has NOT been chained yet.
-                assert coord.is_draining is True
-                assert chained_at == []
-
-                transport = httpx.ASGITransport(app=app)
-                async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
-                    probe = await client.get("/health")
-                    assert probe.status_code == 503
-                    assert probe.json()["status"] == "draining"
+                restore = install_sigterm_drain_handler(coord, pre_stop_delay=0.15)
+                try:
+                    sent_at = time.monotonic()
+                    os.kill(os.getpid(), signal.SIGTERM)
+                    # Immediately enters drain mode while server shutdown has NOT been chained yet.
+                    assert coord.is_draining is True
                     assert chained_at == []
 
-                await asyncio.sleep(0.2)
-                assert len(chained_at) == 1
-                assert (chained_at[0] - sent_at) >= 0.12
+                    transport = httpx.ASGITransport(app=app)
+                    async with httpx.AsyncClient(
+                        transport=transport, base_url="http://test"
+                    ) as client:
+                        probe = await client.get("/health")
+                        assert probe.status_code == 503
+                        assert probe.json()["status"] == "draining"
+                        assert chained_at == []
+
+                    await asyncio.sleep(0.2)
+                    assert len(chained_at) == 1
+                    assert (chained_at[0] - sent_at) >= 0.12
+                finally:
+                    restore()
             finally:
-                restore()
-        finally:
-            app.state.drain_coordinator = prev_coord
-            signal.signal(signal.SIGTERM, orig_handler)
+                app.state.drain_coordinator = prev_coord
+                signal.signal(signal.SIGTERM, orig_handler)
 
     @pytest.mark.xdist_group("uvicorn_drain")
     def test_uvicorn_subprocess_enters_drain_on_sigterm(self) -> None:
         from pathlib import Path
 
         repo_root = Path(__file__).resolve().parents[2]
-        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
-            sock.bind(("127.0.0.1", 0))
-            port = sock.getsockname()[1]
-
         env = {
             **os.environ,
             "ENVIRONMENT": "development",
@@ -292,7 +291,7 @@ class TestGracefulShutdownAndDrain:
                 "--host",
                 "127.0.0.1",
                 "--port",
-                str(port),
+                "0",
                 "--log-level",
                 "info",
             ],
@@ -317,7 +316,7 @@ class TestGracefulShutdownAndDrain:
                     if not line:
                         break
                     captured_lines.append(line)
-                    if "Uvicorn running on" in line or "Application startup complete" in line:
+                    if "Uvicorn running on" in line:
                         ready = True
                         break
             if not ready:
@@ -334,6 +333,7 @@ class TestGracefulShutdownAndDrain:
             assert proc.returncode in (0, -signal.SIGTERM), output
             assert "Entering connection drain mode" in output
             assert "All services shut down successfully" in output
+            assert "Finished server process" in output
         finally:
             if proc.poll() is None:
                 proc.kill()

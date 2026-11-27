@@ -304,6 +304,10 @@ class _BoundedDecodeBuffer:
         return b"".join(self.chunks)
 
 
+# C brotli grows slabs (32752, then +65520 = 98272) while allocated < output_buffer_limit.
+_BROTLI_SLAB_LIMIT = 32_752
+
+
 async def _decode_brotli_stream(
     response: Any,
     buf: _BoundedDecodeBuffer,
@@ -313,16 +317,22 @@ async def _decode_brotli_stream(
     try:
         async for raw_chunk in _iter_wire_chunks(response):
             buf.record_raw(raw_chunk)
-            piece = br_dec.process(raw_chunk, output_buffer_limit=buf.step_limit())
+            piece = br_dec.process(
+                raw_chunk, output_buffer_limit=min(buf.step_limit(), _BROTLI_SLAB_LIMIT)
+            )
             if buf.append_decoded(piece):
                 return buf.build_bytes()
             while not br_dec.can_accept_more_data() and not br_dec.is_finished():
-                piece = br_dec.process(b"", output_buffer_limit=buf.step_limit())
+                piece = br_dec.process(
+                    b"", output_buffer_limit=min(buf.step_limit(), _BROTLI_SLAB_LIMIT)
+                )
                 if buf.append_decoded(piece):
                     return buf.build_bytes()
         # Drain any remaining buffered output after wire EOF before checking `is_finished()`.
         while not br_dec.is_finished():
-            piece = br_dec.process(b"", output_buffer_limit=buf.step_limit())
+            piece = br_dec.process(
+                b"", output_buffer_limit=min(buf.step_limit(), _BROTLI_SLAB_LIMIT)
+            )
             if not piece:
                 break
             if buf.append_decoded(piece):

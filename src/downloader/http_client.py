@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import contextvars
 import logging
 from collections.abc import Awaitable, Callable, Mapping
@@ -336,13 +337,14 @@ class HTTPClient:
         try:
             req_headers = sanitize_custom_headers(headers)
             self._ensure_client_invariants()
-            content, metadata = await self._stream_and_read(
-                url,
-                req_headers,
-                require_text_convertible=require_text_convertible,
-                allow_ocr_images=allow_ocr_images,
-                target_format=target_format,
-            )
+            async with asyncio.timeout(self.timeout):
+                content, metadata = await self._stream_and_read(
+                    url,
+                    req_headers,
+                    require_text_convertible=require_text_convertible,
+                    allow_ocr_images=allow_ocr_images,
+                    target_format=target_format,
+                )
             logger.info(
                 f"Download completed: {len(content)} bytes, "
                 f"status: {metadata['status_code']}, "
@@ -350,7 +352,7 @@ class HTTPClient:
                 f"http_version: {metadata['http_version']}"
             )
             return content, metadata
-        except httpx.TimeoutException as exc:
+        except (httpx.TimeoutException, TimeoutError) as exc:
             logger.error(f"Timeout downloading {safe_url}: {exc}")
             raise HTTPTimeoutError(f"Request timed out after {self.timeout}s") from exc
         except httpx.RequestError as exc:

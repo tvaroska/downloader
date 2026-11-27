@@ -11,6 +11,10 @@ import redis.asyncio as redis
 from downloader.worker_queue import WorkerQueue
 
 
+async def _noop_coro() -> None:
+    return None
+
+
 @pytest.fixture
 async def real_redis_client():
     redis_uri = os.getenv("REDIS_URI", "redis://localhost:6379/15")
@@ -96,14 +100,18 @@ class TestWorkerQueueRealRedis:
             await q2.close()
 
     async def test_job_manager_watch_multi_and_domain_throttle_lua_on_real_redis(
-        self, real_redis_client: redis.Redis
+        self, real_redis_client: redis.Redis, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        """Exercise real-Redis WATCH/MULTI transitions, `complete_job`, and Lua throttle (`R85`, `R113`)."""
-        from downloader.crawling.throttle import DomainThrottle
+        """Exercise real-Redis WATCH/MULTI races, `complete_job` re-check, and Lua throttle limit (`T-4`, `T-5`)."""
+        from downloader.crawling.throttle import CrawlDelayExceededError, DomainThrottle
         from downloader.job_manager import JobManager, JobStatus
 
-        jm = JobManager(os.getenv("REDIS_URI", "redis://localhost:6379/15"))
+        redis_uri = os.getenv("REDIS_URI", "redis://localhost:6379/15")
+        jm = JobManager(redis_uri)
         jm.redis_client = real_redis_client
+        peer_client = redis.from_url(redis_uri, decode_responses=True)
+        peer_jm = JobManager(redis_uri)
+        peer_jm.redis_client = peer_client
         try:
             job_id = await jm.create_job({"urls": [{"url": "https://example.com"}]})
             assert await jm.update_job_status(job_id, JobStatus.RUNNING) is True
@@ -118,17 +126,55 @@ class TestWorkerQueueRealRedis:
             res = await jm.get_job_results(job_id)
             assert res is not None and res.status == JobStatus.COMPLETED
 
-            # Cancelled job cannot be completed
-            cancel_id = await jm.create_job({"urls": [{"url": "https://example.com"}]})
-            assert await jm.update_job_status(cancel_id, JobStatus.CANCELLED) is True
-            assert await jm.complete_job(cancel_id, [], {}) is False
-            assert await jm.get_job_results(cancel_id) is None
+            # Concurrent cancel landing between WATCH+GET and MULTI/EXEC on real Redis triggers WatchError -> False
+            race_id = await jm.create_job({"urls": [{"url": "https://example.com/race"}]})
+            assert await jm.update_job_status(race_id, JobStatus.RUNNING) is True
+            orig_get = real_redis_client.get
+            seen_gets = 0
 
-            throttle = DomainThrottle(max_crawl_delay=5.0, redis_client=real_redis_client)
-            waited = await throttle.wait_if_needed("real-redis.example.com", 0.05)
-            assert waited == 0.0
+            async def _racing_get(name: str):
+                nonlocal seen_gets
+                val = await orig_get(name)
+                if name == f"job:{race_id}":
+                    seen_gets += 1
+                    if seen_gets == 2:
+                        assert await peer_jm.update_job_status(race_id, JobStatus.CANCELLED) is True
+                return val
+
+            monkeypatch.setattr(real_redis_client, "get", _racing_get)
+            assert (
+                await jm.complete_job(
+                    race_id,
+                    [{"url": "https://example.com/race", "success": True}],
+                    {"total_requests": 1, "successful_requests": 1, "failed_requests": 0},
+                )
+                is False
+            )
+            monkeypatch.setattr(real_redis_client, "get", orig_get)
+            assert seen_gets >= 3
+            race_info = await jm.get_job_info(race_id)
+            assert race_info is not None and race_info.status == JobStatus.CANCELLED
+            assert await jm.get_job_results(race_id) is None
+
+            # Real-Redis Lua throttle: 1st = 0s, 2nd within max_wait > 0s, 3rd over max_wait -> CrawlDelayExceededError
+            throttle = DomainThrottle(
+                max_crawl_delay=5.0,
+                max_wait_seconds=0.25,
+                redis_client=real_redis_client,
+            )
+            monkeypatch.setattr(
+                "downloader.crawling.throttle.asyncio.sleep", lambda _s: _noop_coro()
+            )
+            w1 = await throttle.wait_if_needed("real-redis.example.com", 0.2)
+            assert w1 == 0.0
+            w2 = await throttle.wait_if_needed("real-redis.example.com", 0.2)
+            assert 0.0 < w2 <= 0.25
+            with pytest.raises(CrawlDelayExceededError) as exc_info:
+                await throttle.wait_if_needed("real-redis.example.com", 0.2)
+            assert exc_info.value.retry_after > 0.25
         finally:
             await real_redis_client.delete("throttle:v1:real-redis.example.com")
+            await peer_client.aclose()
 
     async def test_remote_browser_pool_timeout_exceeds_job_manager_socket_timeout_and_maps_504(
         self, real_redis_client: redis.Redis, monkeypatch: pytest.MonkeyPatch

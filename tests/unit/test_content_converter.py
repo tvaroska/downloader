@@ -32,7 +32,7 @@ from downloader.ports import BrowserRenderer
 from downloader.ratelimit_middleware import RateLimitMiddleware, reset_rate_limiter
 from downloader.services.content_processor import ConversionDeps, ConversionRequest, convert
 from downloader.services.multi_format import MultiFormatRequest, process_multiple_formats
-from downloader.validation import EgressPolicy
+from downloader.validation import EgressPolicy, URLValidationError
 from downloader.worker_queue import BrowserTaskResponse
 from tests.fixtures.in_memory_ports import InMemoryJobStore, InMemoryWorkQueue
 
@@ -311,18 +311,32 @@ async def test_multi_format_renders_dom_at_most_once_and_forwards_force_ocr() ->
         "http_version": "HTTP/1.1",
         "connection_reused": False,
     }
+    # Partial failure (json succeeds, text fails force_ocr) keeps `errors` map; all-failed raises (`A-5`)
     ocr_err_map = await process_multiple_formats(
         MultiFormatRequest(
             url="https://example.com/not-image",
-            formats=["text", "markdown"],
+            formats=["text", "json"],
             force_ocr=True,
             content=b"<html><body>No image</body></html>",
             metadata=html_meta,
         ),
         deps,
     )
+    assert "application/json" in ocr_err_map
     assert "errors" in ocr_err_map
     assert "OCR requires an image content type" in ocr_err_map["errors"]["text/plain"]
+
+    with pytest.raises(URLValidationError, match="OCR requires an image content type"):
+        await process_multiple_formats(
+            MultiFormatRequest(
+                url="https://example.com/not-image",
+                formats=["text", "markdown"],
+                force_ocr=True,
+                content=b"<html><body>No image</body></html>",
+                metadata=html_meta,
+            ),
+            deps,
+        )
 
 
 @pytest.mark.port

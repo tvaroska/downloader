@@ -161,3 +161,42 @@ class TestMultiFormat:
         finally:
             app.dependency_overrides.pop(get_http_client, None)
             app.dependency_overrides.pop(get_browser_renderer, None)
+
+    def test_multi_format_json_plus_text_on_binary_origin_succeeds_with_partial_error(
+        self, api_client
+    ) -> None:
+        """Accept including `application/json` skips pre-flight text rejection on binary origins (`T-6`)."""
+        import httpx
+
+        from downloader.dependencies import get_robots_checker
+        from downloader.http_client import HTTPClient
+
+        binary_payload = b"\x00\x01\x02\xffbinary-blob"
+
+        def _binary_handler(request: httpx.Request) -> httpx.Response:
+            return httpx.Response(
+                200,
+                headers={"Content-Type": "application/octet-stream"},
+                stream=httpx.ByteStream(binary_payload),
+                request=request,
+            )
+
+        real_http = HTTPClient(transport=httpx.MockTransport(_binary_handler))
+        mock_robots = MagicMock()
+        mock_robots.check_allowed = AsyncMock(return_value=None)
+
+        app.dependency_overrides[get_http_client] = lambda: real_http
+        app.dependency_overrides[get_robots_checker] = lambda: mock_robots
+        try:
+            response = api_client.get(
+                "/https://example.com/archive.bin",
+                headers={"Accept": "text/plain, application/json"},
+            )
+            assert response.status_code == 200
+            data = response.json()
+            assert "application/json" in data
+            assert "text/plain" not in data
+            assert "Unsupported binary content type" in data["errors"]["text/plain"]
+        finally:
+            app.dependency_overrides.pop(get_http_client, None)
+            app.dependency_overrides.pop(get_robots_checker, None)

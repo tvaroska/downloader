@@ -24,24 +24,29 @@ from downloader.models.schedule import ExecutionStatus, ScheduleExecution
 class FakeRedis:
     """Unified in-memory async Redis fake for robots, throttle, schedules, and worker queue tests."""
 
-    def __init__(self) -> None:
+    def __init__(self, *, decode_responses: bool = False) -> None:
         self.store: dict[str, tuple[str, float | None]] = {}
         self.lists: dict[str, list[str]] = {}
+        self.versions: dict[str, int] = {}
+        self.decode_responses = decode_responses
         self.fail_get: bool = False
         self.fail_set: bool = False
+
+    def _bump_version(self, key: str) -> None:
+        self.versions[key] = self.versions.get(key, 0) + 1
 
     async def ping(self) -> bool:
         if self.fail_get or self.fail_set:
             raise redis.ConnectionError("simulated redis ping failure")
         return True
 
-    async def get(self, key: str) -> bytes | None:
+    async def get(self, key: str) -> Any:
         if self.fail_get:
             raise redis.ConnectionError("simulated redis read failure")
         entry = self.store.get(key)
         if entry is None:
             return None
-        return entry[0].encode("utf-8")
+        return entry[0] if self.decode_responses else entry[0].encode("utf-8")
 
     async def set(
         self,
@@ -58,24 +63,30 @@ class FakeRedis:
             return False
         ttl_s = float(ex) if ex is not None else (float(px) / 1000.0 if px is not None else None)
         self.store[key] = (value, ttl_s)
+        self._bump_version(key)
         return True
 
     async def psetex(self, key: str, time_ms: int, value: str) -> bool:
         if self.fail_set:
             raise redis.ConnectionError("simulated redis psetex failure")
         self.store[key] = (value, float(time_ms) / 1000.0)
+        self._bump_version(key)
         return True
 
     async def setex(self, key: str, ttl: int, value: str) -> bool:
         if self.fail_set:
             raise redis.ConnectionError("simulated redis setex failure")
         self.store[key] = (value, float(ttl))
+        self._bump_version(key)
         return True
 
     async def delete(self, *keys: str) -> int:
         deleted = 0
         for key in keys:
-            if self.store.pop(key, None) is not None or self.lists.pop(key, None) is not None:
+            removed_kv = self.store.pop(key, None) is not None
+            removed_list = self.lists.pop(key, None) is not None
+            if removed_kv or removed_list:
+                self._bump_version(key)
                 deleted += 1
         return deleted
 
@@ -99,6 +110,7 @@ class FakeRedis:
         entry = self.store.get(lock_key)
         if entry is not None and entry[0] == token:
             self.store.pop(lock_key, None)
+            self._bump_version(lock_key)
             return 1
         return 0
 
@@ -107,6 +119,7 @@ class FakeRedis:
         if not bucket:
             return None
         raw = bucket.pop()
+        self._bump_version(proc_key)
         try:
             data = json.loads(raw)
             if not isinstance(data, dict) or not data.get("job_id"):
@@ -119,6 +132,7 @@ class FakeRedis:
         if next_attempt > max_attempts:
             return ["dead", updated]
         self.lists.setdefault(pending_key, []).insert(0, updated)
+        self._bump_version(pending_key)
         return ["requeued", updated]
 
     def _eval_refund_slot(self, key: str, args: list[str]) -> int:
@@ -132,6 +146,7 @@ class FakeRedis:
         else:
             ttl_ms = max(1, int((refunded - now_wall) * 1000 + 0.5))
             self.store[key] = (str(refunded), ttl_ms / 1000.0)
+        self._bump_version(key)
         return 1
 
     def _eval_reserve_slot(self, key: str, args: list[str]) -> str:
@@ -149,6 +164,7 @@ class FakeRedis:
             new_next = now_wall + delay
         ttl_ms = max(1, int((new_next - now_wall) * 1000 + 0.5))
         self.store[key] = (str(new_next), ttl_ms / 1000.0)
+        self._bump_version(key)
         return str(wait_s)
 
     async def eval(
@@ -174,11 +190,13 @@ class FakeRedis:
     async def lpush(self, key: str, value: str) -> int:
         bucket = self.lists.setdefault(key, [])
         bucket.insert(0, value)
+        self._bump_version(key)
         return len(bucket)
 
     async def rpush(self, key: str, value: str) -> int:
         bucket = self.lists.setdefault(key, [])
         bucket.append(value)
+        self._bump_version(key)
         return len(bucket)
 
     async def lrange(self, key: str, start: int, end: int) -> list[str]:
@@ -202,11 +220,13 @@ class FakeRedis:
         if not src_bucket:
             return None
         item = src_bucket.pop() if src == "RIGHT" else src_bucket.pop(0)
+        self._bump_version(first_list)
         dst_bucket = self.lists.setdefault(second_list, [])
         if dest == "LEFT":
             dst_bucket.insert(0, item)
         else:
             dst_bucket.append(item)
+        self._bump_version(second_list)
         return item
 
     async def lmove(
@@ -224,6 +244,8 @@ class FakeRedis:
         while value in bucket and (count == 0 or removed < count):
             bucket.remove(value)
             removed += 1
+        if removed:
+            self._bump_version(key)
         return removed
 
     async def blpop(self, keys: list[str], timeout: float = 0) -> tuple[str, str] | None:
@@ -231,7 +253,9 @@ class FakeRedis:
         for key in keys:
             bucket = self.lists.get(key) or []
             if bucket:
-                return key, bucket.pop(0)
+                item = bucket.pop(0)
+                self._bump_version(key)
+                return key, item
         return None
 
     async def brpop(self, keys: list[str], timeout: float = 0) -> tuple[str, str] | None:
@@ -239,71 +263,96 @@ class FakeRedis:
         for key in keys:
             bucket = self.lists.get(key) or []
             if bucket:
-                return key, bucket.pop()
+                item = bucket.pop()
+                self._bump_version(key)
+                return key, item
         return None
 
     async def llen(self, key: str) -> int:
         return len(self.lists.get(key) or [])
 
     def pipeline(self, transaction: bool = True) -> Any:
-        del transaction
-        return _FakeRedisPipeline(self)
+        return _FakeRedisPipeline(self, transaction=transaction)
 
 
 class _FakeRedisPipeline:
-    """Minimal async Redis pipeline double for `FakeRedis`."""
+    """Transactional async Redis pipeline double enforcing `WATCH` and `MULTI` buffering (`T-4`)."""
 
-    def __init__(self, parent: FakeRedis) -> None:
+    def __init__(self, parent: FakeRedis, *, transaction: bool = True) -> None:
         self._parent = parent
+        self._transaction = transaction
         self._ops: list[tuple[str, tuple[Any, ...]]] = []
+        self._watched: dict[str, int] = {}
+        self._in_multi = False
 
     async def __aenter__(self) -> _FakeRedisPipeline:
         return self
 
     async def __aexit__(self, *args: object) -> None:
-        return None
+        self.reset()
+
+    def reset(self) -> None:
+        self._ops.clear()
+        self._watched.clear()
+        self._in_multi = False
 
     async def watch(self, *keys: str) -> None:
-        del keys
+        if self._in_multi:
+            raise redis.RedisError("Cannot call WATCH inside MULTI")
+        for key in keys:
+            self._watched[str(key)] = self._parent.versions.get(str(key), 0)
 
     def multi(self) -> None:
-        return None
+        self._in_multi = True
+
+    def _queue_op(self, op: str, args: tuple[Any, ...]) -> _FakeRedisPipeline:
+        if self._watched and not self._in_multi:
+            raise redis.RedisError(f"Pipeline after WATCH requires multi() before queuing {op}()")
+        self._ops.append((op, args))
+        return self
 
     def setex(self, key: str, ttl: int, value: str) -> _FakeRedisPipeline:
-        self._ops.append(("setex", (key, ttl, value)))
-        return self
+        return self._queue_op("setex", (key, ttl, value))
 
     def lpush(self, key: str, value: str) -> _FakeRedisPipeline:
-        self._ops.append(("lpush", (key, value)))
-        return self
+        return self._queue_op("lpush", (key, value))
 
     def rpush(self, key: str, value: str) -> _FakeRedisPipeline:
-        self._ops.append(("rpush", (key, value)))
-        return self
+        return self._queue_op("rpush", (key, value))
 
     def lrem(self, key: str, count: int, value: str) -> _FakeRedisPipeline:
-        self._ops.append(("lrem", (key, count, value)))
-        return self
+        return self._queue_op("lrem", (key, count, value))
 
     def expire(self, key: str, ttl: int) -> _FakeRedisPipeline:
-        self._ops.append(("expire", (key, ttl)))
-        return self
+        return self._queue_op("expire", (key, ttl))
 
     async def execute(self) -> list[Any]:
-        results: list[Any] = []
-        for op, args in self._ops:
-            if op == "setex":
-                results.append(await self._parent.setex(str(args[0]), int(args[1]), str(args[2])))
-            elif op == "lpush":
-                results.append(await self._parent.lpush(str(args[0]), str(args[1])))
-            elif op == "rpush":
-                results.append(await self._parent.rpush(str(args[0]), str(args[1])))
-            elif op == "lrem":
-                results.append(await self._parent.lrem(str(args[0]), int(args[1]), str(args[2])))
-            else:
-                results.append(True)
-        self._ops.clear()
-        return results
+        try:
+            if self._watched:
+                if not self._in_multi:
+                    raise redis.RedisError("Transactional pipeline after WATCH requires multi()")
+                for key, expected_ver in self._watched.items():
+                    if self._parent.versions.get(key, 0) != expected_ver:
+                        raise redis.WatchError(f"Watched key {key!r} modified concurrently")
+            results: list[Any] = []
+            for op, args in self._ops:
+                if op == "setex":
+                    results.append(
+                        await self._parent.setex(str(args[0]), int(args[1]), str(args[2]))
+                    )
+                elif op == "lpush":
+                    results.append(await self._parent.lpush(str(args[0]), str(args[1])))
+                elif op == "rpush":
+                    results.append(await self._parent.rpush(str(args[0]), str(args[1])))
+                elif op == "lrem":
+                    results.append(
+                        await self._parent.lrem(str(args[0]), int(args[1]), str(args[2]))
+                    )
+                else:
+                    results.append(True)
+            return results
+        finally:
+            self.reset()
 
 
 class MockPipeline:

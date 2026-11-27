@@ -21,6 +21,7 @@ from downloader.dependencies import (
     get_robots_checker,
     get_scheduler_dependency,
 )
+from downloader.http_client import HTTPClient
 from downloader.job_manager import JobManager
 from downloader.main import app
 from downloader.models.responses import BatchRequest, BatchURLRequest
@@ -241,6 +242,109 @@ class TestOCRTransformer:
             )
             assert res.success is True
             assert res.content == "Scanned Batch Doc"
+
+    async def test_image_origin_html_returns_escaped_ocr_across_single_multi_batch_and_schedule(
+        self,
+    ) -> None:
+        """Image origins requested as `text/html` return HTML-escaped OCR text instead of 415 (`A-3`)."""
+        png = _make_tiny_png()
+
+        def _image_handler(request: httpx.Request) -> httpx.Response:
+            return httpx.Response(
+                200,
+                headers={"Content-Type": "image/png"},
+                stream=httpx.ByteStream(png),
+                request=request,
+            )
+
+        mock_robots = MagicMock()
+        mock_robots.check_allowed = AsyncMock(return_value=None)
+        mock_throttle = MagicMock()
+        mock_throttle.wait_if_needed = AsyncMock(return_value=None)
+
+        async with HTTPClient(transport=httpx.MockTransport(_image_handler)) as real_http:
+            app.dependency_overrides[get_robots_checker] = lambda: mock_robots
+            app.dependency_overrides[get_domain_throttle] = lambda: mock_throttle
+            app.dependency_overrides[get_http_client] = lambda: real_http
+            try:
+                with (
+                    patch(
+                        "downloader.routes.download.validate_url_async",
+                        new=AsyncMock(return_value="https://example.com/scan.png"),
+                    ),
+                    patch(
+                        "downloader.services.batch_processor.validate_url_async",
+                        new=AsyncMock(return_value="https://example.com/scan.png"),
+                    ),
+                    patch(
+                        "downloader.scheduler.executor.validate_url_async",
+                        new=AsyncMock(return_value="https://example.com/scan.png"),
+                    ),
+                    patch(
+                        "downloader.transformers.ocr.pytesseract.image_to_string",
+                        return_value="Total <script>alert(1)</script> & $42",
+                    ),
+                    TestClient(app) as client,
+                ):
+                    r_html = client.get(
+                        "/https://example.com/scan.png",
+                        headers={"Accept": "text/html"},
+                    )
+                    assert r_html.status_code == 200
+                    assert r_html.headers["content-type"].startswith("text/html")
+                    assert r_html.headers["x-ocr-applied"] == "true"
+                    assert "&lt;script&gt;alert(1)&lt;/script&gt; &amp; $42" in r_html.text
+                    assert "<script>" not in r_html.text
+
+                    r_forced = client.get(
+                        "/https://example.com/scan.png?ocr=true",
+                        headers={"Accept": "text/html"},
+                    )
+                    assert r_forced.status_code == 200
+                    assert r_forced.headers["content-type"].startswith("text/html")
+                    assert "&lt;script&gt;alert(1)&lt;/script&gt; &amp; $42" in r_forced.text
+
+                    r_multi = client.get(
+                        "/https://example.com/scan.png",
+                        headers={"Accept": "text/html, text/markdown"},
+                    )
+                    assert r_multi.status_code == 200
+                    multi_body = r_multi.json()
+                    assert "errors" not in multi_body
+                    assert "&lt;script&gt;alert(1)&lt;/script&gt;" in multi_body["text/html"]
+                    assert "Total <script>alert(1)</script> & $42" in multi_body["text/markdown"]
+
+                    batch_res = await process_single_url_in_batch(
+                        BatchURLRequest(url="https://example.com/scan.png", format="html"),
+                        "html",
+                        10,
+                        "REQ-OCR-HTML",
+                        real_http,
+                        asyncio.Semaphore(1),
+                    )
+                    assert batch_res.success is True
+                    assert batch_res.content is not None
+                    assert "&lt;script&gt;alert(1)&lt;/script&gt;" in batch_res.content
+
+                    mock_storage = MagicMock()
+                    mock_storage.store_execution = AsyncMock()
+                    sched_exec = ScheduledJobExecutor(
+                        http_client=real_http,
+                        storage=mock_storage,
+                        pdf_semaphore=asyncio.Semaphore(1),
+                    )
+                    run_rec = await sched_exec.execute(
+                        "sched-ocr-html",
+                        "https://example.com/scan.png",
+                        "html",
+                        None,
+                    )
+                    assert run_rec.success is True
+                    assert run_rec.content_size is not None and run_rec.content_size > 0
+            finally:
+                app.dependency_overrides.pop(get_robots_checker, None)
+                app.dependency_overrides.pop(get_domain_throttle, None)
+                app.dependency_overrides.pop(get_http_client, None)
 
 
 class TestWebhookDeliveryAndIntegration:

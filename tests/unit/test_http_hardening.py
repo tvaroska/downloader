@@ -13,15 +13,15 @@ import pytest
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
-from downloader.config import reload_settings
+from downloader.config import Settings, SSRFConfig, reload_settings
 from downloader.dependencies import get_http_client, get_robots_checker
-from downloader.http_client import ContentTooLargeError, HTTPClient
+from downloader.http_client import ContentTooLargeError, HTTPClient, HTTPTimeoutError
 from downloader.logging_config import CustomJsonFormatter
 from downloader.main import app
 from downloader.models.responses import BatchURLRequest
 from downloader.ratelimit_middleware import RateLimitMiddleware
 from downloader.services.batch_processor import process_single_url_in_batch
-from downloader.validation import SSRFProtectionError
+from downloader.validation import EgressPolicy, SSRFProtectionError
 
 
 class _CountingByteStream(httpx.AsyncByteStream):
@@ -203,6 +203,76 @@ class TestHTTPStreamingAndRedirectSSRF:
             content, meta = await client.download("https://example.com/old")
             assert content == b"<html>Redirected safely</html>"
             assert meta["url"] == "https://example.com/new-destination"
+
+    async def test_total_deadline_aborts_slow_drip_body_and_redirect_sleeps(self) -> None:
+        """Total download budget aborts slow-drip bodies and redirect policy sleeps (`A-4`)."""
+        import time
+
+        client_disconnected = asyncio.Event()
+
+        async def _slow_drip_server(
+            reader: asyncio.StreamReader, writer: asyncio.StreamWriter
+        ) -> None:
+            try:
+                await reader.readuntil(b"\r\n\r\n")
+                writer.write(
+                    b"HTTP/1.1 200 OK\r\n"
+                    b"Content-Type: text/plain\r\n"
+                    b"Transfer-Encoding: chunked\r\n\r\n"
+                )
+                await writer.drain()
+                for _ in range(20):
+                    await asyncio.sleep(0.06)
+                    writer.write(b"10\r\n0123456789abcdef\r\n")
+                    await writer.drain()
+                writer.write(b"0\r\n\r\n")
+                await writer.drain()
+            except OSError:
+                client_disconnected.set()
+            finally:
+                writer.close()
+
+        server = await asyncio.start_server(_slow_drip_server, "127.0.0.1", 0)
+        port = server.sockets[0].getsockname()[1]
+        loopback_policy = EgressPolicy(
+            Settings(ssrf=SSRFConfig(block_private_ips=False, resolve_dns=False))
+        )
+        try:
+            # Each chunk arrives in 60ms (< 200ms socket timeout), but total exceeds 200ms.
+            async with HTTPClient(
+                timeout=0.2,
+                transport=httpx.AsyncHTTPTransport(),
+                egress_policy=loopback_policy,
+            ) as client:
+                started = time.monotonic()
+                with pytest.raises(HTTPTimeoutError, match="timed out"):
+                    await client.download(f"http://127.0.0.1:{port}/drip")
+                elapsed = time.monotonic() - started
+                assert elapsed < 0.8
+        finally:
+            server.close()
+            await server.wait_closed()
+
+        # Redirect crawl-delay policy sleep is also bounded by the same total deadline
+        async def _slow_redirect_policy(_src: str, _dst: str) -> None:
+            await asyncio.sleep(1.0)
+
+        def _redirect_handler(request: httpx.Request) -> httpx.Response:
+            if request.url.host == "example.com":
+                return httpx.Response(
+                    302,
+                    headers={"Location": "https://test.com/landing"},
+                    request=request,
+                )
+            return httpx.Response(200, stream=httpx.ByteStream(b"ok"), request=request)
+
+        async with HTTPClient(
+            timeout=0.15,
+            transport=httpx.MockTransport(_redirect_handler),
+            redirect_policy=_slow_redirect_policy,
+        ) as redir_client:
+            with pytest.raises(HTTPTimeoutError, match="timed out"):
+                await redir_client.download("https://example.com/hop")
 
 
 @pytest.mark.unit

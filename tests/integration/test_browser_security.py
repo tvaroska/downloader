@@ -131,6 +131,8 @@ class TestMemoryLimitEnforcement:
         assert "--disable-extensions" in args
         assert "--disable-plugins" in args
         assert "--disable-remote-fonts" in args
+        assert "--force-webrtc-ip-handling-policy=disable_non_proxied_udp" in args
+        assert "--enforce-webrtc-ip-permission-check" in args
 
 
 @pytest.mark.asyncio
@@ -211,3 +213,93 @@ class TestProcessCleanup:
         assert pool.config.pool_size == 5
         assert pool.config.memory_limit_mb == 1024
         assert pool.config.close_timeout == 10.0
+
+
+def _resolve_headless_shell_executable() -> str | None:
+    """Resolve Playwright headless-shell binary when default cache revision differs on host."""
+    from pathlib import Path
+
+    cache_root = Path.home() / ".cache" / "ms-playwright"
+    if not cache_root.is_dir():
+        return None
+    candidates = sorted(
+        cache_root.glob("chromium_headless_shell-*/chrome-headless-shell-*/chrome-headless-shell")
+    )
+    return str(candidates[-1]) if candidates else None
+
+
+async def _probe_webrtc_stun_udp(launch_args: list[str]) -> bool:
+    """Launch headless Chromium behind a blackhole HTTP proxy and check if STUN UDP leaks."""
+    import socket
+
+    from playwright.async_api import Error as PlaywrightError
+    from playwright.async_api import ProxySettings, async_playwright
+
+    sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    sock.bind(("127.0.0.1", 0))
+    sock.setblocking(False)
+    port = sock.getsockname()[1]
+    received_udp = False
+    try:
+        async with async_playwright() as pw:
+            proxy_cfg = ProxySettings(server="http://127.0.0.1:9", bypass="example.invalid")
+            try:
+                browser = await pw.chromium.launch(
+                    headless=True,
+                    args=launch_args,
+                    proxy=proxy_cfg,
+                )
+            except PlaywrightError:
+                fallback_exe = _resolve_headless_shell_executable()
+                if fallback_exe is None:
+                    raise
+                browser = await pw.chromium.launch(
+                    executable_path=fallback_exe,
+                    headless=True,
+                    args=launch_args,
+                    proxy=proxy_cfg,
+                )
+
+            try:
+                ctx = await browser.new_context()
+                page = await ctx.new_page()
+                await page.set_content(
+                    "<script>"
+                    f"(async () => {{"
+                    f"  const pc = new RTCPeerConnection({{iceServers: [{{urls: 'stun:127.0.0.1:{port}'}}]}});"
+                    f"  pc.createDataChannel('probe');"
+                    f"  const offer = await pc.createOffer();"
+                    f"  await pc.setLocalDescription(offer);"
+                    f"}})();"
+                    "</script>"
+                )
+                for _ in range(25):
+                    try:
+                        payload, _ = sock.recvfrom(4096)
+                        if payload:
+                            received_udp = True
+                            break
+                    except BlockingIOError:
+                        await asyncio.sleep(0.05)
+                await ctx.close()
+            finally:
+                await browser.close()
+    finally:
+        sock.close()
+    return received_udp
+
+
+@pytest.mark.integration
+@pytest.mark.requires_playwright
+class TestWebRTCUDPEgressGuard:
+    """Real-Chromium verification that `BrowserConfig` blocks non-proxied WebRTC UDP (`S-4`)."""
+
+    @pytest.mark.asyncio
+    async def test_webrtc_stun_udp_blocked_by_browser_launch_policy(self) -> None:
+        hardened_args = BrowserConfig().get_launch_args()
+        unprotected_args = [arg for arg in hardened_args if "webrtc" not in arg.lower()]
+
+        # Positive control: without the WebRTC IP-handling flag, Chromium sends STUN UDP outside proxy.
+        assert await _probe_webrtc_stun_udp(unprotected_args) is True
+        # Hardened BrowserConfig blocks non-proxied WebRTC UDP completely.
+        assert await _probe_webrtc_stun_udp(hardened_args) is False

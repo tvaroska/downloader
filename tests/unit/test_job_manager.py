@@ -2,6 +2,7 @@
 
 import asyncio
 from datetime import UTC, datetime, timedelta
+from typing import Any
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
@@ -13,7 +14,7 @@ from downloader.job_manager import (
     JobResult,
     JobStatus,
 )
-from tests.fixtures.mock_fixtures import MockPipeline
+from tests.fixtures.mock_fixtures import FakeRedis, MockPipeline
 
 # =============================================================================
 # Fixtures
@@ -58,48 +59,18 @@ async def job_manager_with_pool(mock_redis_client, mock_connection_pool):
     yield manager
 
 
-def _make_kv_job_manager() -> tuple[JobManager, AsyncMock, AsyncMock]:
-    """Create a JobManager backed by an in-memory transactional KV stub."""
-    kv: dict[str, str] = {}
-
-    class _Pipe:
-        def __init__(self) -> None:
-            self._ops: list[tuple[str, str]] = []
-
-        async def __aenter__(self) -> "_Pipe":
-            return self
-
-        async def __aexit__(self, *_args: object) -> None:
-            return None
-
-        async def watch(self, _key: str) -> None:
-            return None
-
-        def multi(self) -> None:
-            return None
-
-        def setex(self, key: str, _ttl: int, value: str) -> "_Pipe":
-            self._ops.append((key, value))
-            return self
-
-        async def execute(self) -> list[bool]:
-            for k, v in self._ops:
-                kv[k] = v
-            return [True] * len(self._ops)
-
-    client = AsyncMock()
-    client.get = AsyncMock(side_effect=lambda k: kv.get(k))
-    client.setex = AsyncMock(side_effect=lambda k, _ttl, v: kv.__setitem__(k, v))
-    client.pipeline = MagicMock(side_effect=lambda **_kw: _Pipe())
-    client.close = AsyncMock()
+def _make_kv_job_manager() -> tuple[JobManager, Any, AsyncMock]:
+    """Create a JobManager backed by transactional `FakeRedis(decode_responses=True)`."""
+    fake_redis: Any = FakeRedis(decode_responses=True)
+    fake_redis.close = AsyncMock()
 
     pool = AsyncMock()
     pool.disconnect = AsyncMock()
 
     manager = JobManager(redis_url="redis://localhost:6379")
-    manager.redis_client = client
+    manager.redis_client = fake_redis
     manager.connection_pool = pool
-    return manager, client, pool
+    return manager, fake_redis, pool
 
 
 class TestJobManager:
@@ -1001,3 +972,145 @@ class TestJobManagerHealthMonitoring:
         assert stats["status"] == "healthy"
         assert stats["pool_size"] == 20
         assert "health_check_interval" in stats
+
+
+class TestJobManagerWatchMultiAtomicity:
+    """Pin `WATCH`, `MULTI` write buffering, and in-transaction status re-checks (`T-4`)."""
+
+    @pytest.mark.asyncio
+    async def test_fake_pipeline_buffers_until_execute_and_requires_multi_after_watch(self) -> None:
+        fake = FakeRedis(decode_responses=True)
+        await fake.setex("job:1", 60, "v1")
+
+        # Queuing writes after WATCH without MULTI raises immediately
+        async with fake.pipeline(transaction=True) as bad_pipe:
+            await bad_pipe.watch("job:1")
+            with pytest.raises(redis.RedisError, match="multi"):
+                bad_pipe.setex("job:1", 60, "v2")
+
+        # Buffered MULTI writes do not mutate store until execute()
+        async with fake.pipeline(transaction=True) as buf_pipe:
+            await buf_pipe.watch("job:1")
+            buf_pipe.multi()
+            buf_pipe.setex("job:1", 60, "v2")
+            assert await fake.get("job:1") == "v1"
+            await buf_pipe.execute()
+        assert await fake.get("job:1") == "v2"
+
+        # Concurrent modification after WATCH raises WatchError and discards buffered writes
+        async with fake.pipeline(transaction=True) as conflict_pipe:
+            await conflict_pipe.watch("job:1")
+            await fake.setex("job:1", 60, "external")
+            conflict_pipe.multi()
+            conflict_pipe.setex("job:1", 60, "stale")
+            conflict_pipe.setex("job_result:1", 60, "stale-res")
+            with pytest.raises(redis.WatchError):
+                await conflict_pipe.execute()
+        assert await fake.get("job:1") == "external"
+        assert await fake.get("job_result:1") is None
+
+    @pytest.mark.asyncio
+    async def test_cancel_during_payload_capping_blocks_completion_via_intransaction_recheck(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Cancel landing after initial pre-check (before WATCH) is caught by `:384` re-check (`T-4`)."""
+        import downloader.job_manager as jm_mod
+
+        manager, _, _ = _make_kv_job_manager()
+        job_id = await manager.create_job({"urls": [{"url": "https://example.com"}]})
+        await manager.update_job_status(job_id, JobStatus.RUNNING)
+
+        orig_cap = jm_mod._cap_job_result_payload_with_counts
+        cancel_applied = False
+
+        async def _cancel_during_to_thread(func, *args, **kwargs):
+            nonlocal cancel_applied
+            out = func(*args, **kwargs)
+            if not cancel_applied:
+                cancel_applied = True
+                assert await manager.update_job_status(job_id, JobStatus.CANCELLED) is True
+            return out
+
+        monkeypatch.setattr(jm_mod.asyncio, "to_thread", _cancel_during_to_thread)
+        monkeypatch.setattr(jm_mod, "_cap_job_result_payload_with_counts", orig_cap)
+
+        completed = await manager.complete_job(
+            job_id,
+            [{"url": "https://example.com", "success": True}],
+            {"total_requests": 1, "successful_requests": 1, "failed_requests": 0},
+        )
+        assert completed is False
+        info = await manager.get_job_info(job_id)
+        assert info is not None and info.status == JobStatus.CANCELLED
+        assert await manager.get_job_results(job_id) is None
+
+    @pytest.mark.asyncio
+    async def test_cancel_between_watch_read_and_exec_triggers_watcherror_and_aborts(self) -> None:
+        """Concurrent cancel between `WATCH`+`GET` and `EXEC` triggers `WatchError` in both update and complete (`T-4`)."""
+        manager, fake_redis, _ = _make_kv_job_manager()
+
+        # 1) complete_job: cancel injected right after watched GET on attempt 1
+        job_id = await manager.create_job({"urls": [{"url": "https://example.com"}]})
+        await manager.update_job_status(job_id, JobStatus.RUNNING)
+
+        orig_get = fake_redis.get
+        injected_complete = False
+        get_calls = 0
+
+        async def _hooked_get(key: str):
+            nonlocal get_calls, injected_complete
+            val = await orig_get(key)
+            if key == f"job:{job_id}":
+                get_calls += 1
+                # Call 1 = complete_job initial_info; Call 2 = inside WATCH before MULTI/EXEC
+                if get_calls == 2 and not injected_complete:
+                    injected_complete = True
+                    cancelled_info = JobInfo.model_validate_json(val)
+                    cancelled_info.status = JobStatus.CANCELLED
+                    await fake_redis.setex(key, 3600, cancelled_info.model_dump_json())
+            return val
+
+        fake_redis.get = _hooked_get
+        try:
+            completed = await manager.complete_job(
+                job_id,
+                [{"url": "https://example.com", "success": True}],
+                {"total_requests": 1, "successful_requests": 1, "failed_requests": 0},
+            )
+        finally:
+            fake_redis.get = orig_get
+
+        assert injected_complete is True
+        assert get_calls >= 3  # Retried after WatchError!
+        assert completed is False
+        info = await manager.get_job_info(job_id)
+        assert info is not None and info.status == JobStatus.CANCELLED
+        assert await manager.get_job_results(job_id) is None
+
+        # 2) update_job_status: cancel injected between WATCH+GET and MULTI/EXEC prevents RUNNING overwrite
+        job2 = await manager.create_job({"urls": [{"url": "https://example.com/2"}]})
+        await manager.update_job_status(job2, JobStatus.RUNNING, progress=10)
+        upd_calls = 0
+
+        async def _hooked_update_get(key: str):
+            nonlocal upd_calls
+            val = await orig_get(key)
+            if key == f"job:{job2}":
+                upd_calls += 1
+                if upd_calls == 1:
+                    cancelled_info = JobInfo.model_validate_json(val)
+                    cancelled_info.status = JobStatus.CANCELLED
+                    await fake_redis.setex(key, 3600, cancelled_info.model_dump_json())
+            return val
+
+        fake_redis.get = _hooked_update_get
+        try:
+            applied = await manager.update_job_status(job2, JobStatus.RUNNING, progress=80)
+        finally:
+            fake_redis.get = orig_get
+
+        assert upd_calls == 2
+        assert applied is False
+        info2 = await manager.get_job_info(job2)
+        assert info2 is not None and info2.status == JobStatus.CANCELLED
+        assert info2.progress == 10

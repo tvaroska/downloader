@@ -40,7 +40,7 @@ def test_python_sdk_suite_passes() -> None:
 def test_javascript_sdk_suite_passes_without_untracked_build() -> None:
     node = shutil.which("node")
     if node is None:
-        pytest.skip("node not installed in PATH")
+        pytest.fail("node toolchain not installed in PATH")
 
     js_dir = REPO_ROOT / "sdks/javascript"
     dist_dir = js_dir / "dist"
@@ -55,20 +55,23 @@ def test_javascript_sdk_suite_passes_without_untracked_build() -> None:
     )
     assert proc.returncode == 0, f"JS SDK tests failed:\n{proc.stdout}\n{proc.stderr}"
 
-    tsc = shutil.which("tsc")
     local_tsc = js_dir / "node_modules" / ".bin" / "tsc"
+    tsc = shutil.which("tsc")
     tsc_cmd: list[str] | None = (
-        [tsc] if tsc is not None else ([str(local_tsc)] if local_tsc.is_file() else None)
+        [str(local_tsc)] if local_tsc.is_file() else ([tsc] if tsc is not None else None)
     )
-    if tsc_cmd is not None:
-        tc_proc = subprocess.run(
-            [*tsc_cmd, "--noEmit", "-p", "tsconfig.json"],
-            cwd=js_dir,
-            capture_output=True,
-            text=True,
-            check=False,
+    if tsc_cmd is None:
+        pytest.fail(
+            "TypeScript compiler (tsc) not found in sdks/javascript/node_modules/.bin or PATH"
         )
-        assert tc_proc.returncode == 0, f"JS SDK tsc failed:\n{tc_proc.stdout}\n{tc_proc.stderr}"
+    tc_proc = subprocess.run(
+        [*tsc_cmd, "--noEmit", "-p", "tsconfig.json"],
+        cwd=js_dir,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert tc_proc.returncode == 0, f"JS SDK tsc failed:\n{tc_proc.stdout}\n{tc_proc.stderr}"
 
 
 @pytest.mark.smoke
@@ -77,7 +80,7 @@ def test_go_sdk_gofmt_vet_and_race_suite_pass() -> None:
     go_bin = shutil.which("go")
     gofmt_bin = shutil.which("gofmt")
     if go_bin is None or gofmt_bin is None:
-        pytest.skip("go toolchain not installed in PATH")
+        pytest.fail("go and gofmt toolchains must be installed in PATH")
 
     go_dir = REPO_ROOT / "sdks/go"
     fmt_proc = subprocess.run(

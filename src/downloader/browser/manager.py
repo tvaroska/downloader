@@ -58,6 +58,8 @@ class BrowserConfig:
             "--disable-default-apps",
             "--disable-remote-fonts",
             "--disable-webgl",
+            "--force-webrtc-ip-handling-policy=disable_non_proxied_udp",
+            "--enforce-webrtc-ip-permission-check",
         ]
     )
 

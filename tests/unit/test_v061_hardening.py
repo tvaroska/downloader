@@ -525,6 +525,54 @@ class TestTrackBAuthDocsRateLimitAndSSRF:
             with pytest.raises(HTTPClientError):
                 await client.download("https://example.com")
 
+    @pytest.mark.asyncio
+    async def test_pinned_backend_validates_all_dns_records_and_falls_over_public_ips(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """SSRFSafeNetworkBackend validates every getaddrinfo record before connecting (`T-1`)."""
+        import socket
+
+        from downloader.config import SSRFConfig
+        from downloader.validation import EgressPolicy
+
+        inner = MagicMock(spec=httpcore.AsyncNetworkBackend)
+        fake_stream = AsyncMock(spec=httpcore.AsyncNetworkStream)
+        inner.connect_tcp = AsyncMock(return_value=fake_stream)
+        policy = EgressPolicy(Settings(ssrf=SSRFConfig(resolve_dns=True, block_private_ips=True)))
+        backend = SSRFSafeNetworkBackend(inner=inner, egress_policy=policy)
+
+        # Public first record + metadata second record -> rejected, zero TCP connect attempts
+        monkeypatch.setattr(
+            socket,
+            "getaddrinfo",
+            lambda _h, port, *_a, **_kw: [
+                (socket.AF_INET, socket.SOCK_STREAM, 6, "", ("93.184.215.14", port or 443)),
+                (socket.AF_INET, socket.SOCK_STREAM, 6, "", ("169.254.169.254", port or 443)),
+            ],
+        )
+        with pytest.raises(SSRFProtectionError, match="cloud metadata"):
+            await backend.connect_tcp("rebind-dual.example.com", 443)
+        inner.connect_tcp.assert_not_awaited()
+
+        # Two valid public records -> validates both and falls over when first fails to connect
+        monkeypatch.setattr(
+            socket,
+            "getaddrinfo",
+            lambda _h, port, *_a, **_kw: [
+                (socket.AF_INET, socket.SOCK_STREAM, 6, "", ("93.184.215.14", port or 443)),
+                (socket.AF_INET, socket.SOCK_STREAM, 6, "", ("1.1.1.1", port or 443)),
+            ],
+        )
+        inner.connect_tcp = AsyncMock(
+            side_effect=[httpcore.ConnectError("first unreachable"), fake_stream]
+        )
+        stream = await backend.connect_tcp("multi-public.example.com", 443)
+        assert stream is fake_stream
+        assert [c.kwargs["host"] for c in inner.connect_tcp.await_args_list] == [
+            "93.184.215.14",
+            "1.1.1.1",
+        ]
+
     @pytest.mark.parametrize(
         "blocked_url",
         [

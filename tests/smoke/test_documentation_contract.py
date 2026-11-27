@@ -154,3 +154,92 @@ def test_documented_env_var_defaults_match_settings() -> None:
             )
 
     assert not mismatches, "Documented default drift:\n" + "\n".join(mismatches)
+
+
+@pytest.mark.smoke
+def test_gate_ci_and_container_structural_guards() -> None:
+    """Pin coverage floors, mypy, ast-grep, Trivy, non-root user, and shutdown budget (`T-8`)."""
+    import importlib
+    import json
+    import tomllib
+
+    yaml_mod = importlib.import_module("yaml")
+
+    pyproject = tomllib.loads((REPO_ROOT / "pyproject.toml").read_text(encoding="utf-8"))
+    cov_run = pyproject["tool"]["coverage"]["run"]
+    cov_report = pyproject["tool"]["coverage"]["report"]
+    assert cov_run.get("branch") is True
+    pyproject_floor = float(cov_report["fail_under"])
+    assert pyproject_floor >= 83.0
+
+    # 1. scripts/gate.sh structural invariants
+    gate_sh = (REPO_ROOT / "scripts" / "gate.sh").read_text(encoding="utf-8")
+    assert ".venv/bin/ast-grep scan --rule specs/ast.rules.yaml" in gate_sh
+    assert "command -v ast-grep" not in gate_sh
+    assert re.search(r"mypy\b[^\n]*\bsrc/\s+tests/", gate_sh), (
+        "scripts/gate.sh must run mypy on src/ tests/"
+    )
+    gate_cov_match = re.search(r"--cov-fail-under=([0-9]+(?:\.[0-9]+)?)", gate_sh)
+    assert gate_cov_match is not None, "scripts/gate.sh must pass explicit --cov-fail-under"
+    assert float(gate_cov_match.group(1)) >= pyproject_floor
+    assert "--cov=src/downloader" in gate_sh
+    assert " -n auto" in gate_sh
+
+    # 2. cloudbuild.yaml structural invariants
+    cb = yaml_mod.safe_load((REPO_ROOT / "cloudbuild.yaml").read_text(encoding="utf-8"))
+    steps_by_id = {step["id"]: step for step in cb["steps"] if "id" in step}
+
+    py_step_script = " ".join(steps_by_id["python-lint-typecheck-and-tests"]["args"])
+    assert "ast-grep scan --rule specs/ast.rules.yaml" in py_step_script
+    assert re.search(r"mypy\b[^\n]*\bsrc/\s+tests/", py_step_script)
+    assert "--cov=src/downloader" in py_step_script
+    cb_cov_match = re.search(r"--cov-fail-under=([0-9]+(?:\.[0-9]+)?)", py_step_script)
+    assert cb_cov_match is not None
+    assert float(cb_cov_match.group(1)) >= pyproject_floor
+
+    trivy_step = steps_by_id["trivy-vulnerability-scan"]
+    assert not trivy_step.get("allowFailure", False), "Trivy step must not allowFailure"
+    trivy_script = " ".join(trivy_step["args"])
+    assert "trivy:" in trivy_script and "image" in trivy_script
+    assert "--pkg-types os,library" in trivy_script
+    sev_match = re.search(r"--severity\s+([A-Z,]+)", trivy_script)
+    assert sev_match is not None
+    severities = set(sev_match.group(1).split(","))
+    assert {"HIGH", "CRITICAL"} <= severities
+    assert "--exit-code 1" in trivy_script
+
+    push_wait_for = set(steps_by_id["push-release-image"]["waitFor"])
+    assert {
+        "trivy-vulnerability-scan",
+        "verify-nonroot-and-healthcheck",
+        "redis-integration-tests",
+        "playwright-integration-tests",
+        "loopback-e2e-tests",
+    } <= push_wait_for
+
+    # 3. Dockerfile non-root USER and uvicorn graceful shutdown budget
+    dockerfile_lines = [
+        ln.strip()
+        for ln in (REPO_ROOT / "Dockerfile").read_text(encoding="utf-8").splitlines()
+        if ln.strip() and not ln.strip().startswith("#")
+    ]
+    user_directives = [
+        ln.split(None, 1)[1].strip() for ln in dockerfile_lines if ln.upper().startswith("USER ")
+    ]
+    assert user_directives, "Dockerfile must declare a non-root USER"
+    final_user = user_directives[-1].split(":", 1)[0]
+    assert final_user not in {"root", "0"}, (
+        f"Dockerfile final USER must be non-root, got {final_user!r}"
+    )
+
+    cmd_lines = [ln for ln in dockerfile_lines if ln.upper().startswith("CMD ")]
+    assert cmd_lines, "Dockerfile must declare CMD"
+    cmd_tokens = json.loads(cmd_lines[-1][4:].strip())
+    assert "--timeout-graceful-shutdown" in cmd_tokens
+    idx = cmd_tokens.index("--timeout-graceful-shutdown")
+    graceful_budget = float(cmd_tokens[idx + 1])
+    cfg = Settings()
+    min_budget = cfg.shutdown.drain_timeout + cfg.shutdown.pre_stop_delay
+    assert graceful_budget > min_budget, (
+        f"Dockerfile --timeout-graceful-shutdown ({graceful_budget}s) <= {min_budget}s"
+    )

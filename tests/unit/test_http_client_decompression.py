@@ -255,3 +255,57 @@ async def test_truncated_gzip_is_rejected() -> None:
             await client.download("https://example.com/trunc-gz")
         with pytest.raises(HTTPClientError, match="brotli|Truncated|Decompression"):
             await client.download("https://example.com/trunc-br")
+
+
+@pytest.mark.unit
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("encoding_header", "compressed_payload"),
+    [
+        ("br", brotli.compress(b"\x00" * (4 * 1024 * 1024), quality=6)),
+        ("gzip", gzip.compress(b"A" * (4 * 1024 * 1024), compresslevel=9)),
+        ("deflate", zlib.compress(b"B" * (4 * 1024 * 1024), level=9)),
+        ("deflate", zlib.compress(b"C" * (4 * 1024 * 1024), level=9)[2:-4]),
+    ],
+    ids=["brotli", "gzip", "deflate-zlib", "deflate-raw"],
+)
+async def test_decompression_step_output_bounded_for_brotli_gzip_and_deflate(
+    monkeypatch: pytest.MonkeyPatch,
+    encoding_header: str,
+    compressed_payload: bytes,
+) -> None:
+    """Every decompression step bounds output to <= 64 KiB and stops at cap + 1 byte (`T-2`)."""
+    import downloader.content_encoding as ce
+
+    cap = 100 * 1024  # > 64 KiB so both initial and loop decompression steps execute
+    seen_piece_sizes: list[int] = []
+    orig_append = ce._BoundedDecodeBuffer.append_decoded
+
+    def _spy_append(self: ce._BoundedDecodeBuffer, piece: bytes) -> bool:
+        if piece:
+            seen_piece_sizes.append(len(piece))
+        return orig_append(self, piece)
+
+    monkeypatch.setattr(ce._BoundedDecodeBuffer, "append_decoded", _spy_append)
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            200,
+            headers={"Content-Type": "text/plain", "Content-Encoding": encoding_header},
+            stream=httpx.ByteStream(compressed_payload),
+            request=request,
+        )
+
+    async with HTTPClient(
+        max_download_size=cap,
+        transport=httpx.MockTransport(handler),
+    ) as client:
+        with pytest.raises(ContentTooLargeError) as exc_info:
+            await client.download("https://example.com/step-bounded-bomb")
+
+    assert seen_piece_sizes, "Expected at least one decoded step"
+    assert max(seen_piece_sizes) <= 65_536
+    assert exc_info.value.actual_size is not None
+    assert exc_info.value.actual_size <= cap + 65_536 + 1
+    if encoding_header != "br":
+        assert exc_info.value.actual_size == cap + 1

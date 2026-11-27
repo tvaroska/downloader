@@ -24,10 +24,13 @@ check:
     uv run --no-sync pytest -p no:cacheprovider --cov=src/downloader --cov-fail-under=83 -n auto -m "not (integration or e2e or network or requires_redis or requires_playwright)"
     uv run --no-sync pytest -p no:cacheprovider sdks/python/tests -c sdks/python/pyproject.toml
     node --test sdks/javascript/test/client.test.mjs
-    if command -v tsc >/dev/null 2>&1; then
-        tsc --noEmit -p sdks/javascript/tsconfig.json
-    elif [[ -x sdks/javascript/node_modules/.bin/tsc ]]; then
+    if [[ -x sdks/javascript/node_modules/.bin/tsc ]]; then
         sdks/javascript/node_modules/.bin/tsc --noEmit -p sdks/javascript/tsconfig.json
+    elif command -v tsc >/dev/null 2>&1; then
+        tsc --noEmit -p sdks/javascript/tsconfig.json
+    else
+        echo "ERROR: tsc not found (run 'npm --prefix sdks/javascript ci')" >&2
+        exit 1
     fi
     test -z "$(gofmt -s -l sdks/go)"
     go -C sdks/go vet ./...

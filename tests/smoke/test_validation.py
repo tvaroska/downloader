@@ -340,3 +340,33 @@ class TestSSRFProtection:
         # Loopback should still be blocked with defaults
         with pytest.raises(SSRFProtectionError):
             validate_url("http://127.0.0.1")
+
+    def test_multi_record_dns_validates_every_resolved_address(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Reject hostnames when any secondary getaddrinfo record resolves to a restricted IP (`T-1`)."""
+        import socket
+
+        settings = Settings(ssrf=SSRFConfig(resolve_dns=True, block_private_ips=True))
+
+        monkeypatch.setattr(
+            socket,
+            "getaddrinfo",
+            lambda _host, port, *_a, **_kw: [
+                (socket.AF_INET, socket.SOCK_STREAM, 6, "", ("93.184.215.14", port or 80)),
+                (socket.AF_INET, socket.SOCK_STREAM, 6, "", ("10.0.0.5", port or 80)),
+            ],
+        )
+        with pytest.raises(SSRFProtectionError, match="private IP"):
+            validate_url("http://dual-v4.example.com", settings)
+
+        monkeypatch.setattr(
+            socket,
+            "getaddrinfo",
+            lambda _host, port, *_a, **_kw: [
+                (socket.AF_INET, socket.SOCK_STREAM, 6, "", ("93.184.215.14", port or 80)),
+                (socket.AF_INET6, socket.SOCK_STREAM, 6, "", ("fd00::1", port or 80, 0, 0)),
+            ],
+        )
+        with pytest.raises(SSRFProtectionError, match="private IP"):
+            validate_url("http://dual-v6.example.com", settings)

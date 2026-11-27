@@ -117,14 +117,10 @@ async def _convert_one_format(
         already_rendered=use_rendered,
         degraded_force_render=use_degraded,
     )
-    try:
-        res = await convert(single_req, deps)
-        if format_type == "html":
-            return await run_in_html_executor(_encode_result_for_json_map, format_type, res)
-        return _encode_result_for_json_map(format_type, res)
-    except Exception as exc:  # noqa: BLE001
-        # Partial-failure contract: capture per-format errors into the JSON `errors` map.
-        raise RuntimeError(f"{format_type} processing failed: {exc}") from exc
+    res = await convert(single_req, deps)
+    if format_type == "html":
+        return await run_in_html_executor(_encode_result_for_json_map, format_type, res)
+    return _encode_result_for_json_map(format_type, res)
 
 
 async def _force_render_shared_dom(
@@ -285,15 +281,20 @@ async def _run_multiple_formats(
 
     response_dict: dict[str, Any] = {}
     errors: dict[str, str] = {}
+    first_error: Exception | None = None
     for fmt, item in zip(multi_req.formats, results, strict=False):
         if isinstance(item, Exception):
-            errors[format_to_mime_type(fmt)] = str(item)
+            if first_error is None:
+                first_error = item
+            errors[format_to_mime_type(fmt)] = f"{fmt} processing failed: {item}"
         elif isinstance(item, BaseException):
             raise item
         else:
             mime_type, content_str = item
             response_dict[mime_type] = content_str
 
+    if not response_dict and first_error is not None:
+        raise first_error
     if errors:
         response_dict["errors"] = errors
     has_html_formats = any(fmt in _HTML_DERIVED_FORMATS for fmt in multi_req.formats)
