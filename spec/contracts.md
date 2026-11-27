@@ -1694,7 +1694,7 @@ Failed scheduled jobs are automatically retried for transient errors:
 | `WEBHOOK_ENABLED` | `true` | Enable outbound batch/schedule webhook delivery |
 | `WEBHOOK_TIMEOUT_SECONDS` | `10.0` | Timeout per outbound webhook attempt in seconds (alias for `WEBHOOK_TIMEOUT`) |
 | `WEBHOOK_MAX_RETRIES` | `3` | Retry attempts on transient `5xx`/network failures |
-| `WEBHOOK_SECRET_KEY` | `null` | Optional symmetric key encrypting `webhook_secret` at rest in Redis (falls back to `DOWNLOADER_KEY`) |
+| `WEBHOOK_SECRET_KEY` | `null` | Dedicated symmetric key encrypting `webhook_secret` at rest in Redis (required when `REDIS_URI` or split-worker mode is set; falls back to `DOWNLOADER_KEY` only in stateless local mode) |
 | `SHUTDOWN_DRAIN_TIMEOUT` | `30.0` | Max seconds to wait for active requests and jobs during shutdown |
 | `SHUTDOWN_PRE_STOP_DELAY` | `2.0` | Seconds after `SIGTERM` to hold `/health` at `503` before closing listening sockets |
 | `DEPLOYMENT_MODE` | `all` | Runtime topology: `all` (monolith/stateless default), `api` (offloads batch/browser via Redis), or `worker` |
