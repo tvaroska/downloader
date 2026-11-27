@@ -5,7 +5,7 @@ from __future__ import annotations
 import json
 from typing import Literal
 
-from pydantic import BaseModel, Field, ValidationError, model_validator
+from pydantic import BaseModel, ConfigDict, Field, ValidationError, model_validator
 
 MAX_BROWSER_ACTIONS = 20
 
@@ -27,6 +27,8 @@ class BrowserActionError(Exception):
 
 class BrowserAction(BaseModel):
     """A single allowlisted Playwright page action executed prior to capture."""
+
+    model_config = ConfigDict(extra="forbid")
 
     type: BrowserActionType = Field(..., description="Allowlisted browser action type")
     selector: str | None = Field(

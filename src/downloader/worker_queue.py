@@ -45,6 +45,7 @@ BROWSER_RESULT_PREFIX = "browser_result:"
 WORKER_HEARTBEAT_PREFIX = "worker:heartbeat:"
 
 _BROWSER_RESULT_TTL_SECONDS = 120
+_DEFAULT_BROWSER_SOCKET_TIMEOUT_SECONDS = 55.0
 
 _RECLAIM_PROCESSING_LUA = """
 local proc_key = KEYS[1]
@@ -103,12 +104,17 @@ class WorkerQueue:
         self._browser_inflight_semaphore = asyncio.Semaphore(max(1, max_remote_browser_calls))
         self._owns_browser_pool = False
         self._browser_pool: redis.ConnectionPool | None = None
+        self._configured_browser_socket_timeout = _DEFAULT_BROWSER_SOCKET_TIMEOUT_SECONDS
         if browser_redis_client is not None:
             self._browser_redis = browser_redis_client
         elif isinstance(getattr(redis_client, "connection_pool", None), redis.ConnectionPool):
             pool = redis_client.connection_pool
             pool_kwargs = dict(pool.connection_kwargs)
             pool_kwargs["max_connections"] = max(max_remote_browser_calls + 2, 10)
+            pool_kwargs["socket_timeout"] = _DEFAULT_BROWSER_SOCKET_TIMEOUT_SECONDS
+            pool_kwargs["retry_on_timeout"] = False
+            pool_kwargs["retry_on_error"] = [redis.BusyLoadingError, redis.ConnectionError]
+            pool_kwargs.pop("retry", None)
             self._browser_pool = redis.ConnectionPool(**pool_kwargs)
             self._browser_redis = redis.Redis(connection_pool=self._browser_pool)
             self._owns_browser_pool = True
@@ -270,14 +276,21 @@ class WorkerQueue:
         *,
         max_attempts: int | None = None,
         on_dead_letter: Callable[[BatchQueueEnvelope], Awaitable[None]] | None = None,
+        include_self: bool = True,
     ) -> int:
         """Atomically reclaim orphaned batch entries from dead workers with attempt tracking."""
         limit = max(1, max_attempts if max_attempts is not None else self.max_attempts)
         moved = 0
         for proc_key in await self._discover_processing_queues():
+            if not include_self and proc_key == self.processing_queue:
+                continue
             if proc_key.startswith(BATCH_PROCESSING_PREFIX):
                 owner_id = proc_key.removeprefix(BATCH_PROCESSING_PREFIX)
-                if owner_id and owner_id != self.worker_id and await self.has_heartbeat(owner_id):
+                if (
+                    owner_id
+                    and (not include_self or owner_id != self.worker_id)
+                    and await self.has_heartbeat(owner_id)
+                ):
                     continue
             moved += await self._reclaim_processing_list(
                 proc_key,
@@ -287,6 +300,20 @@ class WorkerQueue:
         if moved:
             logger.warning(f"Requeued {moved} orphaned batch job(s) back to {BATCH_PENDING_QUEUE}")
         return moved
+
+    async def _ensure_browser_socket_timeout(self, timeout: float) -> None:
+        if not self._owns_browser_pool or self._browser_pool is None:
+            return
+        required = float(timeout) + 5.0
+        if required <= self._configured_browser_socket_timeout:
+            return
+        self._configured_browser_socket_timeout = required
+        self._browser_pool.connection_kwargs["socket_timeout"] = required
+        for conn in (
+            *getattr(self._browser_pool, "_available_connections", ()),
+            *getattr(self._browser_pool, "_in_use_connections", ()),
+        ):
+            conn.socket_timeout = required
 
     async def enqueue_browser_task(
         self,
@@ -300,6 +327,7 @@ class WorkerQueue:
             )
 
         async with self._browser_inflight_semaphore:
+            await self._ensure_browser_socket_timeout(timeout)
             updates: dict[str, Any] = {}
             if not task.trace_headers:
                 updates["trace_headers"] = inject_trace_headers()
@@ -309,8 +337,13 @@ class WorkerQueue:
                 task = task.model_copy(update=updates)
 
             result_key = f"{BROWSER_RESULT_PREFIX}{task.task_id}"
-            await cast(Any, self.redis.lpush(BROWSER_PENDING_QUEUE, task.model_dump_json()))
-            raw = await cast(Any, self._browser_redis.blpop([result_key], timeout=timeout))
+            try:
+                await cast(Any, self.redis.lpush(BROWSER_PENDING_QUEUE, task.model_dump_json()))
+                raw = await cast(Any, self._browser_redis.blpop([result_key], timeout=timeout))
+            except (redis.TimeoutError, TimeoutError) as exc:
+                raise WorkerTimeoutError(
+                    f"Remote browser worker timed out after {timeout:.1f}s for task {task.task_id}"
+                ) from exc
             if not raw:
                 raise WorkerTimeoutError(
                     f"Remote browser worker timed out after {timeout:.1f}s for task {task.task_id}"

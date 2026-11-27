@@ -9,6 +9,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 from fastapi.testclient import TestClient
+from pydantic import ValidationError
 
 from downloader.browser.actions import (
     MAX_BROWSER_ACTIONS,
@@ -239,6 +240,62 @@ class TestScreenshotAndRenderEndpoints:
             bad_resp = client.get('/https://example.com?actions=[{"type":"evaluate"}]')
             assert bad_resp.status_code == 400
             assert bad_resp.json()["detail"]["error_type"] == "validation_error"
+
+    def test_unknown_action_key_rejected_across_model_download_and_render(self) -> None:
+        """`BrowserAction` forbids unknown keys such as `ms` across model, GET ?actions=, POST /render, and batch (`A-2`)."""
+        with pytest.raises(ValidationError):
+            BrowserAction.model_validate({"type": "wait", "ms": 3000})
+        with pytest.raises(ValueError, match="Invalid browser action"):
+            parse_actions_param(json.dumps([{"type": "wait", "ms": 3000}]))
+        with pytest.raises(ValidationError):
+            BatchURLRequest.model_validate(
+                {"url": "https://example.com", "actions": [{"type": "wait", "ms": 3000}]}
+            )
+
+        self._setup_mock_dependencies()
+        with (
+            patch(
+                "downloader.routes.download.validate_url_async",
+                new=AsyncMock(return_value="https://example.com"),
+            ),
+            patch(
+                "downloader.routes.render.validate_url_async",
+                new=AsyncMock(return_value="https://example.com"),
+            ),
+            patch(
+                "downloader.browser.renderer.render_html_with_playwright",
+                new=AsyncMock(return_value=b"<html><body><h1>Waited</h1></body></html>"),
+            ) as mock_render,
+            TestClient(app) as client,
+        ):
+            bad_get = client.get(
+                "/https://example.com",
+                params={"actions": json.dumps([{"type": "wait", "ms": 3000}])},
+            )
+            assert bad_get.status_code == 400
+            assert bad_get.json()["detail"]["error_type"] == "validation_error"
+            mock_render.assert_not_awaited()
+
+            bad_post = client.post(
+                "/render",
+                json={"url": "https://example.com", "actions": [{"type": "wait", "ms": 3000}]},
+            )
+            assert bad_post.status_code == 422
+            assert bad_post.json()["detail"]["error_type"] == "validation_error"
+            mock_render.assert_not_awaited()
+
+            ok_post = client.post(
+                "/render",
+                json={
+                    "url": "https://example.com",
+                    "output": "html",
+                    "actions": [{"type": "wait", "duration_ms": 3000}],
+                },
+            )
+            assert ok_post.status_code == 200
+            mock_render.assert_awaited_once()
+            assert mock_render.await_args is not None
+            assert mock_render.await_args.kwargs["actions"][0].duration_ms == 3000
 
     def test_post_render_endpoint_all_outputs_and_errors(self) -> None:
         mock_robots = self._setup_mock_dependencies()

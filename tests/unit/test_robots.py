@@ -3,7 +3,10 @@
 from __future__ import annotations
 
 import asyncio
+import tracemalloc
+from collections.abc import AsyncIterator
 
+import brotli
 import httpx
 import pytest
 
@@ -253,6 +256,72 @@ class TestRobotsChecker:
         with pytest.raises(SSRFProtectionError):
             await checker.check_allowed(blocked_url)
         assert fetch_calls == 0
+
+    async def test_robots_redirect_body_bomb_is_closed_unread(self) -> None:
+        """RobotsChecker closes 3xx streams unread instead of decompressing redirect bodies (`A-1`)."""
+
+        class _TrackingStream(httpx.AsyncByteStream):
+            def __init__(self, payload: bytes) -> None:
+                self._payload = payload
+                self.chunks_read = 0
+                self.closed = False
+
+            async def __aiter__(self) -> AsyncIterator[bytes]:
+                self.chunks_read += 1
+                yield self._payload
+
+            async def aclose(self) -> None:
+                self.closed = True
+
+        bomb = brotli.compress(b"\x00" * (16 * 1024 * 1024), quality=6)
+        redirect_stream = _TrackingStream(bomb)
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            if request.url.path == "/robots.txt":
+                return httpx.Response(
+                    301,
+                    headers={"Location": "/robots-v2.txt", "Content-Encoding": "br"},
+                    stream=redirect_stream,
+                    request=request,
+                )
+            return httpx.Response(
+                200,
+                headers={"Content-Type": "text/plain"},
+                stream=httpx.ByteStream(b"User-agent: *\nDisallow: /secret\n"),
+                request=request,
+            )
+
+        tracemalloc.start()
+        try:
+            async with RobotsChecker(transport=httpx.MockTransport(handler)) as checker:
+                with pytest.raises(RobotsDisallowedError):
+                    await checker.check_allowed("https://example.com/secret/page")
+            _, peak_bytes = tracemalloc.get_traced_memory()
+        finally:
+            tracemalloc.stop()
+
+        assert redirect_stream.chunks_read == 0
+        assert redirect_stream.closed is True
+        assert peak_bytes < 2 * 1024 * 1024
+
+        loop_streams: list[_TrackingStream] = []
+
+        def loop_handler(request: httpx.Request) -> httpx.Response:
+            st = _TrackingStream(bomb)
+            loop_streams.append(st)
+            return httpx.Response(
+                302,
+                headers={"Location": "/robots.txt", "Content-Encoding": "br"},
+                stream=st,
+                request=request,
+            )
+
+        async with RobotsChecker(transport=httpx.MockTransport(loop_handler)) as loop_checker:
+            assert await loop_checker.check_allowed("https://example.com/secret/page") is None
+            assert len(loop_streams) == 6
+            assert all(st.chunks_read == 0 and st.closed for st in loop_streams)
+            assert await loop_checker.check_allowed("https://example.com/secret/page") is None
+            assert len(loop_streams) == 6
 
 
 @pytest.mark.unit

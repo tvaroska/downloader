@@ -4,7 +4,9 @@ from __future__ import annotations
 
 import gzip
 import hashlib
+import tracemalloc
 import zlib
+from collections.abc import AsyncIterator
 
 import brotli
 import httpx
@@ -12,6 +14,23 @@ import pytest
 
 from downloader.crawling.robots import RobotsChecker
 from downloader.http_client import ContentTooLargeError, HTTPClient, HTTPClientError
+
+
+class _TrackingRedirectStream(httpx.AsyncByteStream):
+    """Async stream recording whether any redirect body chunk was read or closed."""
+
+    def __init__(self, chunks: list[bytes]) -> None:
+        self._chunks = chunks
+        self.chunks_read = 0
+        self.closed = False
+
+    async def __aiter__(self) -> AsyncIterator[bytes]:
+        for chunk in self._chunks:
+            self.chunks_read += 1
+            yield chunk
+
+    async def aclose(self) -> None:
+        self.closed = True
 
 
 @pytest.mark.unit
@@ -119,6 +138,92 @@ class TestBoundedDecompression:
         ) as client:
             with pytest.raises(ContentTooLargeError):
                 await client.download("https://example.com/raw-over-cap")
+
+    async def test_redirect_body_bomb_is_not_read_or_decompressed(self) -> None:
+        """Followed 3xx responses close unread without decompressing bomb bodies (`A-1`)."""
+        bomb = brotli.compress(b"\x00" * (16 * 1024 * 1024), quality=6)
+        assert len(bomb) < 1024
+        hop1_stream = _TrackingRedirectStream([bomb[:200], bomb[200:]])
+        hop2_stream = _TrackingRedirectStream([bomb[:200], bomb[200:]])
+        seen_headers: dict[str, dict[str, str]] = {}
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            url_str = str(request.url)
+            seen_headers[url_str] = dict(request.headers)
+            if url_str == "https://example.com/start":
+                return httpx.Response(
+                    302,
+                    headers={
+                        "Location": "https://test.com/hop2",
+                        "Content-Encoding": "br",
+                    },
+                    stream=hop1_stream,
+                    request=request,
+                )
+            if url_str == "https://test.com/hop2":
+                return httpx.Response(
+                    307,
+                    headers={
+                        "Location": "/final",
+                        "Content-Encoding": "br",
+                        "Set-Cookie": "redir_sid=ok; Path=/",
+                    },
+                    stream=hop2_stream,
+                    request=request,
+                )
+            return httpx.Response(
+                200,
+                headers={"Content-Type": "text/plain; charset=utf-8"},
+                stream=httpx.ByteStream(b"safe destination"),
+                request=request,
+            )
+
+        tracemalloc.start()
+        try:
+            async with HTTPClient(
+                max_download_size=64 * 1024,
+                transport=httpx.MockTransport(handler),
+            ) as client:
+                content, meta = await client.download(
+                    "https://example.com/start",
+                    headers={"Authorization": "Bearer caller-tok"},
+                )
+            _, peak_bytes = tracemalloc.get_traced_memory()
+        finally:
+            tracemalloc.stop()
+
+        assert content == b"safe destination"
+        assert meta["url"] == "https://test.com/final"
+        assert hop1_stream.chunks_read == 0
+        assert hop1_stream.closed is True
+        assert hop2_stream.chunks_read == 0
+        assert hop2_stream.closed is True
+        assert peak_bytes < 2 * 1024 * 1024
+        assert "authorization" in seen_headers["https://example.com/start"]
+        assert "authorization" not in seen_headers["https://test.com/hop2"]
+        assert "redir_sid=ok" in seen_headers["https://test.com/final"].get("cookie", "")
+
+        loop_streams: list[_TrackingRedirectStream] = []
+
+        def loop_handler(request: httpx.Request) -> httpx.Response:
+            st = _TrackingRedirectStream([bomb])
+            loop_streams.append(st)
+            return httpx.Response(
+                302,
+                headers={"Location": "/loop", "Content-Encoding": "br"},
+                stream=st,
+                request=request,
+            )
+
+        async with HTTPClient(
+            max_redirects=2,
+            max_download_size=64 * 1024,
+            transport=httpx.MockTransport(loop_handler),
+        ) as capped_client:
+            with pytest.raises(HTTPClientError, match="redirect"):
+                await capped_client.download("https://example.com/loop")
+        assert len(loop_streams) == 3
+        assert all(st.chunks_read == 0 and st.closed for st in loop_streams)
 
 
 @pytest.mark.unit

@@ -129,3 +129,35 @@ class TestWorkerQueueRealRedis:
             assert waited == 0.0
         finally:
             await real_redis_client.delete("throttle:v1:real-redis.example.com")
+
+    async def test_remote_browser_pool_timeout_exceeds_job_manager_socket_timeout_and_maps_504(
+        self, real_redis_client: redis.Redis, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Browser pool socket_timeout stays above BLPOP timeout and maps Redis timeouts to 504 (`S-2`)."""
+        from downloader.browser.renderer import RemoteBrowserRenderer
+        from downloader.errors import classify_domain_error
+        from downloader.job_manager import JobManager
+        from downloader.ports import WorkerTimeoutError
+
+        monkeypatch.setattr("downloader.job_manager._REDIS_SOCKET_TIMEOUT_SECONDS", 0.2)
+        redis_uri = os.getenv("REDIS_URI", "redis://localhost:6379/15")
+        jm = JobManager(redis_uri, max_connections=4)
+        await jm.connect()
+        queue = WorkerQueue(jm.redis_client)
+        try:
+            assert queue._browser_pool is not None
+            assert float(queue._browser_pool.connection_kwargs["socket_timeout"]) > 45.0
+            assert queue._browser_pool.connection_kwargs.get("retry_on_timeout") is False
+
+            renderer = RemoteBrowserRenderer(queue, timeout=1.0)
+            with pytest.raises(WorkerTimeoutError) as exc_info:
+                await renderer.render_html("https://example.com/slow-remote")
+            classified = classify_domain_error(exc_info.value, context="render")
+            assert classified.status_code == 504
+            assert classified.error_type == "worker_timeout"
+        finally:
+            await queue.close()
+            await jm.disconnect()
+            keys = [k async for k in real_redis_client.scan_iter(match="queue:browser:*")]
+            if keys:
+                await real_redis_client.delete(*keys)

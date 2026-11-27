@@ -393,6 +393,7 @@ class WorkQueue(Protocol):
         *,
         max_attempts: int | None = None,
         on_dead_letter: Callable[[BatchQueueEnvelope], Awaitable[None]] | None = None,
+        include_self: bool = True,
     ) -> int: ...
 
     async def enqueue_browser_task(

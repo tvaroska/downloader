@@ -440,6 +440,7 @@ async def _run_reclaim_loop(
                 on_dead_letter=lambda env: _fail_dead_letter_batch_job(
                     env, job_manager=rt.job_manager, settings=rt.settings
                 ),
+                include_self=False,
             )
             if moved:
                 get_metrics_collector().increment_counter(

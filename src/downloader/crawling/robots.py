@@ -49,6 +49,8 @@ _VALID_DIRECTIVES = frozenset(
 _DEFAULT_NEGATIVE_CACHE_TTL = 60
 _DEFAULT_MAX_CACHE_BYTES = 8 * 1024 * 1024
 _MAX_ROBOTS_TXT_BYTES = 512 * 1024
+_MAX_ROBOTS_REDIRECTS = 5
+_ROBOTS_REDIRECT_CODES = frozenset({301, 302, 303, 307, 308})
 
 OriginTuple = tuple[str, str, int]
 
@@ -392,11 +394,6 @@ class RobotsChecker:
             return await self._egress_policy.validate_url(target_url)
         return await validate_url_async(target_url)
 
-    async def _on_redirect_hook(self, response: httpx.Response) -> None:
-        if response.is_redirect and "location" in response.headers:
-            next_url = str(httpx.URL(str(response.url)).join(response.headers["location"]))
-            await self._validate_candidate_url(next_url)
-
     def _ensure_http_client(self) -> httpx.AsyncClient:
         if self._http_client is None:
             backend: httpcore.AsyncNetworkBackend | None = None
@@ -418,11 +415,10 @@ class RobotsChecker:
             self._http_client = httpx.AsyncClient(
                 transport=active_transport,
                 timeout=self.fetch_timeout,
-                follow_redirects=True,
-                max_redirects=5,
+                follow_redirects=False,
+                max_redirects=_MAX_ROBOTS_REDIRECTS,
                 trust_env=False,
                 cookies=make_stateless_cookies(),
-                event_hooks={"response": [self._on_redirect_hook]},
                 headers={
                     "User-Agent": self.user_agent,
                     "Accept": "text/plain,*/*",
@@ -430,23 +426,44 @@ class RobotsChecker:
                 },
             )
         elif isinstance(self._http_client, httpx.AsyncClient):
+            self._http_client.follow_redirects = False
             self._http_client._cookies = make_stateless_cookies()
         return self._http_client
 
     async def _default_fetch(self, robots_url: str) -> tuple[int, str]:
         client = self._ensure_http_client()
-        async with client.stream("GET", robots_url) as response:
-            raw_bytes = await read_bounded_response_bytes(
-                response,
-                max_bytes=_MAX_ROBOTS_TXT_BYTES,
-                on_too_large=lambda actual: ValueError(
-                    f"robots.txt exceeded {_MAX_ROBOTS_TXT_BYTES} bytes ({actual})"
-                ),
-                on_decode_error=ValueError,
-                truncate_on_limit=True,
-            )
-            body, _ = resolve_charset_and_decode(raw_bytes, response.headers.get("content-type"))
-            return response.status_code, body
+        current_url = robots_url
+        hops = 0
+        while True:
+            async with client.stream("GET", current_url) as response:
+                location = (
+                    response.headers.get("location", "").strip()
+                    if response.status_code in _ROBOTS_REDIRECT_CODES
+                    else ""
+                )
+                if not location:
+                    raw_bytes = await read_bounded_response_bytes(
+                        response,
+                        max_bytes=_MAX_ROBOTS_TXT_BYTES,
+                        on_too_large=lambda actual: ValueError(
+                            f"robots.txt exceeded {_MAX_ROBOTS_TXT_BYTES} bytes ({actual})"
+                        ),
+                        on_decode_error=ValueError,
+                        truncate_on_limit=True,
+                    )
+                    body, _ = resolve_charset_and_decode(
+                        raw_bytes, response.headers.get("content-type")
+                    )
+                    return response.status_code, body
+                try:
+                    next_url = str(httpx.URL(str(response.url)).join(location))
+                except httpx.InvalidURL as exc:
+                    raise ValueError(f"Invalid robots.txt redirect Location: {exc}") from exc
+
+            hops += 1
+            if hops > _MAX_ROBOTS_REDIRECTS:
+                raise ValueError(f"robots.txt exceeded {_MAX_ROBOTS_REDIRECTS} redirects")
+            current_url = await self._validate_candidate_url(next_url)
 
     async def _cache_fail_open(
         self,

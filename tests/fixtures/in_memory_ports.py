@@ -359,7 +359,10 @@ class InMemoryWorkQueue:
         *,
         max_attempts: int | None = None,
         on_dead_letter: Callable[[BatchQueueEnvelope], Awaitable[None]] | None = None,
+        include_self: bool = True,
     ) -> int:
+        if not include_self:
+            return 0
         cap = self.max_attempts if max_attempts is None else max_attempts
         moved = 0
         exhausted: list[BatchQueueEnvelope] = []

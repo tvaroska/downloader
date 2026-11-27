@@ -199,6 +199,7 @@ async def _init_worker_runtime(
     await worker_queue.requeue_processing_jobs(
         max_attempts=settings.worker.max_attempts,
         on_dead_letter=lambda env: on_dead_letter(env, job_manager, settings),
+        include_self=True,
     )
 
     robots_checker = RobotsChecker(

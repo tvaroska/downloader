@@ -6,15 +6,34 @@ import logging
 import logging.handlers
 import re
 import sys
+from copy import copy
 from pathlib import Path
 from typing import Any
+from urllib.parse import quote, unquote, urlsplit
 
 from pythonjsonlogger.json import JsonFormatter
 
 from .config import LoggingConfig
 from .telemetry import get_current_trace_context
+from .validation import format_origin_url
 
-_UVICORN_ACCESS_RE = re.compile(r'"([A-Z]+)\s+(\S+)\s+HTTP/[^"]+"\s+(\d{3})')
+_UVICORN_ACCESS_RE = re.compile(r'"([A-Z]+)\s+(\S+)\s+(HTTP/[^"]+)"\s+(\d{3})')
+_SCHEME_PREFIX_RE = re.compile(r"^[a-zA-Z][a-zA-Z0-9+.-]*://")
+_INTERNAL_EXACT_PATHS = frozenset(
+    {
+        "/",
+        "/health",
+        "/render",
+        "/batch",
+        "/metrics",
+        "/schedules",
+        "/docs",
+        "/docs/oauth2-redirect",
+        "/redoc",
+        "/openapi.json",
+    }
+)
+_INTERNAL_PATH_PREFIXES = ("/metrics/", "/jobs/", "/schedules/", "/docs/")
 _STANDARD_RECORD_FIELDS = frozenset(
     {
         "name",
@@ -43,10 +62,64 @@ _STANDARD_RECORD_FIELDS = frozenset(
 )
 
 
+def _redact_target_url_segment(raw_segment: str) -> str:
+    decoded = unquote(unquote(raw_segment)).strip()
+    base = decoded.split("?", 1)[0].split("#", 1)[0]
+    if not base or any(ord(ch) < 0x20 or ord(ch) == 0x7F for ch in base):
+        return "/<redacted-target>"
+    candidate = base if _SCHEME_PREFIX_RE.match(base) else f"http://{base}"
+    try:
+        parsed = urlsplit(candidate)
+        port = parsed.port
+    except ValueError:
+        return "/<redacted-target>"
+    host = (parsed.hostname or "").rstrip(".").lower()
+    if not host:
+        return "/<redacted-target>"
+    scheme = (parsed.scheme or "http").lower()
+    clean_path = quote(parsed.path or "/", safe="/!$&'()*+,;=-._~")
+    if scheme in {"http", "https"}:
+        eff_port = port if port is not None else (443 if scheme == "https" else 80)
+        return f"/{format_origin_url(scheme, host, eff_port)}{clean_path}"
+    host_part = f"[{host}]" if ":" in host else host
+    port_part = f":{port}" if port is not None else ""
+    return f"/{scheme}://{host_part}{port_part}{clean_path}"
+
+
+def redact_access_path(raw_path: str) -> str:
+    """Strip outer queries and embedded target-URL userinfo/query tokens from an access path."""
+    path_only = raw_path.split("?", 1)[0].split("#", 1)[0]
+    if not path_only.startswith("/"):
+        return "/<redacted-target>"
+    if path_only in _INTERNAL_EXACT_PATHS:
+        return path_only
+    if path_only.startswith(_INTERNAL_PATH_PREFIXES) and "@" not in unquote(path_only):
+        return path_only
+    return _redact_target_url_segment(path_only.lstrip("/"))
+
+
+def _sanitize_access_record(record: logging.LogRecord) -> logging.LogRecord:
+    if record.name != "uvicorn.access":
+        return record
+    sanitized = copy(record)
+    sanitized.__dict__.pop("message", None)
+    sanitized.__dict__.pop("color_message", None)
+    if isinstance(sanitized.args, tuple) and len(sanitized.args) >= 5:
+        args_list = list(sanitized.args)
+        args_list[2] = redact_access_path(str(args_list[2]))
+        sanitized.args = tuple(args_list)
+    elif isinstance(sanitized.msg, str):
+        sanitized.msg = _UVICORN_ACCESS_RE.sub(
+            lambda m: f'"{m.group(1)} {redact_access_path(m.group(2))} {m.group(3)}" {m.group(4)}',
+            sanitized.msg,
+        )
+    return sanitized
+
+
 def _attach_uvicorn_access_fields(log_record: dict[str, Any], record: logging.LogRecord) -> None:
     if isinstance(record.args, tuple) and len(record.args) >= 5:
         method = str(record.args[1])
-        path = str(record.args[2]).split("?", 1)[0]
+        path = redact_access_path(str(record.args[2]))
         raw_status = record.args[4]
         try:
             status_code: int | str = int(str(raw_status))
@@ -60,12 +133,22 @@ def _attach_uvicorn_access_fields(log_record: dict[str, Any], record: logging.Lo
     match = _UVICORN_ACCESS_RE.search(record.getMessage())
     if match:
         log_record.setdefault("method", match.group(1))
-        log_record.setdefault("path", match.group(2).split("?", 1)[0])
-        log_record.setdefault("status_code", int(match.group(3)))
+        log_record.setdefault("path", redact_access_path(match.group(2)))
+        log_record.setdefault("status_code", int(match.group(4)))
+
+
+class RedactingAccessFormatter(logging.Formatter):
+    """Plain-text access log formatter redacting target URL credentials and query tokens."""
+
+    def format(self, record: logging.LogRecord) -> str:
+        return super().format(_sanitize_access_record(record))
 
 
 class CustomJsonFormatter(JsonFormatter):
     """JSON log formatter enriching records with W3C trace context and HTTP access fields."""
+
+    def format(self, record: logging.LogRecord) -> str:
+        return super().format(_sanitize_access_record(record))
 
     def add_fields(
         self,
@@ -137,7 +220,7 @@ def setup_logging(config: LoggingConfig) -> None:
     access_formatter: logging.Formatter = (
         formatter
         if config.json_logs
-        else logging.Formatter(
+        else RedactingAccessFormatter(
             "%(asctime)s - %(levelname)s - %(message)s",
             datefmt="%Y-%m-%d %H:%M:%S",
         )

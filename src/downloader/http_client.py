@@ -54,6 +54,8 @@ logger = logging.getLogger(__name__)
 
 RedirectPolicyHook = Callable[[str, str], Awaitable[None]]
 
+_REDIRECT_STATUS_CODES = frozenset({301, 302, 303, 307, 308})
+
 _CUSTOM_HEADER_GUARD: contextvars.ContextVar[
     tuple[tuple[str, str, int] | None, frozenset[str]] | None
 ] = contextvars.ContextVar("http_client_custom_header_guard", default=None)
@@ -72,6 +74,19 @@ def _parse_content_length(headers: Any) -> int | None:
     if not raw_stripped.isdigit():
         return None
     return int(raw_stripped)
+
+
+def _extract_redirect_target(response: httpx.Response) -> str | None:
+    """Return resolved redirect URL for followed 3xx responses, or None."""
+    if response.status_code not in _REDIRECT_STATUS_CODES:
+        return None
+    location = extract_header_case_insensitive(response.headers, "location")
+    if location is None or not location.strip():
+        return None
+    try:
+        return str(httpx.URL(str(response.url)).join(location.strip()))
+    except httpx.InvalidURL as exc:
+        raise HTTPClientError(f"Invalid redirect Location header: {exc}") from exc
 
 
 class HTTPClient:
@@ -124,7 +139,7 @@ class HTTPClient:
 
         self._client = httpx.AsyncClient(
             timeout=timeout,
-            follow_redirects=True,
+            follow_redirects=False,
             max_redirects=max_redirects,
             transport=active_transport,
             trust_env=False,
@@ -177,16 +192,8 @@ class HTTPClient:
             jar.set_cookie_header(request)
 
     async def _on_response_hook(self, response: httpx.Response) -> None:
-        """Validate every redirect hop, capture ephemeral redirect cookies, and check Content-Length."""
+        """Check Content-Length on non-redirect responses before reading body bytes."""
         if response.is_redirect:
-            location = extract_header_case_insensitive(response.headers, "location")
-            if location:
-                source_url = str(response.url)
-                next_url = str(httpx.URL(source_url).join(location))
-                await self._validate_redirect(source_url, next_url)
-            jar = _DOWNLOAD_COOKIES.get()
-            if jar is not None:
-                jar.extract_cookies(response)
             return
 
         if response.status_code < 400:
@@ -205,71 +212,50 @@ class HTTPClient:
         if self._on_response_hook not in hooks:
             hooks.append(self._on_response_hook)
         if isinstance(self._client, httpx.AsyncClient):
+            self._client.follow_redirects = False
             self._client._cookies = make_stateless_cookies()
 
-    async def _stream_and_read(
+    async def _read_final_response(
         self,
-        url: str,
-        req_headers: dict[str, str] | None,
+        response: httpx.Response,
         *,
         require_text_convertible: bool,
         allow_ocr_images: bool,
         target_format: str,
     ) -> tuple[bytes, ResponseMetadata]:
-        stream_cm = (
-            self._client.stream("GET", url, headers=req_headers)
-            if req_headers is not None
-            else self._client.stream("GET", url)
-        )
-        guard_token: (
-            contextvars.Token[tuple[tuple[str, str, int] | None, frozenset[str]] | None] | None
-        ) = None
-        if req_headers:
-            guard_token = _CUSTOM_HEADER_GUARD.set(
-                (canonical_origin(url), frozenset(k.lower() for k in req_headers))
+        if response.status_code >= 400:
+            raise HTTPClientError(
+                f"HTTP {response.status_code}: {response.reason_phrase}",
+                status_code=response.status_code,
             )
-        cookie_token = _DOWNLOAD_COOKIES.set(httpx.Cookies())
-        try:
-            async with stream_cm as response:
-                if response.status_code >= 400:
-                    raise HTTPClientError(
-                        f"HTTP {response.status_code}: {response.reason_phrase}",
-                        status_code=response.status_code,
-                    )
 
-                cl_val = _parse_content_length(response.headers)
-                if cl_val is not None and cl_val > self.max_download_size:
-                    raise ContentTooLargeError(max_size=self.max_download_size, actual_size=cl_val)
+        cl_val = _parse_content_length(response.headers)
+        if cl_val is not None and cl_val > self.max_download_size:
+            raise ContentTooLargeError(max_size=self.max_download_size, actual_size=cl_val)
 
-                resp_ct = (
-                    extract_header_case_insensitive(response.headers, "content-type") or "unknown"
-                )
-                if require_text_convertible and not is_text_convertible_content_type(
-                    resp_ct,
-                    allow_ocr_images=allow_ocr_images,
-                ):
-                    raise UnsupportedMediaTypeError(resp_ct, target_format=target_format)
+        resp_ct = extract_header_case_insensitive(response.headers, "content-type") or "unknown"
+        if require_text_convertible and not is_text_convertible_content_type(
+            resp_ct,
+            allow_ocr_images=allow_ocr_images,
+        ):
+            raise UnsupportedMediaTypeError(resp_ct, target_format=target_format)
 
-                content = await read_bounded_response_bytes(
-                    response,
-                    max_bytes=self.max_download_size,
-                    on_too_large=lambda actual: ContentTooLargeError(
-                        max_size=self.max_download_size,
-                        actual_size=actual,
-                    ),
-                    on_decode_error=HTTPClientError,
-                )
+        content = await read_bounded_response_bytes(
+            response,
+            max_bytes=self.max_download_size,
+            on_too_large=lambda actual: ContentTooLargeError(
+                max_size=self.max_download_size,
+                actual_size=actual,
+            ),
+            on_decode_error=HTTPClientError,
+        )
 
-                if require_text_convertible and not is_text_convertible_content_type(
-                    resp_ct,
-                    allow_ocr_images=allow_ocr_images,
-                    sample_bytes=content,
-                ):
-                    raise UnsupportedMediaTypeError(resp_ct, target_format=target_format)
-        finally:
-            _DOWNLOAD_COOKIES.reset(cookie_token)
-            if guard_token is not None:
-                _CUSTOM_HEADER_GUARD.reset(guard_token)
+        if require_text_convertible and not is_text_convertible_content_type(
+            resp_ct,
+            allow_ocr_images=allow_ocr_images,
+            sample_bytes=content,
+        ):
+            raise UnsupportedMediaTypeError(resp_ct, target_format=target_format)
 
         metadata: ResponseMetadata = {
             "status_code": response.status_code,
@@ -281,6 +267,58 @@ class HTTPClient:
             "connection_reused": getattr(response, "is_reused", None),
         }
         return content, metadata
+
+    async def _stream_and_read(
+        self,
+        url: str,
+        req_headers: dict[str, str] | None,
+        *,
+        require_text_convertible: bool,
+        allow_ocr_images: bool,
+        target_format: str,
+    ) -> tuple[bytes, ResponseMetadata]:
+        guard_token: (
+            contextvars.Token[tuple[tuple[str, str, int] | None, frozenset[str]] | None] | None
+        ) = None
+        if req_headers:
+            guard_token = _CUSTOM_HEADER_GUARD.set(
+                (canonical_origin(url), frozenset(k.lower() for k in req_headers))
+            )
+        cookie_token = _DOWNLOAD_COOKIES.set(httpx.Cookies())
+        try:
+            current_url = url
+            hops = 0
+            while True:
+                stream_cm = (
+                    self._client.stream("GET", current_url, headers=req_headers)
+                    if req_headers is not None
+                    else self._client.stream("GET", current_url)
+                )
+                async with stream_cm as response:
+                    next_url = _extract_redirect_target(response)
+                    if next_url is None:
+                        return await self._read_final_response(
+                            response,
+                            require_text_convertible=require_text_convertible,
+                            allow_ocr_images=allow_ocr_images,
+                            target_format=target_format,
+                        )
+                    source_url = str(response.url)
+                    jar = _DOWNLOAD_COOKIES.get()
+                    if jar is not None:
+                        jar.extract_cookies(response)
+
+                hops += 1
+                if hops > self.max_redirects:
+                    raise HTTPClientError(
+                        f"Exceeded maximum allowed redirects ({self.max_redirects})"
+                    )
+                await self._validate_redirect(source_url, next_url)
+                current_url = next_url
+        finally:
+            _DOWNLOAD_COOKIES.reset(cookie_token)
+            if guard_token is not None:
+                _CUSTOM_HEADER_GUARD.reset(guard_token)
 
     async def download(
         self,

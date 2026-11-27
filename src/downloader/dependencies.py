@@ -143,7 +143,6 @@ async def get_worker_queue_dependency(
             redis_client,
             max_remote_browser_calls=active_settings.worker.max_remote_browser_calls,
             max_attempts=active_settings.worker.max_attempts,
-            browser_redis_client=redis_client,
         )
         request.app.state.worker_queue = queue
         return queue

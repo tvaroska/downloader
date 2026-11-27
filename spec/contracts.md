@@ -245,7 +245,7 @@ Download and process content from any public URL with intelligent content extrac
 | `output` | string | `null` | Explicit binary output override: `screenshot` or `pdf`. Overrides default text extraction regardless of `Accept`. |
 | `full_page` | boolean | `false` | Capture the full scrollable page when rendering a screenshot (`output=screenshot` or `Accept: image/png|jpeg`). |
 | `screenshot_format` | string | `png` | Image encoding for screenshot captures: `png` (`image/png`) or `jpeg` (`image/jpeg`). |
-| `actions` | string | `null` | URL-encoded JSON array (max 8192 chars, max 20 actions) of strictly allowlisted declarative Playwright actions (`click`, `fill`, `select`, `scroll`, `wait`, `wait_for_selector`, `hover`, `press`; zero raw JS evaluation). Implies `render=true`. |
+| `actions` | string | `null` | URL-encoded JSON array (max 8192 chars, max 20 actions) of strictly allowlisted declarative Playwright actions (`click`, `fill`, `select`, `scroll`, `wait`, `wait_for_selector`, `hover`, `press`; unknown keys rejected via `extra="forbid"`, zero raw JS evaluation; see field schema under `POST /render`). Implies `render=true`. |
 | `ocr` | boolean | `false` | Require Tesseract OCR extraction (returns `HTTP 400` `validation_error` if origin is not a supported `image/*` content type, `HTTP 422` `ocr_error` on image decode/pixel-cap/OCR failures, or `HTTP 503` `ocr_unavailable` if `tesseract` is unavailable or `OCR_ENABLED=false`). Image origins also run OCR automatically when `Accept` requests `text/plain` or `text/markdown`. |
 | `ocr_lang` | string | `null` | Optional Tesseract OCR language code (validated against `^[a-zA-Z0-9_+]{1,64}$`, e.g., `eng`, `eng+deu`). |
 
@@ -430,10 +430,25 @@ Execute up to `20` strictly allowlisted declarative Playwright actions (`click`,
 | `url` | string | Yes | Public `http`/`https` URL to render (SSRF- and `robots.txt`-checked) |
 | `output` | string | No | Output format: `text`, `markdown`, `html`, `pdf`, or `screenshot` (default: `html`) |
 | `wait_for` | string | No | Optional CSS selector to wait for before capture (max 500 chars) |
-| `actions` | array | No | Up to `20` allowlisted actions: `click`, `fill`, `select`, `scroll`, `wait` (`ms <= 10000`), `wait_for_selector`, `hover`, `press` |
+| `actions` | array | No | Up to `20` allowlisted `BrowserAction` objects (`extra="forbid"`; see action fields below): `click`, `fill`, `select`, `scroll`, `wait` (`duration_ms <= 10000`), `wait_for_selector`, `hover`, `press` |
 | `full_page` | boolean | No | Capture full scrollable page when `output="screenshot"` (default: `false`) |
 | `screenshot_format` | string | No | `png` or `jpeg` when `output="screenshot"` (default: `png`) |
 | `timeout_ms` | integer | No | Optional render timeout override in milliseconds (`1000..120000`) |
+
+**`BrowserAction` Fields (`actions[]` items across `POST /render`, `GET /{url}?actions=`, and `POST /batch`):**
+
+| Field | Type | Default | Constraints & Required Action Types |
+|-------|------|---------|-------------------------------------|
+| `type` | string | *(required)* | One of `click`, `fill`, `select`, `press`, `hover`, `scroll`, `wait_for_selector`, `wait` |
+| `selector` | string \| null | `null` | CSS selector (`1..500` chars); required for `click`, `fill`, `select`, `hover`, `wait_for_selector` (optional for `press`, `scroll`) |
+| `value` | string \| null | `null` | Input text or option value (`0..2000` chars); required for `fill` and `select` |
+| `key` | string \| null | `null` | Keyboard key name (`1..64` chars, e.g., `Enter`); required for `press` |
+| `x` | integer | `0` | Horizontal wheel offset in pixels (`-50000..50000`) when `scroll` omits `selector` |
+| `y` | integer | `0` | Vertical wheel offset in pixels (`-50000..50000`) when `scroll` omits `selector` |
+| `timeout_ms` | integer | `5000` | Per-action timeout in milliseconds (`100..30000`), capped by the active render timeout |
+| `duration_ms` | integer | `500` | Pause duration in milliseconds (`0..10000`) for `type="wait"` |
+
+Unknown fields on any `BrowserAction` item (such as `ms` instead of `duration_ms`) are rejected (`extra="forbid"`).
 
 **Response:**
 - Returns raw payload bytes with matching `Content-Type` (`text/plain`, `text/markdown`, `text/html`, `application/pdf`, `image/png`, or `image/jpeg`) and `X-Rendered-With-JS: true`.

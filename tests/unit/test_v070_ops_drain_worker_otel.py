@@ -340,6 +340,42 @@ class TestGracefulShutdownAndDrain:
                 proc.communicate(timeout=5.0)
 
 
+async def _read_resp2_command(reader: asyncio.StreamReader) -> list[str] | None:
+    header = await reader.readline()
+    if not header:
+        return None
+    if not header.startswith(b"*"):
+        return []
+    argc = int(header[1:].strip())
+    args: list[str] = []
+    for _ in range(argc):
+        bulk_len = int((await reader.readline())[1:].strip())
+        data = await reader.readexactly(bulk_len)
+        await reader.readexactly(2)
+        args.append(data.decode("utf-8", errors="replace"))
+    return args
+
+
+def _encode_resp2_blpop_reply(key: str, html_bytes: bytes) -> bytes:
+    import base64
+
+    payload = BrowserTaskResponse(
+        task_id=key.removeprefix("browser_result:"),
+        success=True,
+        content_base64=base64.b64encode(html_bytes).decode("ascii"),
+        status_code=200,
+    ).model_dump_json()
+    key_b = key.encode("utf-8")
+    val_b = payload.encode("utf-8")
+    return (
+        f"*2\r\n${len(key_b)}\r\n".encode("ascii")
+        + key_b
+        + f"\r\n${len(val_b)}\r\n".encode("ascii")
+        + val_b
+        + b"\r\n"
+    )
+
+
 class TestSplitWorkerArchitecture:
     async def test_worker_queue_batch_browser_and_heartbeat_operations(self) -> None:
         redis_stub = FakeRedis()
@@ -883,6 +919,188 @@ class TestSplitWorkerArchitecture:
         assert dead_letters == ["job-poison"]
         assert await q2.pop_batch_job(timeout=0.05) is None
         assert (await q2.get_queue_depths())["batch_processing"] == 0
+
+    async def test_periodic_reclaim_loop_skips_own_inflight_batch_jobs(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Periodic `_run_reclaim_loop` never reclaims or dead-letters this worker's own in-flight batch jobs (`S-1`)."""
+        from collections.abc import Awaitable
+        from typing import Any
+
+        from downloader.config import WorkerConfig
+        from downloader.worker import _fail_dead_letter_batch_job, _run_reclaim_loop, _WorkerRuntime
+        from tests.fixtures.in_memory_ports import InMemoryJobStore
+
+        redis_stub = FakeRedis()
+        store = InMemoryJobStore()
+        queue = WorkerQueue(redis_stub, worker_id="w-live", max_attempts=2)
+        await queue.publish_heartbeat("w-live", {"active_tasks": 1}, ttl=60)
+
+        job_id = await store.create_job(
+            {"urls": [{"url": "https://example.com"}], "default_format": "text"}
+        )
+        await queue.enqueue_batch_job(job_id)
+        env = await queue.pop_batch_job(timeout=1.0)
+        assert env is not None
+
+        job_started = asyncio.Event()
+        finish_job = asyncio.Event()
+
+        async def _long_running_batch(
+            *_args: object, **_kwargs: object
+        ) -> tuple[list[dict[str, object]], dict[str, object]]:
+            job_started.set()
+            await finish_job.wait()
+            return [{"url": "https://example.com", "success": True}], {
+                "total_requests": 1,
+                "successful_requests": 1,
+                "failed_requests": 0,
+                "total_duration": 0.2,
+            }
+
+        reclaim_stop = asyncio.Event()
+        ticks = 0
+        orig_wait_for = asyncio.wait_for
+
+        async def _fast_reclaim_wait(coro: Awaitable[Any], timeout: float | None = None) -> Any:
+            nonlocal ticks
+            ticks += 1
+            if ticks > 3:
+                reclaim_stop.set()
+            return await orig_wait_for(coro, timeout=0.01)
+
+        cfg = Settings(worker=WorkerConfig(heartbeat_interval=1.0, max_attempts=2))
+        rt = _WorkerRuntime(
+            worker_id="w-live",
+            settings=cfg,
+            http_client=MagicMock(),
+            pdf_generator=MagicMock(),
+            pdf_semaphore=asyncio.Semaphore(1),
+            batch_semaphore=asyncio.Semaphore(1),
+            job_slot_semaphore=asyncio.Semaphore(1),
+            browser_slot_semaphore=asyncio.Semaphore(1),
+            job_manager=store,
+            worker_queue=queue,
+            robots_checker=MagicMock(),
+            domain_throttle=MagicMock(),
+            scheduler=None,
+            renderer=MagicMock(),
+        )
+
+        with (
+            patch("downloader.worker.process_background_batch_job", new=_long_running_batch),
+            patch("downloader.worker.notify_batch_webhook", new=AsyncMock()),
+        ):
+            batch_task = asyncio.create_task(
+                process_worker_batch_envelope(
+                    env,
+                    job_manager=store,
+                    worker_queue=queue,
+                    http_client=MagicMock(),
+                    batch_semaphore=asyncio.Semaphore(1),
+                    pdf_semaphore=asyncio.Semaphore(1),
+                    settings=cfg,
+                )
+            )
+            await job_started.wait()
+            monkeypatch.setattr("downloader.worker.asyncio.wait_for", _fast_reclaim_wait)
+            await _run_reclaim_loop(rt, reclaim_stop, logging.getLogger("test"))
+            monkeypatch.undo()
+
+            assert ticks >= 4
+            depths = await queue.get_queue_depths()
+            assert depths["batch_pending"] == 0
+            assert depths["batch_processing"] == 1
+            running_info = await store.get_job_info(job_id)
+            assert running_info is not None and running_info.status == JobStatus.RUNNING
+
+            finish_job.set()
+            await batch_task
+
+        done_info = await store.get_job_info(job_id)
+        assert done_info is not None and done_info.status == JobStatus.COMPLETED
+        assert (await store.get_job_results(job_id)) is not None
+        assert (await queue.get_queue_depths())["batch_processing"] == 0
+
+        # Crash recovery at start-up still reclaims own leftover list even if stale heartbeat exists
+        await queue.enqueue_batch_job("job-crash-leftover")
+        orphaned = await queue.pop_batch_job(timeout=1.0)
+        assert orphaned is not None
+        assert (
+            await queue.requeue_processing_jobs(
+                max_attempts=2,
+                on_dead_letter=lambda dl: _fail_dead_letter_batch_job(
+                    dl, job_manager=store, settings=cfg
+                ),
+            )
+            == 1
+        )
+
+    async def test_remote_browser_pool_socket_timeout_and_redis_timeout_maps_to_504(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Browser pool uses socket_timeout above task timeout and maps Redis timeouts to 504 `worker_timeout` (`S-2`)."""
+        from downloader.browser.renderer import RemoteBrowserRenderer
+        from downloader.errors import classify_domain_error
+        from downloader.ports import WorkerTimeoutError
+
+        monkeypatch.setattr("downloader.job_manager._REDIS_SOCKET_TIMEOUT_SECONDS", 0.15)
+        hang_blpop = False
+        static_replies = {
+            "PING": b"+PONG\r\n",
+            "HELLO": b"-ERR unsupported in stub\r\n",
+            "CLIENT": b"-ERR unsupported in stub\r\n",
+            "LPUSH": b":1\r\n",
+        }
+
+        async def _resp2_stub(reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
+            try:
+                while (args := await _read_resp2_command(reader)) is not None:
+                    cmd = args[0].upper() if args else ""
+                    if not cmd:
+                        continue
+                    if cmd != "BLPOP":
+                        writer.write(static_replies.get(cmd, b"+OK\r\n"))
+                    elif hang_blpop:
+                        await asyncio.sleep(5.0)
+                        break
+                    else:
+                        await asyncio.sleep(0.40)
+                        writer.write(_encode_resp2_blpop_reply(args[1], b"<html>ok</html>"))
+                    await writer.drain()
+            except (asyncio.IncompleteReadError, ConnectionError, OSError):
+                pass
+            finally:
+                writer.close()
+
+        server = await asyncio.start_server(_resp2_stub, "127.0.0.1", 0)
+        port = server.sockets[0].getsockname()[1]
+        jm = JobManager(f"redis://127.0.0.1:{port}/0", max_connections=4)
+        await jm.connect()
+        queue = WorkerQueue(jm.redis_client)
+        try:
+            renderer = RemoteBrowserRenderer(queue, timeout=1.5)
+            assert await renderer.render_html("https://example.com") == b"<html>ok</html>"
+
+            long_renderer = RemoteBrowserRenderer(queue, timeout=60.0)
+            assert await long_renderer.render_html("https://example.com") == b"<html>ok</html>"
+            assert queue._browser_pool is not None
+            assert float(queue._browser_pool.connection_kwargs["socket_timeout"]) >= 65.0
+
+            hang_blpop = True
+            queue._browser_pool.connection_kwargs["socket_timeout"] = 0.15
+            await queue._browser_pool.disconnect()
+            queue._browser_pool.reset()
+            with pytest.raises(WorkerTimeoutError) as exc_info:
+                await renderer.render_html("https://example.com/hung")
+            classified = classify_domain_error(exc_info.value, context="render")
+            assert classified.status_code == 504
+            assert classified.error_type == "worker_timeout"
+        finally:
+            await queue.close()
+            await jm.disconnect()
+            server.close()
+            await server.wait_closed()
 
     async def test_remote_browser_calls_are_bounded_and_expired_tasks_skipped(
         self, monkeypatch: pytest.MonkeyPatch
