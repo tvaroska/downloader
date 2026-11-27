@@ -100,12 +100,11 @@ class ScheduledJobExecutor:
         url: str,
         format: str,
         webhook_url: str | None,
-        webhook_secret: str | None,
+        resolved_secret: str | None,
     ) -> None:
         if not webhook_url:
             return
         cfg = self._settings or get_settings()
-        resolved_secret = open_webhook_secret(webhook_secret, cfg)
         event = "schedule.completed" if execution.success else "schedule.failed"
         await deliver_webhook(
             webhook_url,
@@ -139,15 +138,33 @@ class ScheduledJobExecutor:
     ) -> ScheduleExecution:
         """Execute a scheduled download with retry logic driven by `classify_domain_error`."""
         execution_id = str(uuid.uuid4())
+        cfg = self._settings or get_settings()
+        try:
+            resolved_secret = open_webhook_secret(webhook_secret, cfg)
+        except ValueError as exc:
+            now = datetime.now(UTC)
+            failed_exec = ScheduleExecution(
+                execution_id=execution_id,
+                schedule_id=schedule_id,
+                status=ExecutionStatus.FAILED,
+                started_at=now,
+                completed_at=now,
+                duration=0.0,
+                success=False,
+                content_size=None,
+                error_message=f"ValueError: {exc}",
+                attempt=1,
+            )
+            await self.storage.store_execution(failed_exec)
+            logger.error(f"[SCHEDULE-{schedule_id}] Failed decrypting stored webhook secret: {exc}")
+            return failed_exec
+
         execution: ScheduleExecution | None = None
 
         for attempt in range(1, MAX_ATTEMPTS + 1):
             execution, retryable = await self._execute_single_attempt(
-                execution_id=execution_id,
-                schedule_id=schedule_id,
-                url=url,
-                format=format,
-                headers=headers,
+                (execution_id, schedule_id),
+                (url, format, headers),
                 attempt=attempt,
             )
             await self.storage.store_execution(execution)
@@ -159,7 +176,7 @@ class ScheduledJobExecutor:
                         f"{execution.error_message}"
                     )
                 await self._emit_schedule_webhook(
-                    execution, url, format, webhook_url, webhook_secret
+                    execution, url, format, webhook_url, resolved_secret
                 )
                 return execution
 
@@ -175,7 +192,7 @@ class ScheduledJobExecutor:
         logger.error(
             f"[SCHEDULE-{schedule_id}] All {MAX_ATTEMPTS} attempts failed: {execution.error_message}"
         )
-        await self._emit_schedule_webhook(execution, url, format, webhook_url, webhook_secret)
+        await self._emit_schedule_webhook(execution, url, format, webhook_url, resolved_secret)
         return execution
 
     async def _enforce_crawling_policy(
@@ -216,15 +233,14 @@ class ScheduledJobExecutor:
         res_plain: tuple[bytes, ResponseMetadata] = await self.http_client.download(validated_url)
         return res_plain
 
-    async def _execute_single_attempt(  # noqa: PLR0913
+    async def _execute_single_attempt(
         self,
-        execution_id: str,
-        schedule_id: str,
-        url: str,
-        format: str,
-        headers: dict[str, str] | None,
+        ids: tuple[str, str],
+        target: tuple[str, str, dict[str, str] | None],
         attempt: int,
     ) -> tuple[ScheduleExecution, bool]:
+        execution_id, schedule_id = ids
+        url, format, headers = target
         async with self._worker_semaphore:
             started_at = datetime.now(UTC)
             cfg = self._settings or get_settings()

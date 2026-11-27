@@ -147,7 +147,7 @@ Run the canonical offline gate before every commit:
 proj-test downloader   # or: just check
 ```
 
-`just check` executes `uv lock --check --offline --no-config`, `ruff check`, `ruff format --check`, `mypy src/ tests/`, the offline pytest suite (`-m "not (integration or e2e or network or requires_redis or requires_playwright)"` with `--cov=src/downloader` >= 83%), and the Python, JavaScript/TypeScript, and Go SDK test suites.
+`just check` executes `uv lock --check --offline --no-config`, `ruff check`, `ruff format --check`, `mypy src/ tests/`, the offline pytest suite (`-m "not (integration or e2e or network or requires_redis or requires_playwright)"` with `--cov=src/downloader` >= 88% overall and >= 75% per `CRITICAL.md` module), and the Python, JavaScript/TypeScript, and Go SDK test suites.
 
 For targeted runs:
 
@@ -233,7 +233,7 @@ uv run --no-sync ast-grep scan --rule specs/ast.rules.yaml .
 uv run --no-sync ruff check src/ tests/ examples/
 uv run --no-sync ruff format --check src/ tests/ examples/
 uv run --no-sync mypy src/ tests/
-uv run --no-sync pytest tests/ --cov=src/downloader --cov-fail-under=83 -n auto -m "not (integration or e2e or network or requires_redis or requires_playwright)" -v --timeout=30
+uv run --no-sync pytest tests/ --cov=src/downloader --cov-fail-under=88 -n auto -m "not (integration or e2e or network or requires_redis or requires_playwright)" -v --timeout=30
 ```
 
 ## Writing New Tests
@@ -320,7 +320,7 @@ uv run --no-sync pytest -n auto
 
 ## Coverage
 
-Coverage is enforced automatically by `proj-test downloader` / `just check` (`--cov=src/downloader`, minimum 83%). To generate an HTML report:
+Coverage is enforced automatically by `proj-test downloader` / `just check` (`--cov=src/downloader`, minimum 88% overall and 75% per `CRITICAL.md` module). To generate an HTML report:
 
 ```bash
 uv run --no-sync pytest --cov=src/downloader --cov-report=html

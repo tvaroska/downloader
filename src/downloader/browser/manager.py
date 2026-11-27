@@ -3,7 +3,10 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import logging
+import os
+import signal
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -28,6 +31,38 @@ from ..validation import EgressPolicy
 from .egress_proxy import BrowserEgressProxy
 
 logger = logging.getLogger(__name__)
+
+
+def _extract_browser_process(browser: Any) -> Any:
+    for owner in (browser, getattr(browser, "_impl_obj", None)):
+        if owner is None:
+            continue
+        for attr in ("_browser_process", "_process", "process"):
+            proc = getattr(owner, attr, None)
+            if proc is not None and not callable(proc):
+                return proc
+    return None
+
+
+def _extract_browser_pid(browser: Any) -> int | None:
+    proc = _extract_browser_process(browser)
+    raw_pid = getattr(proc, "pid", None) if proc is not None else getattr(browser, "pid", None)
+    return raw_pid if isinstance(raw_pid, int) and raw_pid > 0 else None
+
+
+def _kill_browser_process(browser: Any, fallback_pid: int | None = None) -> bool:
+    proc = _extract_browser_process(browser)
+    kill_fn = getattr(proc, "kill", None) if proc is not None else None
+    if callable(kill_fn):
+        with contextlib.suppress(ProcessLookupError, PermissionError, OSError, RuntimeError):
+            kill_fn()
+            return True
+    pid = _extract_browser_pid(browser) or fallback_pid
+    if pid is not None:
+        with contextlib.suppress(ProcessLookupError, PermissionError, OSError):
+            os.kill(pid, signal.SIGKILL)
+            return True
+    return False
 
 
 @dataclass
@@ -128,6 +163,7 @@ class BrowserPool:
                     "usage_count": 0,
                     "last_used": asyncio.get_running_loop().time(),
                     "healthy": True,
+                    "pid": _extract_browser_pid(browser),
                 }
                 await self._available_browsers.put(browser)
                 logger.info(f"Browser {i + 1}/{self.config.pool_size} initialized")
@@ -174,14 +210,19 @@ class BrowserPool:
         return await self._playwright.chromium.launch(**launch_kwargs)
 
     async def _close_browser_with_timeout(self, browser: Browser) -> bool:
-        """Close a browser gracefully within `close_timeout`."""
+        """Close a browser gracefully within `close_timeout`, force-killing hung processes on timeout."""
+        tracked_pid = self._browser_health.get(browser, {}).get("pid")
+        pid = tracked_pid if isinstance(tracked_pid, int) else _extract_browser_pid(browser)
         try:
             if browser.is_connected():
                 await asyncio.wait_for(browser.close(), timeout=self.config.close_timeout)
                 logger.debug("Browser closed gracefully")
                 return True
         except TimeoutError:
-            logger.warning(f"Browser close timed out after {self.config.close_timeout}s")
+            killed = _kill_browser_process(browser, pid)
+            logger.warning(
+                f"Browser close timed out after {self.config.close_timeout}s (force_killed={killed})"
+            )
         except (PlaywrightError, BrowserPoolError, OSError, RuntimeError, ValueError) as exc:
             logger.warning(f"Browser close failed: {exc}")
 
@@ -198,37 +239,64 @@ class BrowserPool:
                 return None
             self._all_browsers.add(new_browser)
             self._browser_health[new_browser] = {
-                "usage_count": 1,
+                "usage_count": 0,
                 "last_used": asyncio.get_running_loop().time(),
                 "healthy": True,
+                "pid": _extract_browser_pid(new_browser),
             }
             logger.info("Replenished browser pool after prior replacement failure")
             return new_browser
 
+    async def _pop_candidate_browser(self) -> Browser:
+        try:
+            return self._available_browsers.get_nowait()
+        except asyncio.QueueEmpty:
+            if len(self._all_browsers) < self.config.pool_size:
+                replenished = await self._replenish_browser_if_needed()
+                if replenished is not None:
+                    return replenished
+            return await asyncio.wait_for(
+                self._available_browsers.get(), timeout=self.config.acquire_timeout
+            )
+
+    def _record_browser_acquired(self, browser: Browser) -> Browser:
+        if browser in self._browser_health:
+            self._browser_health[browser]["usage_count"] += 1
+            self._browser_health[browser]["last_used"] = asyncio.get_running_loop().time()
+        return browser
+
     async def get_browser(self) -> Browser:
-        """Acquire an available browser from the pool within `acquire_timeout`."""
+        """Acquire a connected browser from the pool within `acquire_timeout`, replacing dead ones."""
         if self._closed:
             raise BrowserPoolError("Browser pool is closed")
 
         try:
-            try:
-                browser = self._available_browsers.get_nowait()
-            except asyncio.QueueEmpty:
-                if len(self._all_browsers) < self.config.pool_size:
-                    replenished = await self._replenish_browser_if_needed()
-                    if replenished is not None:
-                        return replenished
-                browser = await asyncio.wait_for(
-                    self._available_browsers.get(), timeout=self.config.acquire_timeout
+            max_attempts = max(1, self.config.pool_size) + 1
+            for _ in range(max_attempts):
+                browser = await self._pop_candidate_browser()
+                if await self._is_browser_healthy(browser):
+                    return self._record_browser_acquired(browser)
+
+                logger.warning(
+                    "Discarding disconnected browser on acquire and launching replacement"
                 )
-            if browser in self._browser_health:
-                self._browser_health[browser]["usage_count"] += 1
-                self._browser_health[browser]["last_used"] = asyncio.get_running_loop().time()
-            return browser
+                self._all_browsers.discard(browser)
+                self._browser_health.pop(browser, None)
+                await self._close_browser_with_timeout(browser)
+                replenished = await self._replenish_browser_if_needed()
+                if replenished is not None:
+                    if await self._is_browser_healthy(replenished):
+                        return self._record_browser_acquired(replenished)
+                    self._all_browsers.discard(replenished)
+                    self._browser_health.pop(replenished, None)
+                    await self._close_browser_with_timeout(replenished)
+            raise BrowserPoolError("Unable to acquire a connected browser after replacement")
         except TimeoutError as exc:
             raise BrowserAcquireTimeoutError(
                 f"No browser available within timeout ({self.config.acquire_timeout}s)"
             ) from exc
+        except BrowserPoolError:
+            raise
         except (PlaywrightError, RuntimeError, OSError) as exc:
             raise BrowserPoolError(f"Failed to get browser from pool: {exc}") from exc
 
@@ -286,6 +354,7 @@ class BrowserPool:
                 "usage_count": 0,
                 "last_used": asyncio.get_running_loop().time(),
                 "healthy": True,
+                "pid": _extract_browser_pid(new_browser),
             }
             await self._available_browsers.put(new_browser)
             logger.info("Successfully replaced unhealthy browser")

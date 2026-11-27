@@ -5,16 +5,25 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import logging
+import sys
 import time
 from collections import OrderedDict
 from typing import Any
-
-from redis.exceptions import RedisError
 
 from ..ports import CrawlDelayExceededError as CrawlDelayExceededError
 from ..validation import canonical_host
 
 logger = logging.getLogger(__name__)
+
+
+def _transient_throttle_errors() -> tuple[type[Exception], ...]:
+    redis_exc_mod = sys.modules.get("redis.exceptions")
+    redis_err = getattr(redis_exc_mod, "RedisError", None) if redis_exc_mod is not None else None
+    base: tuple[type[Exception], ...] = (OSError, RuntimeError, TypeError, ValueError)
+    if isinstance(redis_err, type) and issubclass(redis_err, Exception):
+        return (redis_err, *base)
+    return base
+
 
 _RESERVE_SLOT_LUA = """
 local key = KEYS[1]
@@ -165,7 +174,7 @@ class DomainThrottle:
         if self.redis_client is None:
             return
         redis_key = f"throttle:v1:{domain_key}"
-        with contextlib.suppress(RedisError, OSError, RuntimeError, TypeError, ValueError):
+        with contextlib.suppress(*_transient_throttle_errors()):
             await self.redis_client.eval(
                 _REFUND_SLOT_LUA,
                 1,
@@ -187,7 +196,7 @@ class DomainThrottle:
                     return wait_seconds, None, reserved_redis_wall
                 except CrawlDelayExceededError:
                     raise
-                except (RedisError, OSError, RuntimeError, TypeError, ValueError) as exc:
+                except _transient_throttle_errors() as exc:
                     logger.warning(
                         f"Redis domain throttle failed for {domain_key}, using memory slot: {exc}"
                     )

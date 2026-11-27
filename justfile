@@ -21,7 +21,10 @@ check:
     uv run --no-sync ruff check src/ tests/ examples/
     uv run --no-sync ruff format --check src/ tests/ examples/
     uv run --no-sync mypy src/ tests/
-    uv run --no-sync pytest -p no:cacheprovider --cov=src/downloader --cov-fail-under=83 -n auto -m "not (integration or e2e or network or requires_redis or requires_playwright)"
+    COV_JSON="$(mktemp /tmp/downloader-cov.XXXXXX.json)"
+    trap 'rm -f "${COV_JSON}"' EXIT
+    uv run --no-sync pytest -p no:cacheprovider --cov=src/downloader --cov-report="json:${COV_JSON}" --cov-report=term-missing --cov-fail-under=88 -n auto -m "not (integration or e2e or network or requires_redis or requires_playwright)"
+    uv run --no-sync python scripts/check_critical_coverage.py "${COV_JSON}"
     uv run --no-sync pytest -p no:cacheprovider sdks/python/tests -c sdks/python/pyproject.toml
     node --test sdks/javascript/test/client.test.mjs
     if [[ -x sdks/javascript/node_modules/.bin/tsc ]]; then

@@ -266,3 +266,20 @@ def test_dockerfile_and_cloudbuild_image_hardening() -> None:
         next(s["args"] for s in cb["steps"] if s.get("id") == "redis-integration-tests")
     )
     assert "redis:7-alpine@sha256:" in redis_script
+
+
+@pytest.mark.smoke
+def test_test_files_stay_under_800_lines_and_subsystem_named() -> None:
+    """`T-14` (`R108`): Every test file stays `<= 800` lines and avoids `test_v0*` version names."""
+    tests_root = REPO_ROOT / "tests"
+    oversized: list[str] = []
+    version_named: list[str] = []
+    for py_file in sorted(tests_root.rglob("*.py")):
+        rel = py_file.relative_to(REPO_ROOT).as_posix()
+        line_count = len(py_file.read_text(encoding="utf-8").splitlines())
+        if line_count > 800:
+            oversized.append(f"{rel} ({line_count} lines > 800)")
+        if re.match(r"^test_v\d+", py_file.name):
+            version_named.append(rel)
+    assert not oversized, "Oversized test files (>800 lines):\n" + "\n".join(oversized)
+    assert not version_named, "Version-named test files found:\n" + "\n".join(version_named)

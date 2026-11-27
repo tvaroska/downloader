@@ -690,3 +690,49 @@ async def test_start_failure_stops_playwright_driver(mock_playwright):
     assert pool._playwright is None
     assert len(pool._all_browsers) == 0
     assert pool._available_browsers.empty()
+
+
+@pytest.mark.asyncio
+async def test_get_browser_replaces_dead_idle_browser_transparently(mock_playwright):
+    """`S-7`: `get_browser()` checks `is_connected()` on acquire and replaces an idle crashed browser."""
+    _, playwright_instance, dead_browser = mock_playwright
+    live_browser = AsyncMock()
+    live_browser.is_connected = Mock(return_value=True)
+    live_browser.close = AsyncMock()
+    playwright_instance.chromium.launch = AsyncMock(side_effect=[dead_browser, live_browser])
+
+    pool = BrowserPool(BrowserConfig(pool_size=1, acquire_timeout=0.5))
+    await pool.start()
+    try:
+        dead_browser.is_connected.return_value = False
+        acquired = await pool.get_browser()
+        assert acquired is live_browser
+        assert live_browser in pool._all_browsers
+        assert dead_browser not in pool._all_browsers
+    finally:
+        await pool.close()
+
+
+@pytest.mark.asyncio
+async def test_close_browser_with_timeout_sigkills_hung_process():
+    """`S-7`: `_close_browser_with_timeout()` force-kills a hung Chromium process when `close()` times out."""
+    import signal
+
+    pool = BrowserPool(BrowserConfig(close_timeout=0.02))
+    hung_browser = Mock()
+    hung_browser.is_connected.return_value = True
+    hung_browser._browser_process = None
+    hung_browser._process = None
+    hung_browser.process = None
+    hung_browser._impl_obj = None
+    hung_browser.pid = 424242
+
+    async def _hang_close() -> None:
+        await asyncio.sleep(5.0)
+
+    hung_browser.close = _hang_close
+    with patch("downloader.browser.manager.os.kill") as mock_kill:
+        result = await pool._close_browser_with_timeout(hung_browser)
+
+    assert result is False
+    mock_kill.assert_called_once_with(424242, signal.SIGKILL)

@@ -196,8 +196,36 @@ def test_invalid_cron_status_matches_spec(api_client, env_no_auth) -> None:
         assert detail["success"] is False
         assert detail["error_type"] == "validation_error"
         assert "cron" in detail["error"].lower()
+
+        extra_field = api_client.post(
+            "/schedules",
+            json={
+                "name": "Extra Field",
+                "url": "https://example.com/page",
+                "cron_expression": "0 9 * * *",
+                "unknown_extra": True,
+            },
+        )
+        assert extra_field.status_code == 422
     finally:
         app.dependency_overrides.pop(get_scheduler_dependency, None)
+
+
+@pytest.mark.unit
+def test_post_body_validation_returns_400_matching_get_and_contract(
+    api_client, env_no_auth
+) -> None:
+    """`S-5`: Disallowed actions and invalid POST bodies on `/render` and `/batch` return `400`."""
+    bad_render = api_client.post(
+        "/render",
+        json={"url": "https://example.com", "actions": [{"type": "wait", "ms": 3000}]},
+    )
+    assert bad_render.status_code == 400
+    assert bad_render.json()["detail"]["error_type"] == "validation_error"
+
+    bad_batch = api_client.post("/batch", json={"urls": []})
+    assert bad_batch.status_code == 400
+    assert bad_batch.json()["detail"]["error_type"] == "validation_error"
 
 
 @pytest.mark.unit

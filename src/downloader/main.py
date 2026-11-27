@@ -315,6 +315,7 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
             current_settings,
             pdf_semaphore=app.state.pdf_semaphore,
             work_queue=app.state.worker_queue,
+            egress_policy=egress_policy,
             redirect_policy=redirect_policy,
         )
 
@@ -362,23 +363,24 @@ app.add_middleware(
 async def request_validation_exception_handler(
     request: Request, exc: RequestValidationError
 ) -> JSONResponse:
-    """Return the standard ErrorResponse envelope for FastAPI request validation errors."""
+    """Return the standard ErrorResponse envelope (`400` on body validation, `422` on query/extra)."""
     messages: list[str] = []
-    is_invalid_cron = False
-    for err in exc.errors():
+    errors = exc.errors()
+    has_body_error = any(bool(err.get("loc")) and err["loc"][0] == "body" for err in errors)
+    is_schedules_extra_only = (
+        request.url.path == "/schedules"
+        and bool(errors)
+        and all(err.get("type") == "extra_forbidden" for err in errors)
+    )
+    for err in errors:
         loc_tuple = tuple(err.get("loc", ()))
         loc = ".".join(str(part) for part in loc_tuple if part != "body")
         msg = str(err.get("msg", "Invalid value")).removeprefix("Value error, ")
         messages.append(f"{loc}: {msg}" if loc else msg)
-        if (
-            request.url.path == "/schedules"
-            and loc_tuple == ("body", "cron_expression")
-            and err.get("type") != "missing"
-        ):
-            is_invalid_cron = True
     summary = "; ".join(messages) if messages else "Request validation failed"
+    status_code = 400 if (has_body_error and not is_schedules_extra_only) else 422
     return JSONResponse(
-        status_code=400 if is_invalid_cron else 422,
+        status_code=status_code,
         content={
             "detail": ErrorResponse(
                 error=summary,
@@ -512,7 +514,7 @@ async def health_check(request: Request) -> dict[str, Any] | Response:
     drain_coordinator: DrainCoordinator | None = getattr(
         request.app.state, "drain_coordinator", None
     )
-    is_draining = bool(drain_coordinator and drain_coordinator.is_draining)
+    is_draining = bool(drain_coordinator and drain_coordinator.is_shutting_down)
 
     pdf_limit = app_settings.pdf.concurrency
     batch_limit = app_settings.batch.concurrency

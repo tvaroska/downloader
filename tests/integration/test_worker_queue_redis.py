@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import os
 import uuid
 
@@ -207,3 +208,73 @@ class TestWorkerQueueRealRedis:
             keys = [k async for k in real_redis_client.scan_iter(match="queue:browser:*")]
             if keys:
                 await real_redis_client.delete(*keys)
+
+    async def test_job_store_concurrent_complete_and_cancel_contention(
+        self, real_redis_client: redis.Redis
+    ) -> None:
+        """`T-12`: Concurrent `complete_job`, `cancel_job`, and progress writers preserve terminal invariants."""
+        from downloader.job_manager import JobManager, JobStatus
+
+        redis_uri = os.getenv("REDIS_URI", "redis://localhost:6379/15")
+        jm_a = JobManager(redis_uri)
+        jm_a.redis_client = real_redis_client
+        peer_client = redis.from_url(redis_uri, decode_responses=True)
+        jm_b = JobManager(redis_uri)
+        jm_b.redis_client = peer_client
+        created_ids: list[str] = []
+        try:
+            for idx in range(8):
+                job_id = await jm_a.create_job({"urls": [{"url": f"https://example.com/{idx}"}]})
+                created_ids.append(job_id)
+                assert await jm_a.update_job_status(job_id, JobStatus.RUNNING) is True
+                completed, cancelled, _prog = await asyncio.gather(
+                    jm_a.complete_job(
+                        job_id,
+                        [{"url": f"https://example.com/{idx}", "success": True}],
+                        {"total_requests": 1, "successful_requests": 1, "failed_requests": 0},
+                    ),
+                    jm_b.cancel_job(job_id),
+                    jm_a.update_job_status(job_id, JobStatus.RUNNING, progress=50),
+                )
+                assert (completed, cancelled) in {(True, False), (False, True)}
+                info = await jm_a.get_job_info(job_id)
+                results = await jm_a.get_job_results(job_id)
+                assert info is not None
+                if completed:
+                    assert info.status == JobStatus.COMPLETED
+                    assert results is not None and results.status == JobStatus.COMPLETED
+                else:
+                    assert info.status == JobStatus.CANCELLED
+                    assert results is None
+        finally:
+            for job_id in created_ids:
+                await real_redis_client.delete(f"job:{job_id}", f"job_result:{job_id}")
+            await peer_client.aclose()
+
+    async def test_concurrent_workers_pop_without_duplicate_or_lost_jobs(
+        self, real_redis_client: redis.Redis
+    ) -> None:
+        """`T-12`: Multiple workers racing `BLMOVE` on real Redis deliver each job exactly once."""
+        w1 = WorkerQueue(real_redis_client, worker_id=f"c1-{uuid.uuid4().hex[:6]}")
+        w2 = WorkerQueue(real_redis_client, worker_id=f"c2-{uuid.uuid4().hex[:6]}")
+        expected = {f"contend-{i}" for i in range(10)}
+        seen: list[str] = []
+        try:
+            for jid in sorted(expected):
+                await w1.enqueue_batch_job(jid)
+
+            async def _drain(worker: WorkerQueue) -> None:
+                while True:
+                    env = await worker.pop_batch_job(timeout=0.2)
+                    if env is None:
+                        return
+                    seen.append(env.job_id)
+                    await worker.ack_batch_job(env.raw_payload)
+
+            await asyncio.gather(_drain(w1), _drain(w2))
+            assert len(seen) == len(expected)
+            assert set(seen) == expected
+            assert (await w1.get_queue_depths())["batch_processing"] == 0
+        finally:
+            await w1.close()
+            await w2.close()

@@ -25,10 +25,11 @@ def build_browser_renderer(
     *,
     pdf_semaphore: asyncio.Semaphore | None = None,
     work_queue: WorkQueue | None = None,
+    egress_policy: EgressPolicy | None = None,
     redirect_policy: RedirectPolicyHook | None = None,
 ) -> BrowserRenderer:
     """Select the remote or local `BrowserRenderer` adapter from runtime configuration."""
-    egress_policy = EgressPolicy(settings)
+    active_egress = egress_policy if egress_policy is not None else EgressPolicy(settings)
     max_bytes = settings.content.max_download_size
     if (
         settings.worker.deployment_mode == "api"
@@ -38,12 +39,12 @@ def build_browser_renderer(
         return RemoteBrowserRenderer(
             work_queue,
             timeout=settings.worker.remote_browser_timeout,
-            egress_policy=egress_policy,
+            egress_policy=active_egress,
             max_output_bytes=max_bytes,
         )
     return LocalBrowserRenderer(
         pdf_semaphore,
-        egress_policy=egress_policy,
+        egress_policy=active_egress,
         max_output_bytes=max_bytes,
         redirect_policy=redirect_policy,
     )
@@ -98,6 +99,7 @@ async def get_robots_checker(request: Request) -> RobotsChecker:
     checker: RobotsChecker | None = getattr(request.app.state, "robots_checker", None)
     if checker is None:
         active_settings: Settings = getattr(request.app.state, "settings", None) or get_settings()
+        shared_egress: EgressPolicy | None = getattr(request.app.state, "egress_policy", None)
         cfg = active_settings.crawling
         job_manager: Any = getattr(request.app.state, "job_manager", None)
         redis_client = getattr(job_manager, "redis_client", None)
@@ -108,7 +110,7 @@ async def get_robots_checker(request: Request) -> RobotsChecker:
             robots_fetch_timeout=cfg.robots_fetch_timeout,
             max_crawl_delay=cfg.max_crawl_delay,
             redis_client=redis_client,
-            egress_policy=EgressPolicy(active_settings),
+            egress_policy=shared_egress or EgressPolicy(active_settings),
         )
         request.app.state.robots_checker = checker
     return checker
@@ -165,11 +167,13 @@ async def get_browser_renderer(
         return stored
 
     active_settings: Settings = getattr(request.app.state, "settings", None) or get_settings()
+    shared_egress: EgressPolicy | None = getattr(request.app.state, "egress_policy", None)
     redirect_policy: RedirectPolicyHook | None = getattr(request.app.state, "redirect_policy", None)
     renderer = build_browser_renderer(
         active_settings,
         pdf_semaphore=pdf_semaphore,
         work_queue=work_queue,
+        egress_policy=shared_egress,
         redirect_policy=redirect_policy,
     )
     if pdf_semaphore is state_sem and work_queue is state_queue:

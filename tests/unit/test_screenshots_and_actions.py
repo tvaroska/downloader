@@ -280,7 +280,7 @@ class TestScreenshotAndRenderEndpoints:
                 "/render",
                 json={"url": "https://example.com", "actions": [{"type": "wait", "ms": 3000}]},
             )
-            assert bad_post.status_code == 422
+            assert bad_post.status_code == 400
             assert bad_post.json()["detail"]["error_type"] == "validation_error"
             mock_render.assert_not_awaited()
 

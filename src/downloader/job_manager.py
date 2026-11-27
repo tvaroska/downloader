@@ -255,16 +255,14 @@ class JobManager:
             logger.error(f"Failed to parse job info for {job_id}: {exc}")
             return None
 
-    def _apply_status_fields(  # noqa: PLR0913
-        self,
+    @staticmethod
+    def _apply_status_fields(
         job_info: JobInfo,
         status: JobStatus,
-        progress: int | None,
-        processed_urls: int | None,
-        successful_urls: int | None,
-        failed_urls: int | None,
-        error_message: str | None,
+        counts: tuple[int | None, int | None, int | None, int | None],
+        error_message: str | None = None,
     ) -> None:
+        progress, processed_urls, successful_urls, failed_urls = counts
         job_info.status = status
         now = datetime.now(UTC)
         if status == JobStatus.RUNNING and job_info.started_at is None:
@@ -319,10 +317,7 @@ class JobManager:
                     self._apply_status_fields(
                         job_info,
                         status,
-                        progress,
-                        processed_urls,
-                        successful_urls,
-                        failed_urls,
+                        (progress, processed_urls, successful_urls, failed_urls),
                         error_message,
                     )
                     job_info.expires_at = datetime.fromtimestamp(time.time() + self.job_ttl, UTC)
@@ -391,10 +386,7 @@ class JobManager:
             self._apply_status_fields(
                 job_info,
                 JobStatus.COMPLETED,
-                progress=100,
-                processed_urls=total_urls,
-                successful_urls=successful_count,
-                failed_urls=failed_count,
+                (100, total_urls, successful_count, failed_count),
                 error_message=None,
             )
             job_info.completed_at = resolved_completed_at

@@ -11,6 +11,8 @@ from collections.abc import Awaitable, Callable
 from datetime import UTC, datetime
 from typing import Any
 
+from downloader.config import get_settings
+from downloader.job_manager import _cap_job_result_payload_with_counts
 from downloader.models.responses import BatchRequest
 from downloader.ports import (
     ALLOWED_JOB_TRANSITIONS,
@@ -54,8 +56,19 @@ class InMemoryJobStore:
             self._jobs[job_id] = info
         return job_id
 
+    def _purge_expired_locked(self, job_id: str) -> None:
+        info = self._jobs.get(job_id)
+        if (
+            info is not None
+            and info.expires_at is not None
+            and datetime.fromtimestamp(time.time(), UTC) >= info.expires_at
+        ):
+            self._jobs.pop(job_id, None)
+            self._results.pop(job_id, None)
+
     async def get_job_info(self, job_id: str) -> JobInfo | None:
         async with self._lock:
+            self._purge_expired_locked(job_id)
             existing = self._jobs.get(job_id)
             return existing.model_copy(deep=True) if existing is not None else None
 
@@ -70,6 +83,7 @@ class InMemoryJobStore:
         error_message: str | None = None,
     ) -> bool:
         async with self._lock:
+            self._purge_expired_locked(job_id)
             info = self._jobs.get(job_id)
             if info is None:
                 return False
@@ -92,6 +106,7 @@ class InMemoryJobStore:
                 info.failed_urls = failed_urls
             if error_message is not None:
                 info.error_message = error_message
+            info.expires_at = datetime.fromtimestamp(time.time() + self.job_ttl, UTC)
             return True
 
     async def complete_job(
@@ -104,8 +119,13 @@ class InMemoryJobStore:
         completed_at: datetime | None = None,
         max_result_bytes: int | None = None,
     ) -> bool:
-        _ = max_result_bytes
+        cap = (
+            max_result_bytes
+            if max_result_bytes is not None
+            else get_settings().content.max_download_size
+        )
         async with self._lock:
+            self._purge_expired_locked(job_id)
             info = self._jobs.get(job_id)
             if info is None:
                 return False
@@ -118,16 +138,7 @@ class InMemoryJobStore:
                 duration = (resolved_completed_at - info.started_at).total_seconds()
             else:
                 duration = float(summary.get("total_duration", 0.0))
-            succ = sum(1 for item in results if item.get("success"))
-            fail = len(results) - succ
-            info.status = JobStatus.COMPLETED
-            info.completed_at = resolved_completed_at
-            info.results_available = True
-            info.progress = 100
-            info.processed_urls = len(results)
-            info.successful_urls = succ
-            info.failed_urls = fail
-            self._results[job_id] = JobResult(
+            uncapped = JobResult(
                 job_id=job_id,
                 status=JobStatus.COMPLETED,
                 total_duration=duration,
@@ -136,6 +147,16 @@ class InMemoryJobStore:
                 created_at=info.created_at,
                 completed_at=resolved_completed_at,
             )
+            capped_json, succ, fail = _cap_job_result_payload_with_counts(uncapped, cap)
+            capped_result = JobResult.model_validate_json(capped_json)
+            info.status = JobStatus.COMPLETED
+            info.completed_at = resolved_completed_at
+            info.results_available = True
+            info.progress = 100
+            info.processed_urls = len(capped_result.results)
+            info.successful_urls = succ
+            info.failed_urls = fail
+            self._results[job_id] = capped_result
             return True
 
     async def store_job_results(
@@ -147,8 +168,15 @@ class InMemoryJobStore:
         status: JobStatus | None = None,
         total_duration: float | None = None,
         completed_at: datetime | None = None,
+        max_result_bytes: int | None = None,
     ) -> None:
+        cap = (
+            max_result_bytes
+            if max_result_bytes is not None
+            else get_settings().content.max_download_size
+        )
         async with self._lock:
+            self._purge_expired_locked(job_id)
             info = self._jobs.get(job_id)
             if info is None or info.status in {JobStatus.CANCELLED, JobStatus.FAILED}:
                 return
@@ -159,7 +187,7 @@ class InMemoryJobStore:
                 duration = (resolved_completed_at - info.started_at).total_seconds()
             else:
                 duration = float(summary.get("total_duration", 0.0))
-            self._results[job_id] = JobResult(
+            uncapped = JobResult(
                 job_id=job_id,
                 status=status if status is not None else info.status,
                 total_duration=duration,
@@ -168,9 +196,12 @@ class InMemoryJobStore:
                 created_at=info.created_at,
                 completed_at=resolved_completed_at,
             )
+            capped_json, _, _ = _cap_job_result_payload_with_counts(uncapped, cap)
+            self._results[job_id] = JobResult.model_validate_json(capped_json)
 
     async def get_job_results(self, job_id: str) -> JobResult | None:
         async with self._lock:
+            self._purge_expired_locked(job_id)
             res = self._results.get(job_id)
             return res.model_copy(deep=True) if res is not None else None
 

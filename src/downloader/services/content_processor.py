@@ -15,7 +15,13 @@ from ..content_converter import (
     run_in_html_executor,
     should_use_playwright_for_html,
 )
-from ..content_encoding import is_text_convertible_content_type, resolve_charset_and_decode
+from ..content_encoding import (
+    format_ocr_html,
+    format_ocr_markdown,
+    is_ocr_image_content_type,
+    is_text_convertible_content_type,
+    resolve_charset_and_decode,
+)
 from ..metrics import (
     record_html_rendering_detection,
     record_html_rendering_duration,
@@ -36,16 +42,22 @@ from ..ports import (
     SelectorTimeoutError,
     UnsupportedMediaTypeError,
 )
-from ..transformers.ocr import (
-    extract_text_from_image,
-    format_ocr_html,
-    format_ocr_markdown,
-    is_ocr_image_content_type,
-)
 from ..validation import URLValidationError
 from .content_negotiation import format_to_mime_type, parse_accept_header, parse_accept_headers
 
 logger = logging.getLogger(__name__)
+
+
+async def extract_text_from_image(
+    image_bytes: bytes,
+    *,
+    language: str | None = None,
+) -> str:
+    """Delegate image OCR to the Pillow/pytesseract adapter lazily."""
+    from ..transformers.ocr import extract_text_from_image as _extract_ocr
+
+    return await _extract_ocr(image_bytes, language=language)
+
 
 HTTPFallbackFetcher = Callable[[], Awaitable[tuple[bytes, ResponseMetadata]]]
 OutputFormat = Literal[
@@ -84,6 +96,7 @@ class ConversionRequest:
     actions: Sequence[BrowserAction] | None = None
     full_page: bool = False
     screenshot_format: Literal["png", "jpeg"] = "png"
+    timeout_ms: int | None = None
     force_ocr: bool = False
     ocr_language: str | None = None
     content: bytes | None = None
@@ -193,17 +206,20 @@ async def render_html_with_metrics(  # noqa: PLR0913
     *,
     wait_for_selector: str | None = None,
     actions: Sequence[BrowserAction] | None = None,
+    timeout_ms: int | None = None,
     raw_size_hint: int | None = None,
     fail_fast: bool = True,
 ) -> bytes | None:
     """Execute HTML rendering through `BrowserRenderer` and record rendering metrics."""
     record_html_rendering_detection()
     started = time.perf_counter()
+    extra_kwargs: dict[str, int] = {"timeout_ms": timeout_ms} if timeout_ms is not None else {}
     rendered = await renderer.render_html(
         url,
         wait_for_selector=wait_for_selector,
         actions=actions,
         fail_fast=fail_fast,
+        **extra_kwargs,
     )
     if rendered is None:
         return None
@@ -226,10 +242,14 @@ async def _require_http_payload(
 
 
 async def _convert_pdf(req: ConversionRequest, deps: ConversionDeps) -> ConversionResult:
+    extra_kwargs: dict[str, int] = (
+        {"timeout_ms": req.timeout_ms} if req.timeout_ms is not None else {}
+    )
     pdf_bytes = await deps.renderer.render_pdf(
         req.url,
         wait_for_selector=req.wait_for_selector,
         actions=req.actions,
+        **extra_kwargs,
     )
     orig_url, orig_ct, _ = _source_meta(req, len(pdf_bytes), default_ct="text/html")
     return _make_result(
@@ -249,12 +269,16 @@ async def _convert_screenshot(req: ConversionRequest, deps: ConversionDeps) -> C
     shot_fmt: Literal["png", "jpeg"] = (
         "jpeg" if req.output_format == "screenshot_jpeg" else req.screenshot_format
     )
+    extra_kwargs: dict[str, int] = (
+        {"timeout_ms": req.timeout_ms} if req.timeout_ms is not None else {}
+    )
     img_bytes = await deps.renderer.render_screenshot(
         req.url,
         screenshot_format=shot_fmt,
         full_page=req.full_page,
         wait_for_selector=req.wait_for_selector,
         actions=req.actions,
+        **extra_kwargs,
     )
     media_type = "image/jpeg" if shot_fmt == "jpeg" else "image/png"
     ext = "jpg" if shot_fmt == "jpeg" else "png"
@@ -372,6 +396,7 @@ async def _force_render_text_or_markdown(
             req.url,
             wait_for_selector=req.wait_for_selector,
             actions=req.actions,
+            timeout_ms=req.timeout_ms,
             raw_size_hint=len(req.content) if req.content is not None else None,
             fail_fast=True,
         )
@@ -553,6 +578,7 @@ async def _force_render_html(req: ConversionRequest, deps: ConversionDeps) -> Co
             req.url,
             wait_for_selector=req.wait_for_selector,
             actions=req.actions,
+            timeout_ms=req.timeout_ms,
             raw_size_hint=len(req.content) if req.content is not None else None,
             fail_fast=True,
         )

@@ -30,6 +30,8 @@ _PURE_CORE_FILES = frozenset(
         "errors.py",
         "content_converter.py",
         "content_encoding.py",
+        "wire_stream.py",
+        "http_client.py",
     }
 )
 _FORBIDDEN_FRAMEWORKS = frozenset({"fastapi", "starlette", "redis", "playwright"})
@@ -78,7 +80,7 @@ def _check_pkg_file(rel: str, text: str, dual_prefix: str) -> list[str]:
         if target == dual_prefix or target.startswith(f"{dual_prefix}."):
             errors.append(f"src/downloader/{rel}: dual-module import {target}")
 
-    is_pure_core = rel.startswith(("services/", "models/")) or rel in _PURE_CORE_FILES
+    is_pure_core = rel.startswith(("services/", "models/", "crawling/")) or rel in _PURE_CORE_FILES
     if is_pure_core:
         for target in targets:
             if target.split(".", 1)[0] in _FORBIDDEN_FRAMEWORKS:
@@ -111,21 +113,39 @@ def test_services_and_core_respect_hexagonal_boundaries() -> None:
 
 @pytest.mark.smoke
 def test_core_modules_do_not_load_frameworks_transitively() -> None:
-    """Importing pure core, port, and service modules must not load FastAPI, Redis, or Playwright."""
+    """Importing pure core, port, model, and service modules must not load frameworks or heavy adapters."""
     core_modules = [
         "downloader.ports",
         "downloader.errors",
         "downloader.content_converter",
         "downloader.content_encoding",
+        "downloader.models.browser_actions",
+        "downloader.models.responses",
+        "downloader.models.schedule",
+        "downloader.services.content_negotiation",
         "downloader.services.content_processor",
         "downloader.services.batch_processor",
         "downloader.services.multi_format",
     ]
+    forbidden_core = (
+        "fastapi",
+        "starlette",
+        "redis",
+        "playwright",
+        "PIL",
+        "pytesseract",
+        "httpx",
+        "httpcore",
+        "brotli",
+        "opentelemetry",
+        "apscheduler",
+    )
+    src_root = str(REPO_ROOT / "src")
     probe = (
         "import importlib, json, sys; "
+        f"sys.path.insert(0, {src_root!r}); "
         f"mods = {core_modules!r}; "
-        "loaded = {}; "
-        "forbidden = ('fastapi', 'starlette', 'redis', 'playwright'); "
+        f"forbidden = {forbidden_core!r}; "
         "[importlib.import_module(m) for m in mods]; "
         "hits = [f for f in forbidden if f in sys.modules]; "
         "print(json.dumps(hits))"
@@ -139,7 +159,33 @@ def test_core_modules_do_not_load_frameworks_transitively() -> None:
     )
     loaded_frameworks = json.loads(res.stdout.strip())
     assert loaded_frameworks == [], (
-        f"Importing core modules transitively loaded frameworks: {loaded_frameworks}"
+        f"Importing core modules transitively loaded adapters/frameworks: {loaded_frameworks}"
+    )
+
+    http_and_crawling_modules = [
+        "downloader.http_client",
+        "downloader.crawling.robots",
+        "downloader.crawling.throttle",
+    ]
+    probe_http = (
+        "import importlib, json, sys; "
+        f"sys.path.insert(0, {src_root!r}); "
+        f"mods = {http_and_crawling_modules!r}; "
+        "forbidden = ('fastapi', 'starlette', 'redis', 'playwright'); "
+        "[importlib.import_module(m) for m in mods]; "
+        "hits = [f for f in forbidden if f in sys.modules]; "
+        "print(json.dumps(hits))"
+    )
+    res_http = subprocess.run(
+        [sys.executable, "-c", probe_http],
+        cwd=REPO_ROOT,
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+    loaded_http = json.loads(res_http.stdout.strip())
+    assert loaded_http == [], (
+        f"Importing http_client/crawling transitively loaded frameworks: {loaded_http}"
     )
 
 

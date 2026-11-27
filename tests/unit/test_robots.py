@@ -222,8 +222,11 @@ class TestRobotsChecker:
             with pytest.raises(SSRFProtectionError):
                 await checker.check_allowed("http://127.0.0.1:8080/internal")
 
-            # Verify redirect hook inside RobotsChecker blocks 302 -> loopback
+            # Verify redirect hook inside RobotsChecker blocks 302 -> loopback and fails open (`A-8`)
+            requested_urls: list[str] = []
+
             def handler(request: httpx.Request) -> httpx.Response:
+                requested_urls.append(str(request.url))
                 return httpx.Response(
                     302,
                     headers={"Location": "http://127.0.0.1:8080/robots.txt"},
@@ -232,7 +235,9 @@ class TestRobotsChecker:
 
             async with RobotsChecker(transport=httpx.MockTransport(handler)) as redirect_checker:
                 with pytest.raises(SSRFProtectionError):
-                    await redirect_checker.check_allowed("https://example.com/public")
+                    await redirect_checker._default_fetch("https://example.com/robots.txt")
+                assert await redirect_checker.check_allowed("https://example.com/public") is None
+                assert all("127.0.0.1" not in u for u in requested_urls)
         finally:
             await checker.close()
 
@@ -685,3 +690,70 @@ async def test_wildcard_and_longest_match_rules() -> None:
     ) as client:
         with pytest.raises(RobotsDisallowedError):
             await client.download("https://example.com/start")
+
+
+@pytest.mark.unit
+async def test_robots_redirect_to_blocked_address_fails_open_and_caches_sentinel() -> None:
+    """`A-8`: `robots.txt` redirect to a blocked private/metadata address fails open with 60s sentinel."""
+    seen_urls: list[str] = []
+
+    def _redirect_to_blocked(request: httpx.Request) -> httpx.Response:
+        seen_urls.append(str(request.url))
+        if request.url.host == "example.com":
+            return httpx.Response(
+                302,
+                headers={"Location": "http://169.254.169.254/latest/meta-data/"},
+                request=request,
+            )
+        raise AssertionError(f"Blocked redirect target must never be requested: {request.url}")
+
+    fake_redis = FakeRedis(decode_responses=True)
+    checker = RobotsChecker(
+        transport=httpx.MockTransport(_redirect_to_blocked),
+        negative_cache_ttl=60,
+        redis_client=fake_redis,
+    )
+    try:
+        assert await checker.check_allowed("https://example.com/page-1") is None
+        assert await checker.check_allowed("https://example.com/page-2") is None
+        assert seen_urls == ["https://example.com/robots.txt"]
+    finally:
+        await checker.close()
+
+
+@pytest.mark.unit
+async def test_robots_product_token_exact_equality_and_wildcard_fallback() -> None:
+    """`A-9`: `User-agent` product tokens compare by case-insensitive equality rather than substring."""
+    robots_txt = (
+        "User-agent: api\n"
+        "Disallow: /\n\n"
+        "User-agent: load\n"
+        "Disallow: /\n\n"
+        "User-agent: e\n"
+        "Disallow: /\n\n"
+        "User-agent: *\n"
+        "Allow: /public\n"
+        "Disallow: /wildcard-blocked\n"
+    )
+
+    async def fetcher(_url: str) -> tuple[int, str]:
+        return 200, robots_txt
+
+    checker = RobotsChecker(user_agent="REST-API-Downloader/1.0", fetcher=fetcher)
+    assert await checker.check_allowed("https://example.com/public") is None
+    with pytest.raises(RobotsDisallowedError):
+        await checker.check_allowed("https://example.com/wildcard-blocked")
+
+    exact_robots = (
+        "User-agent: rest-api-downloader\nDisallow: /exact-bot-only\n\nUser-agent: *\nAllow: /\n"
+    )
+
+    async def exact_fetcher(_url: str) -> tuple[int, str]:
+        return 200, exact_robots
+
+    exact_checker = RobotsChecker(
+        user_agent="REST-API-Downloader/1.0 (+https://download.example.org)",
+        fetcher=exact_fetcher,
+    )
+    with pytest.raises(RobotsDisallowedError):
+        await exact_checker.check_allowed("https://example.com/exact-bot-only")

@@ -100,7 +100,7 @@ class PDFConfig(BaseSettings):
         description="Playwright page load timeout in milliseconds",
     )
     wait_until: Literal["load", "domcontentloaded", "networkidle", "commit"] = Field(
-        default="networkidle", description="Playwright wait_until strategy"
+        default="domcontentloaded", description="Playwright wait_until strategy"
     )
     pool_size: int = Field(
         default=3,
@@ -611,6 +611,10 @@ class Settings(BaseSettings):
             warnings.append("WARNING: DNS resolution disabled - SSRF risk increased")
         if not self.ratelimit.enabled:
             warnings.append("WARNING: Rate limiting disabled in production - DoS risk")
+        if self.redis.redis_uri and self.webhook.enabled and not self.webhook.secret_key:
+            warnings.append(
+                "WARNING: REDIS_URI is set without WEBHOOK_SECRET_KEY - stored webhook secrets require a dedicated key"
+            )
         return warnings
 
     def validate_settings(self) -> list[str]:

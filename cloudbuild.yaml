@@ -52,7 +52,8 @@ steps:
         /workspace/.venv/bin/ruff check src/ tests/ examples/
         /workspace/.venv/bin/ruff format --check src/ tests/ examples/
         /workspace/.venv/bin/mypy src/ tests/
-        /workspace/.venv/bin/pytest tests/ --cov=src/downloader --cov-fail-under=83 -n auto -m "not (integration or e2e or network or requires_redis or requires_playwright)" -v --timeout=30
+        /workspace/.venv/bin/pytest tests/ --cov=src/downloader --cov-report=json:/tmp/coverage.json --cov-report=term-missing --cov-fail-under=88 -n auto -m "not (integration or e2e or network or requires_redis or requires_playwright)" -v --timeout=30
+        /workspace/.venv/bin/python scripts/check_critical_coverage.py /tmp/coverage.json
         /workspace/.venv/bin/pytest sdks/python/tests -c sdks/python/pyproject.toml -v
 
   - id: redis-integration-tests

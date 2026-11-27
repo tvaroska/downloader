@@ -24,16 +24,23 @@ _DRAIN_EXEMPT_PATHS = frozenset({"/health"})
 
 
 class DrainCoordinator:
-    """Tracks in-flight requests and coordinates graceful shutdown draining."""
+    """Tracks in-flight requests and coordinates pre-stop readiness and graceful connection drain."""
 
     def __init__(self) -> None:
+        self._shutting_down = False
         self._draining = False
         self._active_requests = 0
         self._idle_event = asyncio.Event()
         self._idle_event.set()
 
     @property
+    def is_shutting_down(self) -> bool:
+        """Return True during both the pre-stop readiness window and active connection drain."""
+        return self._shutting_down or self._draining
+
+    @property
     def is_draining(self) -> bool:
+        """Return True once the pre-stop delay has elapsed and new requests should be rejected."""
         return self._draining
 
     @property
@@ -42,12 +49,22 @@ class DrainCoordinator:
 
     def reset(self) -> None:
         """Reset coordinator state at lifespan startup."""
+        self._shutting_down = False
         self._draining = False
         self._active_requests = 0
         self._idle_event.set()
 
+    def begin_pre_stop(self) -> None:
+        """Fail `/health` readiness probes (`503`) while still servicing routable live requests."""
+        if not self._shutting_down:
+            self._shutting_down = True
+            logger.info(
+                f"Entering pre-stop readiness window (active_requests={self._active_requests})"
+            )
+
     def start_drain(self) -> None:
         """Stop accepting new work and begin draining active requests."""
+        self._shutting_down = True
         if not self._draining:
             self._draining = True
             logger.info(f"Entering connection drain mode (active_requests={self._active_requests})")
@@ -158,20 +175,22 @@ class _SigtermDrainChain:
             return
         self._chained = True
         self._handle = None
+        self._coordinator.start_drain()
         _dispatch_prev_sigterm(self._prev_handler, signum, frame)
 
     def handle_signal(self, signum: int, frame: FrameType | None) -> None:
-        self._coordinator.start_drain()
         if self._pre_stop_delay > 0 and self._loop is not None and self._loop.is_running():
+            self._coordinator.begin_pre_stop()
             if self._handle is None and not self._chained:
                 logger.info(
                     f"Holding /health at 503 for {self._pre_stop_delay:.2f}s pre-stop delay "
-                    "before closing listener"
+                    "while servicing routable traffic"
                 )
                 self._handle = self._loop.call_later(
                     self._pre_stop_delay, self._invoke_prev, signum, None
                 )
             return
+        self._coordinator.start_drain()
         self._invoke_prev(signum, frame)
 
     def restore(self, registered_handler: Any) -> None:

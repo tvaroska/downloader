@@ -83,7 +83,7 @@ class PlaywrightPDFGenerator:
         self,
         pool_size: int = 3,
         page_load_timeout: int = 30000,
-        wait_until: str = "networkidle",
+        wait_until: str = "domcontentloaded",
         memory_limit_mb: int = 512,
         max_uses_per_browser: int = 50,
         idle_timeout: float = 600.0,
@@ -216,7 +216,7 @@ class PlaywrightPDFGenerator:
         except (PlaywrightError, BrowserPoolError, RuntimeError, OSError) as exc:
             logger.error(f"Error closing PDF generator: {exc}")
 
-    async def generate_pdf(
+    async def generate_pdf(  # noqa: PLR0913
         self,
         url: str,
         options: dict[str, Any] | None = None,
@@ -224,6 +224,8 @@ class PlaywrightPDFGenerator:
         actions: Sequence[BrowserAction] | None = None,
         wait_for_selector: str | None = None,
         max_output_bytes: int | None = None,
+        egress_policy: EgressPolicy | None = None,
+        redirect_policy: RedirectPolicyHook | None = None,
     ) -> bytes:
         """Generate PDF from URL with `BrowserSession` isolation and `max_download_size` check."""
         pdf_options: dict[str, Any] = {
@@ -237,14 +239,26 @@ class PlaywrightPDFGenerator:
             pdf_options.update(options)
 
         timeout_ms = int(pdf_options.get("timeout", 30000))
+        active_egress = egress_policy if egress_policy is not None else self._egress_policy
+        active_redirect = redirect_policy if redirect_policy is not None else self._redirect_policy
+        cfg = active_egress.settings if active_egress is not None else get_settings()
+        resolved_max_bytes = (
+            max_output_bytes if max_output_bytes is not None else cfg.content.max_download_size
+        )
+        session_budget = (
+            max(15.0, (float(timeout_ms) / 1000.0) * 2.0 + 10.0)
+            if timeout_ms > self.page_load_timeout
+            else None
+        )
         tracer = get_tracer(__name__)
         with tracer.start_as_current_span("playwright.generate_pdf") as span:
             span.set_attribute("http.url", url)
             try:
                 session = BrowserSession(
                     self,
-                    egress_policy=self._egress_policy,
-                    redirect_policy=self._redirect_policy,
+                    egress_policy=active_egress,
+                    redirect_policy=active_redirect,
+                    timeout_seconds=session_budget,
                 )
                 async with session as (_context, page):
                     logger.info(f"Loading page: {url}")
@@ -252,7 +266,7 @@ class PlaywrightPDFGenerator:
                         session,
                         url,
                         NavigationOptions(
-                            wait_until=pdf_options.get("wait_for", "networkidle"),
+                            wait_until=pdf_options.get("wait_for", "domcontentloaded"),
                             timeout_ms=timeout_ms,
                             settle_timeout_ms=min(timeout_ms, 2500),
                             error_kind="pdf",
@@ -274,8 +288,8 @@ class PlaywrightPDFGenerator:
                     )
                     enforce_rendered_output_size(
                         pdf_bytes,
-                        max_output_bytes=max_output_bytes,
-                        egress_policy=self._egress_policy,
+                        max_output_bytes=resolved_max_bytes,
+                        egress_policy=active_egress,
                     )
                     span.set_attribute("pdf.bytes", len(pdf_bytes))
                     logger.info(f"PDF generated successfully, size: {len(pdf_bytes)} bytes")
@@ -298,7 +312,7 @@ class PlaywrightPDFGenerator:
                 logger.error(f"Unexpected error generating PDF: {exc}")
                 raise PDFGeneratorError(f"PDF generation failed: {exc}") from exc
 
-    async def generate_screenshot(
+    async def generate_screenshot(  # noqa: PLR0913
         self,
         url: str,
         options: dict[str, Any] | None = None,
@@ -306,6 +320,8 @@ class PlaywrightPDFGenerator:
         actions: Sequence[BrowserAction] | None = None,
         wait_for_selector: str | None = None,
         max_output_bytes: int | None = None,
+        egress_policy: EgressPolicy | None = None,
+        redirect_policy: RedirectPolicyHook | None = None,
     ) -> bytes:
         """Capture a PNG or JPEG screenshot from a URL with `max_download_size` enforcement."""
         shot_options: dict[str, Any] = {
@@ -321,6 +337,17 @@ class PlaywrightPDFGenerator:
             raise ScreenshotGeneratorError(f"Unsupported screenshot format: {image_type}")
 
         timeout_ms = int(shot_options.get("timeout", self.page_load_timeout))
+        active_egress = egress_policy if egress_policy is not None else self._egress_policy
+        active_redirect = redirect_policy if redirect_policy is not None else self._redirect_policy
+        cfg = active_egress.settings if active_egress is not None else get_settings()
+        resolved_max_bytes = (
+            max_output_bytes if max_output_bytes is not None else cfg.content.max_download_size
+        )
+        session_budget = (
+            max(15.0, (float(timeout_ms) / 1000.0) * 2.0 + 10.0)
+            if timeout_ms > self.page_load_timeout
+            else None
+        )
         tracer = get_tracer(__name__)
         with tracer.start_as_current_span("playwright.screenshot") as span:
             span.set_attribute("http.url", url)
@@ -329,8 +356,9 @@ class PlaywrightPDFGenerator:
             try:
                 session = BrowserSession(
                     self,
-                    egress_policy=self._egress_policy,
-                    redirect_policy=self._redirect_policy,
+                    egress_policy=active_egress,
+                    redirect_policy=active_redirect,
+                    timeout_seconds=session_budget,
                 )
                 async with session as (_context, page):
                     await navigate_and_validate(
@@ -360,8 +388,8 @@ class PlaywrightPDFGenerator:
                     screenshot_bytes: bytes = await page.screenshot(**screenshot_kwargs)
                     enforce_rendered_output_size(
                         screenshot_bytes,
-                        max_output_bytes=max_output_bytes,
-                        egress_policy=self._egress_policy,
+                        max_output_bytes=resolved_max_bytes,
+                        egress_policy=active_egress,
                     )
                     span.set_attribute("screenshot.bytes", len(screenshot_bytes))
                     logger.info(
@@ -420,41 +448,57 @@ async def get_pdf_generator() -> AsyncIterator[PlaywrightPDFGenerator]:
         raise
 
 
-async def generate_pdf_from_url(
+async def generate_pdf_from_url(  # noqa: PLR0913
     url: str,
     options: dict[str, Any] | None = None,
     *,
     actions: Sequence[BrowserAction] | None = None,
     wait_for_selector: str | None = None,
     max_output_bytes: int | None = None,
+    egress_policy: EgressPolicy | None = None,
+    redirect_policy: RedirectPolicyHook | None = None,
 ) -> bytes:
     """Generate PDF from URL using shared generator instance."""
     async with get_pdf_generator() as generator:
+        extra: dict[str, Any] = {}
+        if egress_policy is not None:
+            extra["egress_policy"] = egress_policy
+        if redirect_policy is not None:
+            extra["redirect_policy"] = redirect_policy
         return await generator.generate_pdf(
             url,
             options,
             actions=actions,
             wait_for_selector=wait_for_selector,
             max_output_bytes=max_output_bytes,
+            **extra,
         )
 
 
-async def generate_screenshot_from_url(
+async def generate_screenshot_from_url(  # noqa: PLR0913
     url: str,
     options: dict[str, Any] | None = None,
     *,
     actions: Sequence[BrowserAction] | None = None,
     wait_for_selector: str | None = None,
     max_output_bytes: int | None = None,
+    egress_policy: EgressPolicy | None = None,
+    redirect_policy: RedirectPolicyHook | None = None,
 ) -> bytes:
     """Capture a screenshot from URL using shared generator instance."""
     async with get_pdf_generator() as generator:
+        extra: dict[str, Any] = {}
+        if egress_policy is not None:
+            extra["egress_policy"] = egress_policy
+        if redirect_policy is not None:
+            extra["redirect_policy"] = redirect_policy
         return await generator.generate_screenshot(
             url,
             options,
             actions=actions,
             wait_for_selector=wait_for_selector,
             max_output_bytes=max_output_bytes,
+            **extra,
         )
 
 

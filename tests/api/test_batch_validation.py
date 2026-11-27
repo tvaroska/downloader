@@ -15,9 +15,10 @@ class TestBatchValidation:
 
         app.dependency_overrides[get_job_manager_dependency] = mock_get_job_manager
         try:
-            # Empty URLs list
+            # Empty URLs list -> 400 validation_error per contract (`S-5`)
             response = api_client.post("/batch", json={"urls": []})
-            assert response.status_code == 422
+            assert response.status_code == 400
+            assert response.json()["detail"]["error_type"] == "validation_error"
 
             # Exceeds default BATCH_MAX_URLS_PER_BATCH (50) -> 400 validation_error
             urls_51 = [{"url": f"https://example{i}.com"} for i in range(51)]
@@ -25,10 +26,11 @@ class TestBatchValidation:
             assert response.status_code == 400
             assert response.json()["detail"]["error_type"] == "validation_error"
 
-            # Exceeds Pydantic hard ceiling (1000) -> 422
+            # Exceeds Pydantic hard ceiling (1000) -> 400 validation_error (`S-5`)
             urls_1001 = [{"url": f"https://example{i}.com"} for i in range(1001)]
             response = api_client.post("/batch", json={"urls": urls_1001})
-            assert response.status_code == 422
+            assert response.status_code == 400
+            assert response.json()["detail"]["error_type"] == "validation_error"
         finally:
             app.dependency_overrides.pop(get_job_manager_dependency, None)
 
@@ -61,7 +63,8 @@ class TestBatchValidation:
         app.dependency_overrides[get_job_manager_dependency] = mock_get_job_manager
         try:
             response = api_client.post("/batch", json={})
-            assert response.status_code == 422
+            assert response.status_code == 400
+            assert response.json()["detail"]["error_type"] == "validation_error"
         finally:
             app.dependency_overrides.pop(get_job_manager_dependency, None)
 

@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import asyncio
-import html
 import io
 import logging
 import os
@@ -15,6 +14,18 @@ import pytesseract
 from PIL import Image, UnidentifiedImageError
 
 from ..config import Settings, get_settings
+from ..content_encoding import (
+    SUPPORTED_IMAGE_MIME_TYPES as SUPPORTED_IMAGE_MIME_TYPES,
+)
+from ..content_encoding import (
+    format_ocr_html as format_ocr_html,
+)
+from ..content_encoding import (
+    format_ocr_markdown as format_ocr_markdown,
+)
+from ..content_encoding import (
+    is_ocr_image_content_type as is_ocr_image_content_type,
+)
 from ..ports import (
     OCRError as OCRError,
 )
@@ -34,17 +45,6 @@ if Image.MAX_IMAGE_PIXELS is not None and Image.MAX_IMAGE_PIXELS < 200_000_000:
     Image.MAX_IMAGE_PIXELS = 200_000_000
 
 _LANG_PATTERN = re.compile(r"^[a-zA-Z0-9_+]{1,64}$")
-SUPPORTED_IMAGE_MIME_TYPES = frozenset(
-    {
-        "image/png",
-        "image/jpeg",
-        "image/jpg",
-        "image/webp",
-        "image/tiff",
-        "image/bmp",
-        "image/gif",
-    }
-)
 
 _ocr_executor: ThreadPoolExecutor | None = None
 _ocr_executor_lock = threading.Lock()
@@ -71,14 +71,6 @@ def shutdown_ocr_executor() -> None:
         _ocr_executor = None
     if executor is not None:
         executor.shutdown(wait=False, cancel_futures=True)
-
-
-def is_ocr_image_content_type(content_type: str | None) -> bool:
-    """Return True if the MIME type is a supported raster image for OCR."""
-    if not content_type:
-        return False
-    mime = content_type.split(";", 1)[0].strip().lower()
-    return mime in SUPPORTED_IMAGE_MIME_TYPES
 
 
 def validate_ocr_language(language: str | None, default_language: str) -> str:
@@ -164,24 +156,3 @@ async def extract_text_from_image(
         )
         span.set_attribute("ocr.output_chars", len(text))
         return text
-
-
-def format_ocr_markdown(text: str, source_url: str | None = None) -> str:
-    """Wrap extracted OCR text into clean Markdown paragraphs."""
-    body = text.strip()
-    if not body:
-        return ""
-    if source_url:
-        return f"<!-- OCR extracted from {source_url} -->\n\n{body}"
-    return body
-
-
-def format_ocr_html(text: str, source_url: str | None = None) -> str:
-    """Wrap HTML-escaped OCR text into a `<pre>` HTML block."""
-    body = html.escape(text.strip())
-    if not body:
-        return "<pre></pre>"
-    if source_url:
-        safe_url = html.escape(source_url, quote=True)
-        return f"<!-- OCR extracted from {safe_url} -->\n<pre>{body}</pre>"
-    return f"<pre>{body}</pre>"

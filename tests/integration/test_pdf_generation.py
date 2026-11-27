@@ -129,7 +129,7 @@ class TestPDFGeneratorBrowserPool:
         browser.new_context.assert_called_once()
         context.new_page.assert_called_once()
         page.goto.assert_called_once()
-        assert page.goto.call_args.kwargs.get("wait_until") == "networkidle"
+        assert page.goto.call_args.kwargs.get("wait_until") == "domcontentloaded"
         page.pdf.assert_called_once()
         context.close.assert_called_once()
         pool_instance.release_browser.assert_called_once_with(browser)
@@ -266,3 +266,72 @@ class TestGlobalPDFFunctions:
         async with get_pdf_generator() as generator:
             assert generator == existing_instance
             existing_instance.start.assert_not_called()
+
+
+@pytest.mark.integration
+@pytest.mark.requires_playwright
+@pytest.mark.asyncio
+async def test_real_chromium_pdf_settles_with_persistent_stream_subresource() -> None:
+    """`S-11`: Default `domcontentloaded` + bounded settle captures PDF without waiting 30s on open streams."""
+    import asyncio
+    import time
+
+    from downloader.config import Settings
+    from downloader.validation import EgressPolicy, _parse_and_normalize_url
+
+    class _LoopbackPolicy(EgressPolicy):
+        async def validate_url(self, url: str) -> str:
+            normalized, host, _p = _parse_and_normalize_url(url)
+            if host == "pdf-stream.example.test":
+                return normalized
+            return await super().validate_url(url)
+
+        async def resolve_host(self, hostname: str, port: int | None = None) -> list[str]:
+            if hostname == "pdf-stream.example.test":
+                return ["127.0.0.1"]
+            return await super().resolve_host(hostname, port)
+
+    hold_stream = asyncio.Event()
+
+    async def _handler(reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
+        raw = await reader.readuntil(b"\r\n\r\n")
+        path = raw.split(b"\r\n", 1)[0].decode().split()[1]
+        if path == "/events":
+            writer.write(
+                b"HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nCache-Control: no-cache\r\n\r\ndata: ping\n\n"
+            )
+            await writer.drain()
+            await hold_stream.wait()
+        else:
+            html = (
+                b"<!DOCTYPE html><html><body><h1>Streaming PDF</h1>"
+                b"<script>fetch('/events');</script></body></html>"
+            )
+            writer.write(
+                b"HTTP/1.1 200 OK\r\nContent-Type: text/html; charset=utf-8\r\n"
+                + f"Content-Length: {len(html)}\r\nConnection: close\r\n\r\n".encode()
+                + html
+            )
+            await writer.drain()
+        writer.close()
+
+    server = await asyncio.start_server(_handler, "127.0.0.1", 0)
+    port = int(server.sockets[0].getsockname()[1])
+    policy = _LoopbackPolicy(Settings(_env_file=None))
+    gen = PlaywrightPDFGenerator(
+        pool_size=1,
+        page_load_timeout=15_000,
+        idle_timeout=0.0,
+        egress_policy=policy,
+    )
+    try:
+        started = time.monotonic()
+        pdf_bytes = await gen.generate_pdf(f"http://pdf-stream.example.test:{port}/")
+        elapsed = time.monotonic() - started
+        assert pdf_bytes.startswith(b"%PDF-")
+        assert elapsed < 10.0
+    finally:
+        hold_stream.set()
+        await gen.close()
+        server.close()
+        await server.wait_closed()

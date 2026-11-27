@@ -21,7 +21,8 @@ if [[ $# -eq 0 ]]; then
   .venv/bin/ruff check --no-cache src/ tests/ examples/
   .venv/bin/ruff format --check --no-cache src/ tests/ examples/
   .venv/bin/mypy --cache-dir=/tmp/top3-mypy-downloader src/ tests/
-  .venv/bin/pytest -p no:cacheprovider --cov=src/downloader --cov-fail-under=83 -n auto -rs -m "not (integration or e2e or network or requires_redis or requires_playwright)"
+  .venv/bin/pytest -p no:cacheprovider --cov=src/downloader --cov-report="json:${RUN_TMP}/coverage.json" --cov-report=term-missing --cov-fail-under=88 -n auto -rs -m "not (integration or e2e or network or requires_redis or requires_playwright)"
+  .venv/bin/python scripts/check_critical_coverage.py "${RUN_TMP}/coverage.json"
 else
   .venv/bin/pytest -p no:cacheprovider "$@"
 fi

@@ -7,6 +7,7 @@ import json
 import logging
 import math
 import re
+import sys
 import time
 from collections import OrderedDict
 from collections.abc import Awaitable, Callable
@@ -16,13 +17,8 @@ from urllib.parse import unquote, urlsplit
 
 import httpcore
 import httpx
-from redis.exceptions import RedisError
 
-from ..content_encoding import (
-    make_stateless_cookies,
-    read_bounded_response_bytes,
-    resolve_charset_and_decode,
-)
+from ..content_encoding import resolve_charset_and_decode
 from ..metrics import (
     record_robots_cache_hit,
     record_robots_disallowed,
@@ -40,8 +36,19 @@ from ..validation import (
     sanitize_user_agent,
     validate_url_async,
 )
+from ..wire_stream import make_stateless_cookies, read_bounded_response_bytes
 
 logger = logging.getLogger(__name__)
+
+
+def _transient_cache_errors() -> tuple[type[Exception], ...]:
+    redis_exc_mod = sys.modules.get("redis.exceptions")
+    redis_err = getattr(redis_exc_mod, "RedisError", None) if redis_exc_mod is not None else None
+    base: tuple[type[Exception], ...] = (OSError, RuntimeError, ValueError)
+    if isinstance(redis_err, type) and issubclass(redis_err, Exception):
+        return (redis_err, *base)
+    return base
+
 
 _VALID_DIRECTIVES = frozenset(
     {"user-agent", "disallow", "allow", "crawl-delay", "request-rate", "sitemap", "host"}
@@ -131,32 +138,38 @@ def _parse_robots_groups(raw_text: str) -> list[_RobotsGroup]:
     return groups
 
 
+def _extract_product_token(raw_ua: str) -> str:
+    """Extract lowercase RFC 9309 §2.2.1 product token before `/` or whitespace."""
+    return re.split(r"[\s/]", raw_ua.strip(), maxsplit=1)[0].lower()
+
+
 def _select_matching_groups(groups: list[_RobotsGroup], user_agent: str) -> list[_RobotsGroup]:
-    """Select the most specific RFC 9309 §2.2.1 group(s) matching `user_agent`."""
-    ua_product = user_agent.split("/", 1)[0].strip().lower()
+    """Select the RFC 9309 §2.2.1 group(s) whose product token equals `user_agent`, else `*`."""
+    ua_product = _extract_product_token(user_agent)
     ua_full = user_agent.strip().lower()
 
-    best_len = 0
     specific: list[_RobotsGroup] = []
     wildcard: list[_RobotsGroup] = []
 
     for grp in groups:
-        matched_len = 0
+        matched_specific = False
+        matched_wildcard = False
         for raw_agent in grp.agents:
             token = raw_agent.strip().lower()
             if not token:
                 continue
             if token == "*":
-                wildcard.append(grp)
+                matched_wildcard = True
                 continue
-            token_product = token.split("/", 1)[0].strip()
-            if token == ua_full or (token_product and token_product in ua_product):
-                matched_len = max(matched_len, len(token_product))
-        if matched_len > best_len:
-            best_len = matched_len
-            specific = [grp]
-        elif matched_len > 0 and matched_len == best_len:
+            token_product = _extract_product_token(token)
+            if ("/" in token and token == ua_full) or (
+                "/" not in token and token_product and token_product == ua_product
+            ):
+                matched_specific = True
+        if matched_specific:
             specific.append(grp)
+        elif matched_wildcard:
+            wildcard.append(grp)
 
     return specific if specific else wildcard
 
@@ -361,7 +374,7 @@ class RobotsChecker:
                     groups = self._set_memory_cache(origin, txt, allow_all, self.negative_cache_ttl)
                     return txt, allow_all, groups
                 return None
-            except (RedisError, OSError, RuntimeError, ValueError) as exc:
+            except _transient_cache_errors() as exc:
                 logger.warning(
                     f"Redis robots.txt cache read failed for {origin_label}, using memory cache: {exc}"
                 )
@@ -383,7 +396,7 @@ class RobotsChecker:
             payload = json.dumps({"raw": raw_txt, "allow_all": allow_all})
             try:
                 await self.redis_client.set(redis_key, payload, ex=ttl)
-            except (RedisError, OSError, RuntimeError, ValueError) as exc:
+            except _transient_cache_errors() as exc:
                 logger.warning(
                     f"Redis robots.txt cache write failed for {origin_label}, kept in memory cache: {exc}"
                 )
@@ -429,6 +442,17 @@ class RobotsChecker:
             self._http_client.follow_redirects = False
             self._http_client._cookies = make_stateless_cookies()
         return self._http_client
+
+    @property
+    def http_transport(self) -> httpx.AsyncBaseTransport:
+        """Return the active transport used by the checker's HTTP client."""
+        client = self._ensure_http_client()
+        return client._transport
+
+    @property
+    def trust_env(self) -> bool:
+        """Return whether the checker's HTTP client trusts ambient proxy/TLS env vars."""
+        return bool(self._ensure_http_client().trust_env)
 
     async def _default_fetch(self, robots_url: str) -> tuple[int, str]:
         client = self._ensure_http_client()
@@ -478,31 +502,13 @@ class RobotsChecker:
         groups = await self._set_cached_entry(origin, "", True, ttl=effective_ttl)
         return "", True, groups
 
-    async def _fetch_and_cache(self, origin: OriginTuple) -> tuple[str, bool, list[_RobotsGroup]]:
-        robots_url = f"{format_origin_url(*origin)}/robots.txt"
-        safe_robots_url = redact_url_for_log(robots_url)
-
-        try:
-            await self._validate_candidate_url(robots_url)
-            status_code, raw_text = (
-                await self._fetcher(robots_url)
-                if self._fetcher is not None
-                else await self._default_fetch(robots_url)
-            )
-            raw_text = raw_text.removeprefix("\ufeff")
-        except DNSResolutionError as exc:
-            return await self._cache_fail_open(
-                origin,
-                f"DNS resolution failed fetching {safe_robots_url} ({exc}); failing open",
-            )
-        except URLValidationError:
-            raise
-        except (httpx.HTTPError, OSError, TimeoutError, ValueError, RuntimeError) as exc:
-            return await self._cache_fail_open(
-                origin,
-                f"Unreachable robots.txt at {safe_robots_url} ({exc}); failing open",
-            )
-
+    async def _store_fetched_robots(
+        self,
+        origin: OriginTuple,
+        safe_robots_url: str,
+        status_code: int,
+        raw_text: str,
+    ) -> tuple[str, bool, list[_RobotsGroup]]:
         if status_code in {404, 410}:
             return await self._cache_fail_open(origin, "", ttl=self.cache_ttl)
         if status_code >= 400:
@@ -515,9 +521,45 @@ class RobotsChecker:
                 origin,
                 f"Malformed robots.txt at {safe_robots_url}; failing open",
             )
-
         groups = await self._set_cached_entry(origin, raw_text, False, ttl=self.cache_ttl)
         return raw_text, False, groups
+
+    async def _fetch_and_cache(self, origin: OriginTuple) -> tuple[str, bool, list[_RobotsGroup]]:
+        robots_url = f"{format_origin_url(*origin)}/robots.txt"
+        safe_robots_url = redact_url_for_log(robots_url)
+
+        try:
+            await self._validate_candidate_url(robots_url)
+        except DNSResolutionError as exc:
+            return await self._cache_fail_open(
+                origin,
+                f"DNS resolution failed fetching {safe_robots_url} ({exc}); failing open",
+            )
+
+        try:
+            status_code, raw_text = (
+                await self._fetcher(robots_url)
+                if self._fetcher is not None
+                else await self._default_fetch(robots_url)
+            )
+            raw_text = raw_text.removeprefix("\ufeff")
+        except DNSResolutionError as exc:
+            return await self._cache_fail_open(
+                origin,
+                f"DNS resolution failed fetching {safe_robots_url} ({exc}); failing open",
+            )
+        except URLValidationError as exc:
+            return await self._cache_fail_open(
+                origin,
+                f"Blocked robots.txt redirect target from {safe_robots_url} ({exc}); failing open",
+            )
+        except (httpx.HTTPError, OSError, TimeoutError, ValueError, RuntimeError) as exc:
+            return await self._cache_fail_open(
+                origin,
+                f"Unreachable robots.txt at {safe_robots_url} ({exc}); failing open",
+            )
+
+        return await self._store_fetched_robots(origin, safe_robots_url, status_code, raw_text)
 
     async def check_allowed(self, url: str, user_agent: str | None = None) -> float | None:
         """Evaluate whether `url` is allowed by origin's `/robots.txt` for `user_agent`."""

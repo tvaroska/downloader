@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import contextvars
 import logging
 from collections.abc import AsyncIterator, Sequence
 from contextlib import asynccontextmanager
@@ -48,6 +49,17 @@ from .session import (
 
 logger = logging.getLogger(__name__)
 
+_HELD_SEMAPHORE_IDS: contextvars.ContextVar[frozenset[int]] = contextvars.ContextVar(
+    "held_browser_semaphore_ids",
+    default=frozenset(),
+)
+
+
+def _session_budget_for_timeout_ms(timeout_ms: int | None) -> float | None:
+    if timeout_ms is None:
+        return None
+    return max(15.0, (float(timeout_ms) / 1000.0) * 2.0 + 10.0)
+
 
 async def convert_content_with_playwright_fallback(  # noqa: PLR0913
     url: str,
@@ -62,6 +74,9 @@ async def convert_content_with_playwright_fallback(  # noqa: PLR0913
     active_gen = generator or _pg.get_shared_pdf_generator()
     cfg = egress_policy.settings if egress_policy is not None else get_settings()
     timeout_ms = cfg.content.html_js_rendering_timeout
+    resolved_max_bytes = (
+        max_output_bytes if max_output_bytes is not None else cfg.content.max_download_size
+    )
 
     try:
         session = BrowserSession(
@@ -89,7 +104,7 @@ async def convert_content_with_playwright_fallback(  # noqa: PLR0913
             html_bytes = html_content.encode("utf-8")
             enforce_rendered_output_size(
                 html_bytes,
-                max_output_bytes=max_output_bytes,
+                max_output_bytes=resolved_max_bytes,
                 egress_policy=egress_policy,
             )
             return await _cc.run_in_html_executor(
@@ -121,6 +136,7 @@ async def render_html_with_playwright(  # noqa: PLR0913
     wait_for_selector: str | None = None,
     *,
     actions: Sequence[BrowserAction] | None = None,
+    timeout_ms: int | None = None,
     generator: Any = None,
     egress_policy: EgressPolicy | None = None,
     redirect_policy: RedirectPolicyHook | None = None,
@@ -129,7 +145,12 @@ async def render_html_with_playwright(  # noqa: PLR0913
     """Render `url` via `BrowserSession` and return UTF-8 HTML bytes within `max_download_size`."""
     active_gen = generator or _pg.get_shared_pdf_generator()
     cfg = egress_policy.settings if egress_policy is not None else get_settings()
-    timeout_ms = cfg.content.html_js_rendering_timeout
+    effective_timeout_ms = (
+        timeout_ms if timeout_ms is not None else cfg.content.html_js_rendering_timeout
+    )
+    resolved_max_bytes = (
+        max_output_bytes if max_output_bytes is not None else cfg.content.max_download_size
+    )
     tracer = get_tracer(__name__)
 
     with tracer.start_as_current_span("playwright.render_html") as span:
@@ -139,6 +160,7 @@ async def render_html_with_playwright(  # noqa: PLR0913
                 active_gen,
                 egress_policy=egress_policy,
                 redirect_policy=redirect_policy,
+                timeout_seconds=_session_budget_for_timeout_ms(timeout_ms),
             )
             async with session as (_context, page):
                 await navigate_and_validate(
@@ -146,8 +168,8 @@ async def render_html_with_playwright(  # noqa: PLR0913
                     url,
                     NavigationOptions(
                         wait_until="domcontentloaded",
-                        timeout_ms=timeout_ms,
-                        settle_timeout_ms=min(timeout_ms, 2500),
+                        timeout_ms=effective_timeout_ms,
+                        settle_timeout_ms=min(effective_timeout_ms, 2500),
                         error_kind="html",
                         include_status_in_error=True,
                     ),
@@ -157,13 +179,13 @@ async def render_html_with_playwright(  # noqa: PLR0913
                     url,
                     wait_for_selector=wait_for_selector,
                     actions=actions,
-                    timeout_ms=timeout_ms,
+                    timeout_ms=effective_timeout_ms,
                 )
                 html_content: str = await page.content()
                 html_bytes = html_content.encode("utf-8")
                 enforce_rendered_output_size(
                     html_bytes,
-                    max_output_bytes=max_output_bytes,
+                    max_output_bytes=resolved_max_bytes,
                     egress_policy=egress_policy,
                 )
                 span.set_attribute("html.bytes", len(html_bytes))
@@ -205,8 +227,36 @@ class LocalBrowserRenderer:
         self.max_output_bytes = max_output_bytes
 
     @asynccontextmanager
+    async def hold_request_slot(self, url: str) -> AsyncIterator[None]:
+        """Hold one fail-fast `pdf_semaphore` slot across sequential captures of a single request."""
+        if self.pdf_semaphore is None:
+            yield
+            return
+        sem_id = id(self.pdf_semaphore)
+        held = _HELD_SEMAPHORE_IDS.get()
+        if sem_id in held:
+            yield
+            return
+        if self.pdf_semaphore.locked():
+            logger.warning(f"Browser rendering at capacity, rejecting request for: {url}")
+            raise BrowserCapacityError(
+                "Browser rendering service temporarily unavailable. Please try again later."
+            )
+        async with self.pdf_semaphore:
+            token = _HELD_SEMAPHORE_IDS.set(held | {sem_id})
+            try:
+                yield
+            finally:
+                _HELD_SEMAPHORE_IDS.reset(token)
+
+    @asynccontextmanager
     async def _acquire_slot(self, url: str, *, fail_fast: bool) -> AsyncIterator[bool]:
         if self.pdf_semaphore is None:
+            yield True
+            return
+        sem_id = id(self.pdf_semaphore)
+        held = _HELD_SEMAPHORE_IDS.get()
+        if sem_id in held:
             yield True
             return
         if self.pdf_semaphore.locked():
@@ -219,7 +269,11 @@ class LocalBrowserRenderer:
             yield False
             return
         async with self.pdf_semaphore:
-            yield True
+            token = _HELD_SEMAPHORE_IDS.set(held | {sem_id})
+            try:
+                yield True
+            finally:
+                _HELD_SEMAPHORE_IDS.reset(token)
 
     async def render_html(
         self,
@@ -227,6 +281,7 @@ class LocalBrowserRenderer:
         *,
         wait_for_selector: str | None = None,
         actions: Sequence[BrowserAction] | None = None,
+        timeout_ms: int | None = None,
         fail_fast: bool = True,
     ) -> bytes | None:
         async with self._acquire_slot(url, fail_fast=fail_fast) as acquired:
@@ -235,6 +290,8 @@ class LocalBrowserRenderer:
             kwargs: dict[str, Any] = {}
             if actions:
                 kwargs["actions"] = actions
+            if timeout_ms is not None:
+                kwargs["timeout_ms"] = timeout_ms
             if self.egress_policy is not None:
                 kwargs["egress_policy"] = self.egress_policy
             if self.redirect_policy is not None:
@@ -280,8 +337,12 @@ class LocalBrowserRenderer:
         *,
         wait_for_selector: str | None = None,
         actions: Sequence[BrowserAction] | None = None,
+        timeout_ms: int | None = None,
     ) -> bytes:
         async with self._acquire_slot(url, fail_fast=True):
+            options: dict[str, Any] | None = (
+                {"timeout": timeout_ms} if timeout_ms is not None else None
+            )
             kwargs: dict[str, Any] = {}
             if actions:
                 kwargs["actions"] = actions
@@ -289,9 +350,15 @@ class LocalBrowserRenderer:
                 kwargs["wait_for_selector"] = wait_for_selector
             if self.max_output_bytes is not None:
                 kwargs["max_output_bytes"] = self.max_output_bytes
+            if self.egress_policy is not None:
+                kwargs["egress_policy"] = self.egress_policy
+            if self.redirect_policy is not None:
+                kwargs["redirect_policy"] = self.redirect_policy
+            if options is not None:
+                return await _pg.generate_pdf_from_url(url, options, **kwargs)
             return await _pg.generate_pdf_from_url(url, **kwargs)
 
-    async def render_screenshot(
+    async def render_screenshot(  # noqa: PLR0913
         self,
         url: str,
         *,
@@ -299,15 +366,22 @@ class LocalBrowserRenderer:
         full_page: bool = False,
         wait_for_selector: str | None = None,
         actions: Sequence[BrowserAction] | None = None,
+        timeout_ms: int | None = None,
     ) -> bytes:
         async with self._acquire_slot(url, fail_fast=True):
             options: dict[str, Any] = {"type": screenshot_format, "full_page": full_page}
+            if timeout_ms is not None:
+                options["timeout"] = timeout_ms
             kwargs: dict[str, Any] = {
                 "actions": actions,
                 "wait_for_selector": wait_for_selector,
             }
             if self.max_output_bytes is not None:
                 kwargs["max_output_bytes"] = self.max_output_bytes
+            if self.egress_policy is not None:
+                kwargs["egress_policy"] = self.egress_policy
+            if self.redirect_policy is not None:
+                kwargs["redirect_policy"] = self.redirect_policy
             return await _pg.generate_screenshot_from_url(url, options, **kwargs)
 
 
@@ -366,9 +440,14 @@ class RemoteBrowserRenderer:
         self.max_output_bytes = max_output_bytes
 
     async def _dispatch_task(self, req: BrowserTaskRequest) -> bytes:
-        resp = await self.work_queue.enqueue_browser_task(req, timeout=self.timeout)
+        rpc_timeout = (
+            max(self.timeout, req.timeout_ms / 1000.0 + 5.0)
+            if req.timeout_ms is not None
+            else self.timeout
+        )
+        resp = await self.work_queue.enqueue_browser_task(req, timeout=rpc_timeout)
         if not resp.success:
-            raise _rebuild_remote_error(req, resp, self.timeout)
+            raise _rebuild_remote_error(req, resp, rpc_timeout)
         payload = resp.decode_bytes()
         return enforce_rendered_output_size(
             payload,
@@ -382,6 +461,7 @@ class RemoteBrowserRenderer:
         *,
         wait_for_selector: str | None = None,
         actions: Sequence[BrowserAction] | None = None,
+        timeout_ms: int | None = None,
         fail_fast: bool = True,
     ) -> bytes | None:
         try:
@@ -391,6 +471,7 @@ class RemoteBrowserRenderer:
                     url=url,
                     wait_for_selector=wait_for_selector,
                     actions=[a.model_dump() for a in (actions or [])],
+                    timeout_ms=timeout_ms,
                 )
             )
         except BrowserCapacityError:
@@ -420,6 +501,7 @@ class RemoteBrowserRenderer:
         *,
         wait_for_selector: str | None = None,
         actions: Sequence[BrowserAction] | None = None,
+        timeout_ms: int | None = None,
     ) -> bytes:
         return await self._dispatch_task(
             BrowserTaskRequest(
@@ -427,10 +509,11 @@ class RemoteBrowserRenderer:
                 url=url,
                 wait_for_selector=wait_for_selector,
                 actions=[a.model_dump() for a in (actions or [])],
+                timeout_ms=timeout_ms,
             )
         )
 
-    async def render_screenshot(
+    async def render_screenshot(  # noqa: PLR0913
         self,
         url: str,
         *,
@@ -438,6 +521,7 @@ class RemoteBrowserRenderer:
         full_page: bool = False,
         wait_for_selector: str | None = None,
         actions: Sequence[BrowserAction] | None = None,
+        timeout_ms: int | None = None,
     ) -> bytes:
         return await self._dispatch_task(
             BrowserTaskRequest(
@@ -447,5 +531,6 @@ class RemoteBrowserRenderer:
                 actions=[a.model_dump() for a in (actions or [])],
                 full_page=full_page,
                 screenshot_format=screenshot_format,
+                timeout_ms=timeout_ms,
             )
         )

@@ -156,12 +156,23 @@ class _LoopbackFixtureServer:
                 ["Content-Type: text/html; charset=utf-8"],
                 b"<html><body>INTERNAL_SECRET_MUST_NOT_LEAK</body></html>",
             )
+        if path == "/oversized":
+            return (
+                "200 OK",
+                ["Content-Type: text/plain; charset=utf-8"],
+                b"A" * 1_200_000,
+            )
         routes: dict[str, str] = {
             "/spa-page": _SPA_HTML,
             "/modal-page": _MODAL_HTML,
             "/hidden-only-modals": _HIDDEN_ONLY_MODALS_HTML,
             "/interactive": _INTERACTIVE_HTML,
             "/blocked-by-robots": "<html><body><p>Disallowed</p></body></html>",
+            "/oversized-dom": (
+                "<!DOCTYPE html><html><head><title>Big DOM</title></head><body><main>"
+                + ("<p>" + ("X" * 1024) + "</p>" * 1150)
+                + "</main></body></html>"
+            ),
         }
         html = routes.get(path)
         if html is not None:
@@ -266,7 +277,11 @@ class _AsyncioLoopMonitor:
         )
 
 
-def _configure_prod_env(monkeypatch: pytest.MonkeyPatch) -> None:
+def _configure_prod_env(
+    monkeypatch: pytest.MonkeyPatch,
+    *,
+    max_download_size: int | None = None,
+) -> None:
     monkeypatch.setenv("ENVIRONMENT", "production")
     monkeypatch.setenv("DOWNLOADER_KEY", _E2E_API_KEY)
     monkeypatch.delenv("REDIS_URI", raising=False)
@@ -276,6 +291,8 @@ def _configure_prod_env(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("RESPECT_ROBOTS_TXT", "true")
     monkeypatch.setenv("RATELIMIT_ENABLED", "true")
     monkeypatch.setenv("OTEL_ENABLED", "false")
+    if max_download_size is not None:
+        monkeypatch.setenv("CONTENT_MAX_DOWNLOAD_SIZE", str(max_download_size))
     reload_settings()
     content_converter._js_heavy_cache.clear()
     content_converter._static_html_cache.clear()
@@ -300,8 +317,10 @@ class _NoSignalUvicornServer(uvicorn.Server):
 @asynccontextmanager
 async def _running_loopback_app(
     monkeypatch: pytest.MonkeyPatch,
+    *,
+    max_download_size: int | None = None,
 ) -> AsyncIterator[tuple[str, str, _LoopbackFixtureServer, dict[str, str]]]:
-    _configure_prod_env(monkeypatch)
+    _configure_prod_env(monkeypatch, max_download_size=max_download_size)
     fixture_srv = _LoopbackFixtureServer()
     await fixture_srv.start()
 
@@ -491,3 +510,58 @@ async def test_loopback_modal_dismissal_render_actions_and_ssrf_blocking(
             assert redirect_detail["error_type"] == "validation_error"
             assert "loopback" in redirect_detail["error"].lower()
             assert srv.secret_hits == 0
+
+
+@pytest.mark.e2e
+@pytest.mark.asyncio
+async def test_loopback_size_cap_413_robots_403_and_multi_browser_pdf_capture(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """`T-12`/`S-3`: Verify 413 size cap, robots 403 on render, PDF headers, and PDF+PNG at concurrency 1."""
+    async with _running_loopback_app(monkeypatch, max_download_size=1_048_576) as (
+        app_base,
+        fixture_base,
+        _srv,
+        auth,
+    ):
+        async with httpx.AsyncClient(timeout=30.0, trust_env=False) as client:
+            too_large_http = await client.get(
+                f"{app_base}/{fixture_base}/oversized",
+                headers={**auth, "Accept": "text/plain"},
+            )
+            assert too_large_http.status_code == 413
+            assert too_large_http.json()["detail"]["error_type"] == "content_too_large"
+
+            too_large_render = await client.post(
+                f"{app_base}/render",
+                headers=auth,
+                json={"url": f"{fixture_base}/oversized-dom", "output": "html"},
+            )
+            assert too_large_render.status_code == 413
+            assert too_large_render.json()["detail"]["error_type"] == "content_too_large"
+
+            robots_render = await client.post(
+                f"{app_base}/render",
+                headers=auth,
+                json={"url": f"{fixture_base}/blocked-by-robots", "output": "pdf"},
+            )
+            assert robots_render.status_code == 403
+            assert robots_render.json()["detail"]["error_type"] == "robots_disallowed"
+
+            pdf_single = await client.get(
+                f"{app_base}/{fixture_base}/spa-page",
+                headers={**auth, "Accept": "application/pdf"},
+            )
+            assert pdf_single.status_code == 200
+            assert pdf_single.content.startswith(b"%PDF-")
+            assert 'filename="download.pdf"' in pdf_single.headers.get("content-disposition", "")
+
+            multi_browser = await client.get(
+                f"{app_base}/{fixture_base}/spa-page",
+                headers={**auth, "Accept": "application/pdf, image/png"},
+            )
+            assert multi_browser.status_code == 200
+            multi_body = multi_browser.json()
+            assert "errors" not in multi_body
+            assert multi_body["application/pdf"]
+            assert multi_body["image/png"]

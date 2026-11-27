@@ -27,7 +27,7 @@ Registry of protected/sensitive paths. Any task touching a path here
 | `cloudbuild.yaml` / `ci/trigger.yaml` | Cloud Build CI/CD pipeline + GitHub triggers; controls verification gates and Artifact Registry release pushes. |
 | `DOWNLOADER_KEY`, `REDIS_URI` (env/secrets) | Auth key + datastore credentials. Never commit real values. |
 
-**Coverage Floor (`R80`):** Overall branch-inclusive coverage must stay `>= 83%` (enforced via `pyproject.toml`, `justfile`, `cloudbuild.yaml`, and `scripts/gate.sh`), and every Python module listed in the table above must stay `>= 75%` branch-inclusive coverage (target `>= 80%` for auth, SSRF, worker, and port boundaries).
+**Coverage Floor (`R80` / `T-13`):** Overall branch-inclusive coverage must stay `>= 88%` (enforced via `pyproject.toml`, `justfile`, `cloudbuild.yaml`, and `scripts/gate.sh`), and every Python module listed in the table above must stay `>= 75%` branch-inclusive coverage (enforced via `scripts/check_critical_coverage.py`; target `>= 80%` for auth, SSRF, worker, and port boundaries).
 
 **Secrets:** `.secrets.baseline` (detect-secrets) gates commits. Regenerate with a
 fresh `detect-secrets scan` when tracked files move — do not hand-edit path entries.

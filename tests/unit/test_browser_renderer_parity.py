@@ -196,3 +196,21 @@ async def test_remote_auto_render_degrades_when_saturated() -> None:
             await renderer.render_html("https://example.com", fail_fast=True)
     finally:
         queue._browser_inflight_semaphore.release()
+
+
+@pytest.mark.unit
+@pytest.mark.port
+async def test_fake_context_executes_registered_ssrf_route_guard() -> None:
+    """`T-11`: `FakeContext` invokes registered `context.route` handlers on `FakePage.goto`."""
+    from playwright.async_api import Error as PlaywrightError
+
+    from downloader.browser.session import install_ssrf_route_guard
+    from tests.fixtures.playwright_fakes import FakeContext, FakePage
+
+    ctx = FakeContext(page=FakePage())
+    await install_ssrf_route_guard(ctx)
+    page = await ctx.new_page()
+
+    with pytest.raises(PlaywrightError, match="accessdenied"):
+        await page.goto("http://127.0.0.1:8080/internal")
+    assert len(getattr(ctx, "_ssrf_redirect_violations", [])) == 1

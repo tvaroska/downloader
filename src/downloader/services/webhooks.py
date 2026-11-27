@@ -37,17 +37,18 @@ _PROCESS_FALLBACK_KEY = secrets.token_bytes(32)
 
 
 def _derive_secret_keys(cfg: Settings) -> tuple[bytes, bytes]:
-    """Derive Encrypt-then-MAC keys from `WEBHOOK_SECRET_KEY` / `DOWNLOADER_KEY`."""
-    raw_key = (cfg.webhook.secret_key or cfg.auth.api_key or "").strip()
-    if raw_key:
-        material = raw_key.encode("utf-8")
-    elif cfg.worker.deployment_mode in {"api", "worker"}:
+    """Derive Encrypt-then-MAC keys from dedicated `WEBHOOK_SECRET_KEY` (required when Redis/worker is set)."""
+    dedicated_key = (cfg.webhook.secret_key or "").strip()
+    if dedicated_key:
+        material = dedicated_key.encode("utf-8")
+    elif cfg.redis.redis_uri or cfg.worker.deployment_mode in {"api", "worker"}:
         raise ValueError(
-            "WEBHOOK_SECRET_KEY or DOWNLOADER_KEY is required to encrypt webhook secrets "
-            "in split-worker mode"
+            "WEBHOOK_SECRET_KEY is required to encrypt or decrypt stored webhook secrets "
+            "when REDIS_URI or split-worker mode is configured"
         )
     else:
-        material = _PROCESS_FALLBACK_KEY
+        fallback_key = (cfg.auth.api_key or "").strip()
+        material = fallback_key.encode("utf-8") if fallback_key else _PROCESS_FALLBACK_KEY
     enc_key = hmac.new(material, b"downloader:webhook-secret:enc:v1", hashlib.sha256).digest()
     mac_key = hmac.new(material, b"downloader:webhook-secret:mac:v1", hashlib.sha256).digest()
     return enc_key, mac_key
@@ -70,7 +71,7 @@ def seal_webhook_secret(secret: str | None, settings: Settings | None = None) ->
     if not secret:
         return None
     if secret.startswith(WEBHOOK_SECRET_PREFIX):
-        return secret
+        raise ValueError("webhook_secret must not start with reserved 'enc:v1:' prefix")
     cfg = settings or get_settings()
     enc_key, mac_key = _derive_secret_keys(cfg)
     plaintext = secret.encode("utf-8")

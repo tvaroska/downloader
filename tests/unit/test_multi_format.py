@@ -150,3 +150,56 @@ async def test_all_formats_failed_raises_first_typed_error_and_maps_route_status
         app.dependency_overrides.pop(get_browser_renderer, None)
         app.dependency_overrides.pop(get_robots_checker, None)
         app.dependency_overrides.pop(get_http_client, None)
+
+
+@pytest.mark.unit
+def test_multi_format_pdf_and_screenshot_succeed_at_concurrency_one() -> None:
+    """`S-3`/`A-17`: `Accept: application/pdf, image/png` returns both outputs 5/5 times at `PDF_CONCURRENCY=1`."""
+    import asyncio
+    from unittest.mock import patch
+
+    from downloader.browser.renderer import LocalBrowserRenderer
+
+    single_slot_renderer = LocalBrowserRenderer(pdf_semaphore=asyncio.Semaphore(1))
+    mock_robots = MagicMock()
+    mock_robots.check_allowed = AsyncMock(return_value=None)
+
+    async def _stub_pdf(*_args: object, **_kwargs: object) -> bytes:
+        await asyncio.sleep(0.01)
+        return b"%PDF-1.7 stub"
+
+    async def _stub_shot(*_args: object, **_kwargs: object) -> bytes:
+        await asyncio.sleep(0.01)
+        return b"\x89PNG\r\n\x1a\nstub"
+
+    app.dependency_overrides[get_browser_renderer] = lambda: single_slot_renderer
+    app.dependency_overrides[get_robots_checker] = lambda: mock_robots
+    try:
+        with (
+            patch(
+                "downloader.routes.download.validate_url_async",
+                new=AsyncMock(side_effect=lambda u, *_a: u),
+            ),
+            patch(
+                "downloader.pdf_generator.generate_pdf_from_url",
+                new=AsyncMock(side_effect=_stub_pdf),
+            ),
+            patch(
+                "downloader.pdf_generator.generate_screenshot_from_url",
+                new=AsyncMock(side_effect=_stub_shot),
+            ),
+            TestClient(app) as client,
+        ):
+            for idx in range(5):
+                resp = client.get(
+                    f"/https://example.com/doc-{idx}",
+                    headers={"Accept": "application/pdf, image/png"},
+                )
+                assert resp.status_code == 200
+                payload = resp.json()
+                assert "errors" not in payload
+                assert payload["application/pdf"]
+                assert payload["image/png"]
+    finally:
+        app.dependency_overrides.pop(get_browser_renderer, None)
+        app.dependency_overrides.pop(get_robots_checker, None)

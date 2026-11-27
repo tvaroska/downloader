@@ -170,7 +170,7 @@ def test_gate_ci_and_container_structural_guards() -> None:
     cov_report = pyproject["tool"]["coverage"]["report"]
     assert cov_run.get("branch") is True
     pyproject_floor = float(cov_report["fail_under"])
-    assert pyproject_floor >= 83.0
+    assert pyproject_floor >= 88.0
 
     # 1. scripts/gate.sh structural invariants
     gate_sh = (REPO_ROOT / "scripts" / "gate.sh").read_text(encoding="utf-8")
@@ -183,7 +183,14 @@ def test_gate_ci_and_container_structural_guards() -> None:
     assert gate_cov_match is not None, "scripts/gate.sh must pass explicit --cov-fail-under"
     assert float(gate_cov_match.group(1)) >= pyproject_floor
     assert "--cov=src/downloader" in gate_sh
+    assert "scripts/check_critical_coverage.py" in gate_sh
     assert " -n auto" in gate_sh
+
+    justfile_text = (REPO_ROOT / "justfile").read_text(encoding="utf-8")
+    just_cov_match = re.search(r"--cov-fail-under=([0-9]+(?:\.[0-9]+)?)", justfile_text)
+    assert just_cov_match is not None
+    assert float(just_cov_match.group(1)) >= pyproject_floor
+    assert "scripts/check_critical_coverage.py" in justfile_text
 
     # 2. cloudbuild.yaml structural invariants
     cb = yaml_mod.safe_load((REPO_ROOT / "cloudbuild.yaml").read_text(encoding="utf-8"))
@@ -193,6 +200,7 @@ def test_gate_ci_and_container_structural_guards() -> None:
     assert "ast-grep scan --rule specs/ast.rules.yaml" in py_step_script
     assert re.search(r"mypy\b[^\n]*\bsrc/\s+tests/", py_step_script)
     assert "--cov=src/downloader" in py_step_script
+    assert "scripts/check_critical_coverage.py" in py_step_script
     cb_cov_match = re.search(r"--cov-fail-under=([0-9]+(?:\.[0-9]+)?)", py_step_script)
     assert cb_cov_match is not None
     assert float(cb_cov_match.group(1)) >= pyproject_floor

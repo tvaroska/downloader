@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
+import time
 from datetime import UTC, datetime, timedelta
 from typing import Any
 from unittest.mock import AsyncMock, MagicMock, patch
@@ -26,14 +28,45 @@ class FakeRedis:
 
     def __init__(self, *, decode_responses: bool = False) -> None:
         self.store: dict[str, tuple[str, float | None]] = {}
+        self.key_deadlines: dict[str, float] = {}
         self.lists: dict[str, list[str]] = {}
+        self.list_deadlines: dict[str, float] = {}
         self.versions: dict[str, int] = {}
         self.decode_responses = decode_responses
         self.fail_get: bool = False
         self.fail_set: bool = False
+        self._list_event: asyncio.Event | None = None
+
+    def _get_list_event(self) -> asyncio.Event:
+        if self._list_event is None:
+            self._list_event = asyncio.Event()
+        return self._list_event
+
+    def _notify_lists(self) -> None:
+        if self._list_event is not None:
+            self._list_event.set()
 
     def _bump_version(self, key: str) -> None:
         self.versions[key] = self.versions.get(key, 0) + 1
+
+    def _set_kv(self, key: str, value: str, ttl_s: float | None) -> None:
+        self.store[key] = (value, ttl_s)
+        if ttl_s is None:
+            self.key_deadlines.pop(key, None)
+        else:
+            self.key_deadlines[key] = time.monotonic() + max(0.0, ttl_s)
+
+    def _purge_if_expired(self, key: str) -> None:
+        kv_exp = self.key_deadlines.get(key)
+        if kv_exp is not None and time.monotonic() >= kv_exp:
+            self.key_deadlines.pop(key, None)
+            if self.store.pop(key, None) is not None:
+                self._bump_version(key)
+        list_exp = self.list_deadlines.get(key)
+        if list_exp is not None and time.monotonic() >= list_exp:
+            self.list_deadlines.pop(key, None)
+            if self.lists.pop(key, None) is not None:
+                self._bump_version(key)
 
     async def ping(self) -> bool:
         if self.fail_get or self.fail_set:
@@ -43,6 +76,7 @@ class FakeRedis:
     async def get(self, key: str) -> Any:
         if self.fail_get:
             raise redis.ConnectionError("simulated redis read failure")
+        self._purge_if_expired(key)
         entry = self.store.get(key)
         if entry is None:
             return None
@@ -59,32 +93,51 @@ class FakeRedis:
     ) -> bool:
         if self.fail_set:
             raise redis.ConnectionError("simulated redis write failure")
+        self._purge_if_expired(key)
         if nx and key in self.store:
             return False
         ttl_s = float(ex) if ex is not None else (float(px) / 1000.0 if px is not None else None)
-        self.store[key] = (value, ttl_s)
+        self._set_kv(key, value, ttl_s)
         self._bump_version(key)
         return True
 
     async def psetex(self, key: str, time_ms: int, value: str) -> bool:
         if self.fail_set:
             raise redis.ConnectionError("simulated redis psetex failure")
-        self.store[key] = (value, float(time_ms) / 1000.0)
+        self._set_kv(key, value, float(time_ms) / 1000.0)
         self._bump_version(key)
         return True
 
     async def setex(self, key: str, ttl: int, value: str) -> bool:
         if self.fail_set:
             raise redis.ConnectionError("simulated redis setex failure")
-        self.store[key] = (value, float(ttl))
+        self._set_kv(key, value, float(ttl))
         self._bump_version(key)
         return True
+
+    async def expire(self, key: str, ttl: int) -> bool:
+        self._purge_if_expired(key)
+        ttl_s = float(ttl)
+        deadline = time.monotonic() + max(0.0, ttl_s)
+        updated = False
+        if key in self.store:
+            self._set_kv(key, self.store[key][0], ttl_s)
+            updated = True
+        if key in self.lists:
+            self.list_deadlines[key] = deadline
+            updated = True
+        if updated:
+            self._bump_version(key)
+        return updated
 
     async def delete(self, *keys: str) -> int:
         deleted = 0
         for key in keys:
+            self._purge_if_expired(key)
             removed_kv = self.store.pop(key, None) is not None
+            self.key_deadlines.pop(key, None)
             removed_list = self.lists.pop(key, None) is not None
+            self.list_deadlines.pop(key, None)
             if removed_kv or removed_list:
                 self._bump_version(key)
                 deleted += 1
@@ -94,6 +147,8 @@ class FakeRedis:
         self, cursor: int = 0, match: str = "*", count: int = 100
     ) -> tuple[int, list[str]]:
         del cursor, count
+        for key in list(self.store) + list(self.lists):
+            self._purge_if_expired(key)
         prefix = match.rstrip("*")
         keys = sorted(
             {
@@ -104,9 +159,12 @@ class FakeRedis:
         return 0, keys
 
     async def mget(self, keys: list[str]) -> list[str | None]:
+        for key in keys:
+            self._purge_if_expired(key)
         return [self.store[k][0] if k in self.store else None for k in keys]
 
     def _eval_release_lock(self, lock_key: str, token: str) -> int:
+        self._purge_if_expired(lock_key)
         entry = self.store.get(lock_key)
         if entry is not None and entry[0] == token:
             self.store.pop(lock_key, None)
@@ -115,6 +173,7 @@ class FakeRedis:
         return 0
 
     def _eval_reclaim_batch(self, proc_key: str, pending_key: str, max_attempts: int) -> Any:
+        self._purge_if_expired(proc_key)
         bucket = self.lists.get(proc_key) or []
         if not bucket:
             return None
@@ -133,9 +192,11 @@ class FakeRedis:
             return ["dead", updated]
         self.lists.setdefault(pending_key, []).insert(0, updated)
         self._bump_version(pending_key)
+        self._notify_lists()
         return ["requeued", updated]
 
     def _eval_refund_slot(self, key: str, args: list[str]) -> int:
+        self._purge_if_expired(key)
         expected_next, delay, now_wall = float(args[0]), float(args[1]), float(args[2])
         entry = self.store.get(key)
         if entry is None or abs(float(entry[0]) - expected_next) > 0.001:
@@ -143,13 +204,15 @@ class FakeRedis:
         refunded = float(entry[0]) - delay
         if refunded <= now_wall:
             self.store.pop(key, None)
+            self.key_deadlines.pop(key, None)
         else:
             ttl_ms = max(1, int((refunded - now_wall) * 1000 + 0.5))
-            self.store[key] = (str(refunded), ttl_ms / 1000.0)
+            self._set_kv(key, str(refunded), ttl_ms / 1000.0)
         self._bump_version(key)
         return 1
 
     def _eval_reserve_slot(self, key: str, args: list[str]) -> str:
+        self._purge_if_expired(key)
         now_wall, delay = float(args[0]), float(args[1])
         max_wait = float(args[2]) if len(args) > 2 and args[2] is not None else None
         entry = self.store.get(key)
@@ -163,7 +226,7 @@ class FakeRedis:
             wait_s = 0.0
             new_next = now_wall + delay
         ttl_ms = max(1, int((new_next - now_wall) * 1000 + 0.5))
-        self.store[key] = (str(new_next), ttl_ms / 1000.0)
+        self._set_kv(key, str(new_next), ttl_ms / 1000.0)
         self._bump_version(key)
         return str(wait_s)
 
@@ -188,18 +251,23 @@ class FakeRedis:
         return self._eval_reserve_slot(keys[0], args)
 
     async def lpush(self, key: str, value: str) -> int:
+        self._purge_if_expired(key)
         bucket = self.lists.setdefault(key, [])
         bucket.insert(0, value)
         self._bump_version(key)
+        self._notify_lists()
         return len(bucket)
 
     async def rpush(self, key: str, value: str) -> int:
+        self._purge_if_expired(key)
         bucket = self.lists.setdefault(key, [])
         bucket.append(value)
         self._bump_version(key)
+        self._notify_lists()
         return len(bucket)
 
     async def lrange(self, key: str, start: int, end: int) -> list[str]:
+        self._purge_if_expired(key)
         bucket = self.lists.get(key) or []
         if end < 0:
             end_idx = len(bucket) + end + 1
@@ -207,27 +275,46 @@ class FakeRedis:
             end_idx = end + 1
         return list(bucket[start:end_idx])
 
+    async def _wait_for_list_activity(self, deadline: float | None) -> bool:
+        if deadline is None:
+            return False
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            return False
+        ev = self._get_list_event()
+        ev.clear()
+        try:
+            await asyncio.wait_for(ev.wait(), timeout=remaining)
+            return True
+        except TimeoutError:
+            return False
+
     async def blmove(
         self,
         first_list: str,
         second_list: str,
-        timeout: int = 0,
+        timeout: float = 0,
         src: str = "RIGHT",
         dest: str = "LEFT",
     ) -> str | None:
-        del timeout
-        src_bucket = self.lists.get(first_list) or []
-        if not src_bucket:
-            return None
-        item = src_bucket.pop() if src == "RIGHT" else src_bucket.pop(0)
-        self._bump_version(first_list)
-        dst_bucket = self.lists.setdefault(second_list, [])
-        if dest == "LEFT":
-            dst_bucket.insert(0, item)
-        else:
-            dst_bucket.append(item)
-        self._bump_version(second_list)
-        return item
+        deadline = time.monotonic() + float(timeout) if timeout and timeout > 0 else None
+        while True:
+            self._purge_if_expired(first_list)
+            self._purge_if_expired(second_list)
+            src_bucket = self.lists.get(first_list) or []
+            if src_bucket:
+                item = src_bucket.pop() if src == "RIGHT" else src_bucket.pop(0)
+                self._bump_version(first_list)
+                dst_bucket = self.lists.setdefault(second_list, [])
+                if dest == "LEFT":
+                    dst_bucket.insert(0, item)
+                else:
+                    dst_bucket.append(item)
+                self._bump_version(second_list)
+                self._notify_lists()
+                return item
+            if not await self._wait_for_list_activity(deadline):
+                return None
 
     async def lmove(
         self,
@@ -239,6 +326,7 @@ class FakeRedis:
         return await self.blmove(first_list, second_list, timeout=0, src=src, dest=dest)
 
     async def lrem(self, key: str, count: int, value: str) -> int:
+        self._purge_if_expired(key)
         bucket = self.lists.get(key) or []
         removed = 0
         while value in bucket and (count == 0 or removed < count):
@@ -249,26 +337,33 @@ class FakeRedis:
         return removed
 
     async def blpop(self, keys: list[str], timeout: float = 0) -> tuple[str, str] | None:
-        del timeout
-        for key in keys:
-            bucket = self.lists.get(key) or []
-            if bucket:
-                item = bucket.pop(0)
-                self._bump_version(key)
-                return key, item
-        return None
+        deadline = time.monotonic() + float(timeout) if timeout and timeout > 0 else None
+        while True:
+            for key in keys:
+                self._purge_if_expired(key)
+                bucket = self.lists.get(key) or []
+                if bucket:
+                    item = bucket.pop(0)
+                    self._bump_version(key)
+                    return key, item
+            if not await self._wait_for_list_activity(deadline):
+                return None
 
     async def brpop(self, keys: list[str], timeout: float = 0) -> tuple[str, str] | None:
-        del timeout
-        for key in keys:
-            bucket = self.lists.get(key) or []
-            if bucket:
-                item = bucket.pop()
-                self._bump_version(key)
-                return key, item
-        return None
+        deadline = time.monotonic() + float(timeout) if timeout and timeout > 0 else None
+        while True:
+            for key in keys:
+                self._purge_if_expired(key)
+                bucket = self.lists.get(key) or []
+                if bucket:
+                    item = bucket.pop()
+                    self._bump_version(key)
+                    return key, item
+            if not await self._wait_for_list_activity(deadline):
+                return None
 
     async def llen(self, key: str) -> int:
+        self._purge_if_expired(key)
         return len(self.lists.get(key) or [])
 
     def pipeline(self, transaction: bool = True) -> Any:
@@ -326,6 +421,19 @@ class _FakeRedisPipeline:
     def expire(self, key: str, ttl: int) -> _FakeRedisPipeline:
         return self._queue_op("expire", (key, ttl))
 
+    async def _apply_op(self, op: str, args: tuple[Any, ...]) -> Any:
+        if op == "setex":
+            return await self._parent.setex(str(args[0]), int(args[1]), str(args[2]))
+        if op == "lpush":
+            return await self._parent.lpush(str(args[0]), str(args[1]))
+        if op == "rpush":
+            return await self._parent.rpush(str(args[0]), str(args[1]))
+        if op == "lrem":
+            return await self._parent.lrem(str(args[0]), int(args[1]), str(args[2]))
+        if op == "expire":
+            return await self._parent.expire(str(args[0]), int(args[1]))
+        return True
+
     async def execute(self) -> list[Any]:
         try:
             if self._watched:
@@ -334,23 +442,7 @@ class _FakeRedisPipeline:
                 for key, expected_ver in self._watched.items():
                     if self._parent.versions.get(key, 0) != expected_ver:
                         raise redis.WatchError(f"Watched key {key!r} modified concurrently")
-            results: list[Any] = []
-            for op, args in self._ops:
-                if op == "setex":
-                    results.append(
-                        await self._parent.setex(str(args[0]), int(args[1]), str(args[2]))
-                    )
-                elif op == "lpush":
-                    results.append(await self._parent.lpush(str(args[0]), str(args[1])))
-                elif op == "rpush":
-                    results.append(await self._parent.rpush(str(args[0]), str(args[1])))
-                elif op == "lrem":
-                    results.append(
-                        await self._parent.lrem(str(args[0]), int(args[1]), str(args[2]))
-                    )
-                else:
-                    results.append(True)
-            return results
+            return [await self._apply_op(op, args) for op, args in self._ops]
         finally:
             self.reset()
 

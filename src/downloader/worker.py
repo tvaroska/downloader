@@ -254,6 +254,21 @@ async def process_worker_batch_envelope(  # noqa: PLR0913
                 await worker_queue.ack_batch_job(envelope.raw_payload)
 
 
+def _build_worker_policy_kwargs(
+    egress_policy: EgressPolicy | None,
+    redirect_policy: Any,
+    max_output_bytes: int | None,
+) -> dict[str, Any]:
+    kwargs: dict[str, Any] = {}
+    if egress_policy is not None:
+        kwargs["egress_policy"] = egress_policy
+    if redirect_policy is not None:
+        kwargs["redirect_policy"] = redirect_policy
+    if max_output_bytes is not None:
+        kwargs["max_output_bytes"] = max_output_bytes
+    return kwargs
+
+
 async def _execute_browser_task_payload(
     task: BrowserTaskRequest,
     actions: list[BrowserAction],
@@ -262,33 +277,30 @@ async def _execute_browser_task_payload(
     redirect_policy: Any,
     max_output_bytes: int | None,
 ) -> bytes:
+    common = _build_worker_policy_kwargs(egress_policy, redirect_policy, max_output_bytes)
     if task.kind == "pdf":
-        pdf_kwargs: dict[str, Any] = {
+        pdf_kwargs = {
             "actions": actions or None,
             "wait_for_selector": task.wait_for_selector,
+            **common,
         }
-        if max_output_bytes is not None:
-            pdf_kwargs["max_output_bytes"] = max_output_bytes
+        if task.timeout_ms is not None:
+            return await generate_pdf_from_url(task.url, {"timeout": task.timeout_ms}, **pdf_kwargs)
         return await generate_pdf_from_url(task.url, **pdf_kwargs)
     if task.kind == "screenshot":
-        ss_kwargs: dict[str, Any] = {
-            "actions": actions or None,
-            "wait_for_selector": task.wait_for_selector,
-        }
-        if max_output_bytes is not None:
-            ss_kwargs["max_output_bytes"] = max_output_bytes
+        ss_options: dict[str, Any] = {"type": task.screenshot_format, "full_page": task.full_page}
+        if task.timeout_ms is not None:
+            ss_options["timeout"] = task.timeout_ms
         return await generate_screenshot_from_url(
             task.url,
-            {"type": task.screenshot_format, "full_page": task.full_page},
-            **ss_kwargs,
+            ss_options,
+            actions=actions or None,
+            wait_for_selector=task.wait_for_selector,
+            **common,
         )
-    html_kwargs: dict[str, Any] = {"actions": actions or None}
-    if egress_policy is not None:
-        html_kwargs["egress_policy"] = egress_policy
-    if redirect_policy is not None:
-        html_kwargs["redirect_policy"] = redirect_policy
-    if max_output_bytes is not None:
-        html_kwargs["max_output_bytes"] = max_output_bytes
+    html_kwargs: dict[str, Any] = {"actions": actions or None, **common}
+    if task.timeout_ms is not None:
+        html_kwargs["timeout_ms"] = task.timeout_ms
     return await render_html_with_playwright(task.url, task.wait_for_selector, **html_kwargs)
 
 

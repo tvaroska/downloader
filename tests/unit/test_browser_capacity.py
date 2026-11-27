@@ -80,3 +80,40 @@ async def test_fourth_concurrent_render_gets_503_not_500() -> None:
         release_renders.set()
         results = await asyncio.gather(*tasks)
         assert all(r == b"%PDF-1.7 ok" for r in results)
+
+
+@pytest.mark.unit
+async def test_hold_request_slot_allows_sequential_captures_while_blocking_competing_requests() -> (
+    None
+):
+    """`S-3`: `hold_request_slot` permits sequential captures inside one request at concurrency=1."""
+    sem = asyncio.Semaphore(1)
+    renderer = LocalBrowserRenderer(pdf_semaphore=sem)
+    entered = asyncio.Event()
+    proceed = asyncio.Event()
+
+    async def _first_request() -> tuple[bytes, bytes]:
+        async with renderer.hold_request_slot("https://example.com/one"):
+            entered.set()
+            await proceed.wait()
+            pdf = await renderer.render_pdf("https://example.com/one")
+            shot = await renderer.render_screenshot("https://example.com/one")
+            return pdf, shot
+
+    with (
+        patch(
+            "downloader.pdf_generator.generate_pdf_from_url", new=AsyncMock(return_value=b"%PDF-ok")
+        ),
+        patch(
+            "downloader.pdf_generator.generate_screenshot_from_url",
+            new=AsyncMock(return_value=b"PNG-ok"),
+        ),
+    ):
+        t1 = asyncio.create_task(_first_request())
+        await entered.wait()
+        with pytest.raises(BrowserCapacityError):
+            await renderer.render_pdf("https://example.com/competing")
+        proceed.set()
+        pdf_out, shot_out = await t1
+        assert pdf_out == b"%PDF-ok"
+        assert shot_out == b"PNG-ok"

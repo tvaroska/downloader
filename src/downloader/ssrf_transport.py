@@ -90,6 +90,10 @@ class SSRFSafeHTTPTransport(httpx.AsyncHTTPTransport):
         egress_policy: EgressPolicy | None = None,
     ) -> None:
         ssl_context = httpx.create_ssl_context(verify=verify, cert=cert, trust_env=False)
+        self._ssl_context = ssl_context
+        self._network_backend: httpcore.AsyncNetworkBackend = backend or SSRFSafeNetworkBackend(
+            egress_policy=egress_policy
+        )
         self._pool = httpcore.AsyncConnectionPool(
             ssl_context=ssl_context,
             max_connections=limits.max_connections,
@@ -99,5 +103,15 @@ class SSRFSafeHTTPTransport(httpx.AsyncHTTPTransport):
             http2=http2,
             retries=retries,
             socket_options=socket_options,
-            network_backend=backend or SSRFSafeNetworkBackend(egress_policy=egress_policy),
+            network_backend=self._network_backend,
         )
+
+    @property
+    def ssl_context(self) -> ssl.SSLContext:
+        """Return the transport's `trust_env=False` SSL context."""
+        return self._ssl_context
+
+    @property
+    def network_backend(self) -> httpcore.AsyncNetworkBackend:
+        """Return the active network backend pinning validated IPs on connect."""
+        return self._network_backend

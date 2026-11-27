@@ -2,7 +2,7 @@
 
 from typing import Literal, TypedDict
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 from .browser_actions import BrowserAction
 
@@ -94,6 +94,14 @@ class BatchRequest(BaseModel):
         max_length=256,
         description="Optional HMAC-SHA256 signing secret sent via X-Downloader-Signature-256",
     )
+
+    @field_validator("webhook_secret")
+    @classmethod
+    def validate_webhook_secret(cls, v: str | None) -> str | None:
+        """Reject caller-supplied ciphertext tokens starting with `enc:v1:`."""
+        if v is not None and v.startswith("enc:v1:"):
+            raise ValueError("webhook_secret must not start with reserved 'enc:v1:' prefix")
+        return v
 
 
 class RenderRequest(BaseModel):

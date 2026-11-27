@@ -14,8 +14,9 @@ from typing import Any, Literal, Protocol, runtime_checkable
 
 from pydantic import BaseModel, Field
 
-from .config import get_settings
 from .models.browser_actions import BrowserAction, BrowserActionError
+
+DEFAULT_MAX_OUTPUT_BYTES = 50 * 1024 * 1024
 
 __all__ = [
     "ALLOWED_JOB_TRANSITIONS",
@@ -31,6 +32,7 @@ __all__ = [
     "ContentConversionError",
     "ContentTooLargeError",
     "CrawlDelayExceededError",
+    "DEFAULT_MAX_OUTPUT_BYTES",
     "DownloadError",
     "HTTPClientError",
     "HTTPTimeoutError",
@@ -213,7 +215,7 @@ def enforce_rendered_output_size(
         else (
             policy_settings.content.max_download_size
             if policy_settings is not None
-            else get_settings().content.max_download_size
+            else DEFAULT_MAX_OUTPUT_BYTES
         )
     )
     if len(payload) > cap:
@@ -305,6 +307,7 @@ class BrowserTaskRequest(BaseModel):
     actions: list[dict[str, Any]] = Field(default_factory=list)
     full_page: bool = False
     screenshot_format: Literal["png", "jpeg"] = "png"
+    timeout_ms: int | None = None
     trace_headers: dict[str, str] = Field(default_factory=dict)
     deadline: float | None = None
 
@@ -343,6 +346,7 @@ class BrowserRenderer(Protocol):
         *,
         wait_for_selector: str | None = None,
         actions: Sequence[BrowserAction] | None = None,
+        timeout_ms: int | None = None,
         fail_fast: bool = True,
     ) -> bytes | None: ...
 
@@ -358,9 +362,10 @@ class BrowserRenderer(Protocol):
         *,
         wait_for_selector: str | None = None,
         actions: Sequence[BrowserAction] | None = None,
+        timeout_ms: int | None = None,
     ) -> bytes: ...
 
-    async def render_screenshot(
+    async def render_screenshot(  # noqa: PLR0913
         self,
         url: str,
         *,
@@ -368,6 +373,7 @@ class BrowserRenderer(Protocol):
         full_page: bool = False,
         wait_for_selector: str | None = None,
         actions: Sequence[BrowserAction] | None = None,
+        timeout_ms: int | None = None,
     ) -> bytes: ...
 
 

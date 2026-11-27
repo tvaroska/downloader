@@ -30,21 +30,26 @@ rule:
 id: services-no-fastapi-imports
 language: Python
 severity: error
-message: "Port violation (R45/R95): pure core, model, and service modules must never import fastapi, starlette, redis, or playwright."
+message: "Port violation (R45/R95/A-6): pure core, model, crawling, HTTP client, and service modules must never import fastapi, starlette, redis, or playwright."
 files:
   - "src/downloader/services/**/*.py"
   - "src/downloader/models/**/*.py"
+  - "src/downloader/crawling/**/*.py"
   - "src/downloader/ports.py"
   - "src/downloader/errors.py"
   - "src/downloader/content_converter.py"
   - "src/downloader/content_encoding.py"
+  - "src/downloader/wire_stream.py"
+  - "src/downloader/http_client.py"
 metadata:
-  test_path: "src/downloader/services/probe.py"
+  test_path: "src/downloader/crawling/probe.py"
   invalid_examples:
     - "from fastapi import HTTPException, Response"
     - "import fastapi"
     - "from starlette.responses import JSONResponse"
+    - "import starlette.requests"
     - "import redis.asyncio as redis"
+    - "from redis.exceptions import RedisError"
     - "from playwright.async_api import Page"
   valid_examples:
     - "from .content_negotiation import format_to_mime_type"

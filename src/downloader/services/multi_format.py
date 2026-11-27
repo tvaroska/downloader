@@ -6,7 +6,8 @@ import asyncio
 import base64
 import json
 import logging
-from collections.abc import Sequence
+from collections.abc import AsyncIterator, Sequence
+from contextlib import asynccontextmanager
 from dataclasses import dataclass
 from typing import Any, Literal, cast
 
@@ -267,30 +268,57 @@ async def _prepare_shared_dom(
     )
 
 
-async def _run_multiple_formats(
+@asynccontextmanager
+async def _maybe_hold_browser_slot(renderer: Any, url: str) -> AsyncIterator[None]:
+    holder = getattr(renderer, "hold_request_slot", None)
+    if callable(holder):
+        async with holder(url):
+            yield
+    else:
+        yield
+
+
+async def _run_sequential_browser_formats(
+    indexed_formats: list[tuple[int, str]],
     multi_req: MultiFormatRequest,
     deps: ConversionDeps,
-) -> tuple[dict[str, Any], bool | None]:
-    """Convert a single URL into multiple requested formats, returning `(payload, rendered_with_js)`."""
-    prepared = await _prepare_shared_dom(multi_req, deps)
-    tasks = [
-        asyncio.create_task(_convert_one_format(fmt, multi_req, deps, prepared))
-        for fmt in multi_req.formats
-    ]
+    prepared: _PreparedPayload,
+    results: list[tuple[str, str] | BaseException | None],
+) -> None:
+    if not indexed_formats:
+        return
 
-    results = await asyncio.gather(*tasks, return_exceptions=True)
+    async def _run_locked() -> None:
+        async with _maybe_hold_browser_slot(deps.renderer, multi_req.url):
+            for idx, fmt in indexed_formats:
+                (outcome,) = await asyncio.gather(
+                    _convert_one_format(fmt, multi_req, deps, prepared),
+                    return_exceptions=True,
+                )
+                results[idx] = outcome
 
+    (slot_outcome,) = await asyncio.gather(_run_locked(), return_exceptions=True)
+    if isinstance(slot_outcome, BaseException):
+        for idx, _fmt in indexed_formats:
+            if results[idx] is None:
+                results[idx] = slot_outcome
+
+
+def _collect_multi_format_response(
+    formats: list[str],
+    results: list[tuple[str, str] | BaseException | None],
+) -> dict[str, Any]:
     response_dict: dict[str, Any] = {}
     errors: dict[str, str] = {}
     first_error: Exception | None = None
-    for fmt, item in zip(multi_req.formats, results, strict=False):
+    for fmt, item in zip(formats, results, strict=True):
         if isinstance(item, Exception):
             if first_error is None:
                 first_error = item
             errors[format_to_mime_type(fmt)] = f"{fmt} processing failed: {item}"
         elif isinstance(item, BaseException):
             raise item
-        else:
+        elif item is not None:
             mime_type, content_str = item
             response_dict[mime_type] = content_str
 
@@ -298,6 +326,48 @@ async def _run_multiple_formats(
         raise first_error
     if errors:
         response_dict["errors"] = errors
+    return response_dict
+
+
+async def _run_multiple_formats(
+    multi_req: MultiFormatRequest,
+    deps: ConversionDeps,
+) -> tuple[dict[str, Any], bool | None]:
+    """Convert a single URL into multiple requested formats, serializing browser captures per request."""
+    prepared = await _prepare_shared_dom(multi_req, deps)
+    results: list[tuple[str, str] | BaseException | None] = [None] * len(multi_req.formats)
+    parallel_tasks: list[tuple[int, asyncio.Task[tuple[str, str]]]] = []
+    browser_formats: list[tuple[int, str]] = []
+
+    for idx, fmt in enumerate(multi_req.formats):
+        if fmt in _BINARY_FORMATS:
+            browser_formats.append((idx, fmt))
+        else:
+            parallel_tasks.append(
+                (idx, asyncio.create_task(_convert_one_format(fmt, multi_req, deps, prepared)))
+            )
+
+    browser_runner = asyncio.create_task(
+        _run_sequential_browser_formats(browser_formats, multi_req, deps, prepared, results)
+    )
+    all_tasks: list[asyncio.Task[Any]] = [browser_runner, *(t for _, t in parallel_tasks)]
+    try:
+        if parallel_tasks:
+            parallel_outcomes = await asyncio.gather(
+                *(task for _, task in parallel_tasks),
+                return_exceptions=True,
+            )
+            for (idx, _), outcome in zip(parallel_tasks, parallel_outcomes, strict=True):
+                results[idx] = outcome
+        await browser_runner
+    finally:
+        pending = [t for t in all_tasks if not t.done()]
+        for task in pending:
+            task.cancel()
+        if pending:
+            await asyncio.gather(*pending, return_exceptions=True)
+
+    response_dict = _collect_multi_format_response(multi_req.formats, results)
     has_html_formats = any(fmt in _HTML_DERIVED_FORMATS for fmt in multi_req.formats)
     rendered_with_js: bool | None = (
         (prepared.rendered_dom is not None) if has_html_formats else None

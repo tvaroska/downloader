@@ -14,8 +14,6 @@ import httpx
 from .content_encoding import (
     extract_header_case_insensitive,
     is_text_convertible_content_type,
-    make_stateless_cookies,
-    read_bounded_response_bytes,
 )
 from .models.responses import ResponseMetadata
 from .ports import (
@@ -50,6 +48,7 @@ from .validation import (
     sanitize_user_agent,
     validate_url_async,
 )
+from .wire_stream import make_stateless_cookies, read_bounded_response_bytes
 
 logger = logging.getLogger(__name__)
 
@@ -137,6 +136,7 @@ class HTTPClient:
             backend=backend,
             egress_policy=egress_policy,
         )
+        self._transport = active_transport
 
         self._client = httpx.AsyncClient(
             timeout=timeout,
@@ -157,6 +157,21 @@ class HTTPClient:
                 "Cache-Control": "no-cache",
             },
         )
+
+    @property
+    def transport(self) -> httpx.AsyncBaseTransport:
+        """Return the configured outbound `httpx` transport."""
+        return self._transport
+
+    @property
+    def trust_env(self) -> bool:
+        """Return whether ambient proxy/TLS environment variables are trusted."""
+        return bool(self._client.trust_env)
+
+    @property
+    def has_proxy_mounts(self) -> bool:
+        """Return True if any per-scheme proxy mounts are registered on the client."""
+        return bool(self._client._mounts)
 
         logger.info(
             f"HTTP client initialized with connection pooling: "

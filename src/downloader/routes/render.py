@@ -73,6 +73,7 @@ async def render_url(  # noqa: PLR0913
             actions=render_request.actions or None,
             full_page=render_request.full_page,
             screenshot_format=render_request.screenshot_format,
+            timeout_ms=render_request.timeout_ms,
         )
         if render_request.timeout_ms is not None:
             try:

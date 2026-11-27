@@ -338,3 +338,74 @@ async def test_ssrf_route_guard_ignores_playwright_error_on_closed_context() -> 
     )
     await guard(blocked_route)
     blocked_route.abort.assert_awaited_once_with("accessdenied")
+
+
+@pytest.mark.unit
+async def test_post_render_timeout_ms_lengthens_navigation_and_selector_waits() -> None:
+    """`S-6`: `POST /render` `timeout_ms=45000` lengthens inner `goto` and `wait_for_selector` waits beyond 10s."""
+    from typing import Any, cast
+    from unittest.mock import patch
+
+    import httpx
+
+    from downloader.browser.renderer import LocalBrowserRenderer
+    from downloader.dependencies import (
+        get_browser_renderer,
+        get_domain_throttle,
+        get_robots_checker,
+    )
+    from downloader.main import app
+    from tests.fixtures.playwright_fakes import FakeBrowserPool, FakePage
+
+    page = FakePage(
+        url="https://example.com/slow", html="<html><body><div id='ready'>OK</div></body></html>"
+    )
+    pool = FakeBrowserPool(page=page)
+    gen = PlaywrightPDFGenerator(pool_size=1, page_load_timeout=30_000, idle_timeout=0.0)
+    gen.pool = cast(Any, pool)
+
+    renderer = LocalBrowserRenderer(asyncio.Semaphore(1), egress_policy=None)
+    mock_robots = MagicMock()
+    mock_robots.check_allowed = AsyncMock(return_value=None)
+    mock_throttle = MagicMock()
+    mock_throttle.wait_if_needed = AsyncMock(return_value=None)
+    app.dependency_overrides[get_browser_renderer] = lambda: renderer
+    app.dependency_overrides[get_robots_checker] = lambda: mock_robots
+    app.dependency_overrides[get_domain_throttle] = lambda: mock_throttle
+    try:
+        with (
+            patch(
+                "downloader.routes.render.validate_url_async",
+                new=AsyncMock(return_value="https://example.com/slow"),
+            ),
+            patch(
+                "downloader.browser.session.validate_url_async",
+                new=AsyncMock(return_value="https://example.com/slow"),
+            ),
+            patch("downloader.pdf_generator.get_shared_pdf_generator", return_value=gen),
+            patch("downloader.pdf_generator._pdf_generator", gen),
+        ):
+            async with httpx.AsyncClient(
+                transport=httpx.ASGITransport(app=app),
+                base_url="http://testserver",
+            ) as client:
+                for output in ("html", "pdf", "screenshot"):
+                    page.calls.clear()
+                    resp = await client.post(
+                        "/render",
+                        json={
+                            "url": "https://example.com/slow",
+                            "output": output,
+                            "wait_for": "#ready",
+                            "timeout_ms": 45_000,
+                        },
+                    )
+                    assert resp.status_code == 200, resp.text
+                    goto_calls = [c for c in page.calls if c[0] == "goto"]
+                    selector_calls = [c for c in page.calls if c[0] == "wait_for_selector"]
+                    assert goto_calls and goto_calls[0][2]["timeout"] == 45_000
+                    assert selector_calls and selector_calls[0][3] == 45_000
+    finally:
+        app.dependency_overrides.pop(get_browser_renderer, None)
+        app.dependency_overrides.pop(get_robots_checker, None)
+        app.dependency_overrides.pop(get_domain_throttle, None)

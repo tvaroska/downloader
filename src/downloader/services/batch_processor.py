@@ -30,12 +30,19 @@ from .content_processor import (
     OutputFormat,
     convert,
 )
-from .webhooks import deliver_webhook
 
 if TYPE_CHECKING:
     from ..crawling import DomainThrottle, RobotsChecker
 
 logger = logging.getLogger(__name__)
+
+
+async def deliver_webhook(*args: Any, **kwargs: Any) -> Any:
+    """Delegate outbound batch webhook delivery lazily to the HTTP webhook adapter."""
+    from .webhooks import deliver_webhook as _deliver
+
+    return await _deliver(*args, **kwargs)
+
 
 _BINARY_BATCH_FORMATS = frozenset({"pdf", "screenshot", "raw"})
 
@@ -71,12 +78,14 @@ class _LazyLocalBrowserRenderer:
         *,
         wait_for_selector: str | None = None,
         actions: Sequence[BrowserAction] | None = None,
+        timeout_ms: int | None = None,
         fail_fast: bool = True,
     ) -> bytes | None:
         return await self._get_delegate().render_html(
             url,
             wait_for_selector=wait_for_selector,
             actions=actions,
+            timeout_ms=timeout_ms,
             fail_fast=fail_fast,
         )
 
@@ -93,14 +102,16 @@ class _LazyLocalBrowserRenderer:
         *,
         wait_for_selector: str | None = None,
         actions: Sequence[BrowserAction] | None = None,
+        timeout_ms: int | None = None,
     ) -> bytes:
         return await self._get_delegate().render_pdf(
             url,
             wait_for_selector=wait_for_selector,
             actions=actions,
+            timeout_ms=timeout_ms,
         )
 
-    async def render_screenshot(
+    async def render_screenshot(  # noqa: PLR0913
         self,
         url: str,
         *,
@@ -108,6 +119,7 @@ class _LazyLocalBrowserRenderer:
         full_page: bool = False,
         wait_for_selector: str | None = None,
         actions: Sequence[BrowserAction] | None = None,
+        timeout_ms: int | None = None,
     ) -> bytes:
         return await self._get_delegate().render_screenshot(
             url,
@@ -115,6 +127,7 @@ class _LazyLocalBrowserRenderer:
             full_page=full_page,
             wait_for_selector=wait_for_selector,
             actions=actions,
+            timeout_ms=timeout_ms,
         )
 
 
@@ -258,18 +271,16 @@ async def _prepare_batch_url(
     return validated_url, sanitized_headers
 
 
-async def _convert_prepared_batch_url(  # noqa: PLR0913
+async def _convert_prepared_batch_url(
     url_request: BatchURLRequest,
-    validated_url: str,
-    sanitized_headers: dict[str, str] | None,
-    format_to_use: str,
-    timeout: int,
-    started: float,
+    prepared: tuple[str, dict[str, str] | None],
+    ctx: _BatchErrorContext,
     exec_deps: BatchExecutionDeps,
 ) -> BatchURLResult:
+    validated_url, sanitized_headers = prepared
     conv_fmt: OutputFormat = (
-        cast(OutputFormat, format_to_use)
-        if format_to_use in {"text", "markdown", "html", "pdf", "screenshot", "json"}
+        cast(OutputFormat, ctx.format_to_use)
+        if ctx.format_to_use in {"text", "markdown", "html", "pdf", "screenshot", "json"}
         else "raw"
     )
     conv_req = ConversionRequest(
@@ -284,14 +295,14 @@ async def _convert_prepared_batch_url(  # noqa: PLR0913
     conv_deps = ConversionDeps(
         renderer=exec_deps.renderer,
         http_fetcher=_make_batch_http_fetcher(
-            exec_deps.http_client, validated_url, sanitized_headers, format_to_use
+            exec_deps.http_client, validated_url, sanitized_headers, ctx.format_to_use
         ),
     )
-    conv_res = await asyncio.wait_for(convert(conv_req, conv_deps), timeout=timeout)
+    conv_res = await asyncio.wait_for(convert(conv_req, conv_deps), timeout=ctx.timeout)
     return _build_batch_success_result(
         url_request.url,
-        format_to_use,
-        time.perf_counter() - started,
+        ctx.format_to_use,
+        time.perf_counter() - ctx.started,
         conv_res,
     )
 
@@ -313,6 +324,7 @@ async def process_single_url_in_batch(  # noqa: PLR0913
     started = time.perf_counter()
     format_to_use = url_request.format or default_format
     cfg = settings or get_settings()
+    err_ctx = _BatchErrorContext(url_request.url, format_to_use, request_id, timeout, started)
     exec_deps = BatchExecutionDeps(
         http_client=http_client,
         renderer=renderer
@@ -324,24 +336,16 @@ async def process_single_url_in_batch(  # noqa: PLR0913
     )
 
     try:
-        validated_url, sanitized_headers = await _prepare_batch_url(
-            url_request, format_to_use, request_id, exec_deps, cfg
-        )
+        prepared = await _prepare_batch_url(url_request, format_to_use, request_id, exec_deps, cfg)
         return await _convert_prepared_batch_url(
             url_request,
-            validated_url,
-            sanitized_headers,
-            format_to_use,
-            timeout,
-            started,
+            prepared,
+            err_ctx,
             exec_deps,
         )
     except Exception as exc:  # noqa: BLE001
         # Isolate per-URL failures so one failing target never aborts sibling URLs in the batch.
-        return _build_batch_error_result(
-            _BatchErrorContext(url_request.url, format_to_use, request_id, timeout, started),
-            exc,
-        )
+        return _build_batch_error_result(err_ctx, exc)
 
 
 async def _ensure_job_not_cancelled(job_manager: JobStore, job_id: str) -> None:
@@ -350,15 +354,15 @@ async def _ensure_job_not_cancelled(job_manager: JobStore, job_id: str) -> None:
         raise asyncio.CancelledError(f"Job {job_id} was cancelled")
 
 
-async def _record_batch_item_progress(  # noqa: PLR0913
+async def _record_batch_item_progress(
     job_id: str,
     result: BatchURLResult,
     *,
     counts: dict[str, int],
-    total_urls: int,
-    max_aggregate_bytes: int,
     job_manager: JobStore,
 ) -> BatchURLResult:
+    max_aggregate_bytes = counts["max_bytes"]
+    total_urls = counts["total_urls"]
     result_bytes = len(result.model_dump_json().encode("utf-8"))
     if counts["result_bytes"] + result_bytes > max_aggregate_bytes and (
         result.content is not None or result.content_base64 is not None
@@ -433,7 +437,14 @@ async def process_background_batch_job(  # noqa: PLR0913
     request_semaphore = asyncio.Semaphore(concurrency_limit)
     progress_lock = asyncio.Lock()
     total_urls = max(1, len(batch_request.urls))
-    counts = {"processed": 0, "success": 0, "failed": 0, "result_bytes": 0}
+    counts = {
+        "processed": 0,
+        "success": 0,
+        "failed": 0,
+        "result_bytes": 0,
+        "total_urls": total_urls,
+        "max_bytes": max_aggregate_bytes,
+    }
 
     async def _run_item(url_request: BatchURLRequest, index: int) -> BatchURLResult:
         request_id = f"JOB-{job_id}-{index + 1:02d}"
@@ -456,17 +467,13 @@ async def process_background_batch_job(  # noqa: PLR0913
 
             if result is None and prepared is not None:
                 await _ensure_job_not_cancelled(job_manager, job_id)
-                validated_url, sanitized_headers = prepared
                 async with batch_semaphore:
                     await _ensure_job_not_cancelled(job_manager, job_id)
                     try:
                         result = await _convert_prepared_batch_url(
                             url_request,
-                            validated_url,
-                            sanitized_headers,
-                            format_to_use,
-                            timeout_per_url,
-                            err_ctx.started,
+                            prepared,
+                            err_ctx,
                             exec_deps,
                         )
                     except Exception as exc:  # noqa: BLE001
@@ -478,8 +485,6 @@ async def process_background_batch_job(  # noqa: PLR0913
                 job_id,
                 result,
                 counts=counts,
-                total_urls=total_urls,
-                max_aggregate_bytes=max_aggregate_bytes,
                 job_manager=job_manager,
             )
 

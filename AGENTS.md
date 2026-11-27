@@ -26,7 +26,7 @@ uv run --no-sync ruff format --check src/ tests/ examples/
 ast-grep scan --rule specs/ast.rules.yaml .
 uv run --no-sync mypy src/ tests/
 
-# Fast offline gate (>=83% branch coverage; smoke + unit + SDKs, no Redis/Chromium)
+# Fast offline gate (>=88% branch coverage + >=75% per CRITICAL.md module; no Redis/Chromium)
 uv run --no-sync pytest --cov=src/downloader -m "not (integration or e2e or network or requires_redis or requires_playwright)"
 uv run --no-sync pytest sdks/python/tests -c sdks/python/pyproject.toml -v
 node --test sdks/javascript/test/client.test.mjs
@@ -74,7 +74,7 @@ Full endpoint schemas live in [`spec/contracts.md`](spec/contracts.md) (`GET /he
 
 ## Testing Strategy
 
-10-marker pytest suite (`smoke`, `unit`, `integration`, `e2e`, `port`, `docker_compose`, `slow`, `network`, `requires_redis`, `requires_playwright`; `>= 83%` branch coverage enforced offline, plus SDK suites in `tests/smoke/test_sdk_suites.py` and `ast-grep` contract checks in `tests/test_isolation_guard.py`):
+10-marker pytest suite (`smoke`, `unit`, `integration`, `e2e`, `port`, `docker_compose`, `slow`, `network`, `requires_redis`, `requires_playwright`; `>= 88%` overall and `>= 75%` per-critical-module branch coverage enforced offline, plus SDK suites in `tests/smoke/test_sdk_suites.py` and `ast-grep` contract checks in `tests/test_isolation_guard.py`):
 - **`smoke`**: Auth, SSRF, rate limits, governance & ADR-005 link hygiene (`<15s`, `~106` tests including SDK & AST checks)
 - **`unit`**: Pure modules, Ports/Adapters parity, mocked routes (`tests/conftest.py` offline DNS guard)
 - **`integration`**: Real Chromium SSRF redirect (`requires_playwright`) and Redis queue (`requires_redis`)
@@ -92,7 +92,7 @@ All defaults live in [`.env.example`](.env.example) and [`spec/contracts.md`](sp
 - **Auth & Docs:** `DOWNLOADER_KEY` (Settings-only `secrets.compare_digest` on all routes except `GET /health`, including `/metrics*`; required when `ENVIRONMENT=production` unless `AUTH_ALLOW_UNAUTHENTICATED_PRODUCTION=true`). Production disables `/docs`, `/redoc`, and `/openapi.json` (`404`). Default `CORS_ALLOWED_ORIGINS` is localhost-only.
 - **SSRF & Size Caps:** `SSRF_BLOCK_PRIVATE_IPS=true` (async DNS + pinned `SSRFSafeHTTPTransport` with `trust_env=False`, `3xx` redirect checks, `BrowserEgressProxy`, `service_workers="block"`, `accept_downloads=False`, and `context.route("**/*", ...)`). `CONTENT_MAX_DOWNLOAD_SIZE=52428800` (`50 MB` -> `413` on HTTP streams and rendered browser outputs).
 - **Crawling & Rate Limits:** `RESPECT_ROBOTS_TXT=true`, `USER_AGENT`, `MAX_CRAWL_DELAY=30.0` (RFC 9309 `*`/`$` + 60s negative TTL; bounded waits -> `429 Retry-After`; Playwright uses `Chrome/120` UA unless `USER_AGENT` is set while `robots.txt` uses `REST-API-Downloader/1.0`). `RATELIMIT_ENABLED=true` + `RATELIMIT_TRUSTED_PROXIES` (auth vs unauth buckets).
-- **Runtime & Ops:** `REDIS_URI`, `PDF_POOL_SIZE=3`, `PDF_CONCURRENCY<=PDF_POOL_SIZE`, `OCR_ENABLED=true` (`OCR_MAX_IMAGE_PIXELS=25000000`, dedicated `downloader-ocr` pool), `WEBHOOK_ENABLED=true` (HMAC-SHA256, sealed via `WEBHOOK_SECRET_KEY`), `SHUTDOWN_DRAIN_TIMEOUT=30.0`, `SHUTDOWN_PRE_STOP_DELAY=2.0`, `DEPLOYMENT_MODE=all|api|worker`, `WORKER_MAX_ATTEMPTS=3`, `OTEL_ENABLED=false`, non-root `:8000`.
+- **Runtime & Ops:** `REDIS_URI`, `PDF_POOL_SIZE=3`, `PDF_CONCURRENCY<=PDF_POOL_SIZE`, `PDF_WAIT_UNTIL=domcontentloaded`, `OCR_ENABLED=true` (`OCR_MAX_IMAGE_PIXELS=25000000`, dedicated `downloader-ocr` pool), `WEBHOOK_ENABLED=true` (HMAC-SHA256, sealed via dedicated `WEBHOOK_SECRET_KEY` when `REDIS_URI` or split-worker mode is set), `SHUTDOWN_DRAIN_TIMEOUT=30.0`, `SHUTDOWN_PRE_STOP_DELAY=2.0` (fails `/health` `503` during pre-stop while still serving live traffic; set Kubernetes `terminationGracePeriodSeconds >= 40`), `DEPLOYMENT_MODE=all|api|worker`, `WORKER_MAX_ATTEMPTS=3`, `OTEL_ENABLED=false`, non-root `:8000`.
 
 ## Planning & Backlog Workflow (Roadmap-First, No `TODO.md`)
 
@@ -108,7 +108,7 @@ Upcoming milestones and unscheduled backlog live in [`docs/roadmap.md`](docs/roa
 | `docs/` | Guides (`docs/guides/*.md`) & completed feature baselines (`docs/features/*.md`) |
 
 ### Verification Ladder
-- **T1 (commit gate):** `gate test downloader` (`uv lock --check`, `ruff`, `mypy src/ tests/`, offline `pytest -n auto --cov=src/downloader --cov-fail-under=83` with `ast-grep` and Python/JS/Go SDK tests).
+- **T1 (commit gate):** `gate test downloader` (`uv lock --check`, `ruff`, `mypy src/ tests/`, offline `pytest -n auto --cov=src/downloader --cov-fail-under=88` + `scripts/check_critical_coverage.py` with `ast-grep` and Python/JS/Go SDK tests).
 - **T2 (milestone gate):** Run relevant `integration` / Redis / Playwright suites, archive shipped milestones (`gate roadmap-archive downloader --done`), and log decisions in `DECISIONS.md`.
 - **T3 (release gate):** Full container + Trivy `os,library` + real Redis/Chromium CI (`cloudbuild.yaml` / `ship downloader`).
 

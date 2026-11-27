@@ -23,10 +23,10 @@ from ..models.schedule import (
     ScheduleExecutionListResponse,
     ScheduleListResponse,
     ScheduleResponse,
-    cron_trigger_from_unix_crontab,
 )
 from ..scheduler import SchedulerService
-from ..services.webhooks import open_webhook_secret, seal_webhook_secret
+from ..scheduler.cron import cron_trigger_from_unix_crontab
+from ..services.webhooks import seal_webhook_secret
 from ..validation import (
     URLValidationError,
     redact_url_for_log,
@@ -160,17 +160,13 @@ async def scheduled_download_job(  # noqa: PLR0913
             f"[SCHEDULE-{schedule_id}] Starting execution: {redact_url_for_log(url)} (format={format})"
         )
         try:
-            resolved_secret = open_webhook_secret(
-                webhook_secret_enc or webhook_secret,
-                getattr(_executor, "_settings", None) or get_settings(),
-            )
             execution = await _executor.execute(
                 schedule_id,
                 url,
                 format,
                 headers,
                 webhook_url=webhook_url,
-                webhook_secret=resolved_secret,
+                webhook_secret=webhook_secret_enc or webhook_secret,
             )
             if execution.success:
                 logger.info(
